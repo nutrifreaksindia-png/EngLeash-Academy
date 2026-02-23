@@ -1,0 +1,10 @@
+backend/node_modules/
+backend/.env
+backend/data/*.db
+backend/uploads/
+mobile-app/node_modules/
+mobile-app/.expo/
+tv-app/.gradle/
+tv-app/app/build/
+*.log
+.DS_Store

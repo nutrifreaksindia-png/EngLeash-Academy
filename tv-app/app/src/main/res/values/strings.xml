@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">EngLeash Academy</string>
+    <string name="login_title">Lab sign in</string>
+    <string name="email_hint">Email</string>
+    <string name="password_hint">Password</string>
+    <string name="sign_in">Sign in</string>
+    <string name="courses_title">Courses</string>
+    <string name="lessons_title">Lessons</string>
+    <string name="loading">Loading…</string>
+</resources>
