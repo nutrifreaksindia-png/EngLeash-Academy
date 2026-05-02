@@ -215,16 +215,21 @@ export function parseQuizPaste(text) {
       }
       q.optionsText = raw;
     } else if (type === 'matching') {
-      // Prefer matching_pairs; fall back to mcq_options when paste omits the empty mcq column
-      // (common mistake: ...points,"pairs..."  instead of ...points,,,"pairs...")
+      // Order after points: mcq_options (9), matching_pairs (10), fill_blanks (11).
+      // Use TWO commas before opening quote for pairs: ...points,,"Left=>Right" (empty mcq only).
+      // THREE commas ...points,,," puts the quoted block in fill_blanks — we recover that below.
       let raw = idxPairs >= 0 ? String(r[idxPairs] || '').trim() : '';
       if (!raw && idxMcq >= 0) {
         raw = String(r[idxMcq] || '').trim();
       }
+      if (!raw && idxBlanks >= 0) {
+        const misplaced = String(r[idxBlanks] || '').trim();
+        if (misplaced.includes('=>')) raw = misplaced;
+      }
       if (!raw) {
         return {
           ok: false,
-          error: `Row ${i + 2}: matching pairs missing — put pairs in the matching_pairs column, or after points leave mcq_options empty and use: ...points,,,"Left => Right" (note the extra commas before the quote).`,
+          error: `Row ${i + 2}: matching pairs missing. After points use two commas then quotes: ...2,,"Line1 => A\nLine2 => B" (one empty mcq column). If you used three commas before the quote, the text went into the wrong column — fix commas or upgrade the app.`,
         };
       }
       const pairLines = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
