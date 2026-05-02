@@ -752,11 +752,12 @@ export default function App() {
   }
 
   async function createQuizBank(payload) {
-    await apiFetch('/quizzes/v2', token, {
+    const created = await apiFetch('/quizzes/v2', token, {
       method: 'POST',
       body: JSON.stringify(payload),
     });
     await loadAll();
+    return created;
   }
 
   async function getQuizBankDetails(id) {

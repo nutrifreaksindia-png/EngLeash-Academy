@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import SectionCard from '../components/SectionCard';
+import { parseQuizPaste, QUIZ_PASTE_HEADER } from '../utils/parseQuizPaste';
 
 const QUESTION_TYPES = [
   { value: 'mcq_single', label: 'Multiple Choice (single)' },
@@ -87,6 +88,8 @@ export default function QuizBankPage({
   const [assignRequired, setAssignRequired] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [pasteText, setPasteText] = useState('');
+  const [pasteHint, setPasteHint] = useState('');
 
   const selectedVersions = detail?.versions || [];
   const selectedAssignments = detail?.assignments || [];
@@ -121,10 +124,68 @@ export default function QuizBankPage({
     e.preventDefault();
     setBusy(true);
     setError('');
+    setPasteHint('');
     try {
-      await onCreateQuiz({ title: createTitle, description: createDescription, status: 'draft' });
+      const created = await onCreateQuiz({ title: createTitle, description: createDescription, status: 'draft' });
       setCreateTitle('');
       setCreateDescription('');
+      if (created?.id) await pickQuiz(created.id);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function applyPasteToEditor(parsed) {
+    setQuestions(parsed.questions.length ? parsed.questions : [emptyQuestion()]);
+    setVersionTitle(parsed.meta.versionTitle || '');
+    setPassingPct(Number.isFinite(Number(parsed.meta.passingPct)) ? Number(parsed.meta.passingPct) : 60);
+    setTimeLimitSec(
+      parsed.meta.timeLimitSec === '' || parsed.meta.timeLimitSec == null
+        ? ''
+        : String(parsed.meta.timeLimitSec),
+    );
+  }
+
+  async function pasteIntoOpenQuiz() {
+    setError('');
+    setPasteHint('');
+    const result = parseQuizPaste(pasteText);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    if (!selectedQuizId || !canMutateDetail) {
+      setError('Open one of your quizzes first, then load the paste into the editor.');
+      return;
+    }
+    applyPasteToEditor(result);
+    setPasteHint(`Loaded ${result.questions.length} question(s) into the editor. Review and click “Publish New Version”.`);
+  }
+
+  async function pasteCreateDraftQuiz() {
+    setBusy(true);
+    setError('');
+    setPasteHint('');
+    try {
+      const result = parseQuizPaste(pasteText);
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+      const created = await onCreateQuiz({
+        title: result.meta.title,
+        description: result.meta.description || '',
+        status: 'draft',
+      });
+      if (!created?.id) throw new Error('Create quiz did not return an id.');
+      setSelectedQuizId(created.id);
+      applyPasteToEditor(result);
+      await refreshDetails(created.id);
+      setPasteHint(
+        `Draft quiz “${result.meta.title}” created with ${result.questions.length} question(s). Review below, then Publish New Version.`,
+      );
     } catch (e) {
       setError(e.message);
     } finally {
@@ -193,6 +254,57 @@ export default function QuizBankPage({
   return (
     <div className="stack">
       {error ? <div className="partialErrorBox">{error}</div> : null}
+      {pasteHint ? <div className="banner success">{pasteHint}</div> : null}
+
+      <SectionCard
+        title="Paste quiz content"
+        subtitle="Paste CSV-style text from ChatGPT or a spreadsheet (one quiz per paste). Then create a new draft or load into the open quiz."
+      >
+        <details className="muted" style={{ marginBottom: 12 }}>
+          <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Required header row (copy as first line)</summary>
+          <pre
+            style={{
+              margin: '8px 0 0',
+              padding: 10,
+              background: '#f8fafc',
+              border: '1px solid #e2e8f0',
+              borderRadius: 8,
+              fontSize: 11,
+              overflow: 'auto',
+              lineHeight: 1.4,
+            }}
+          >
+            {QUIZ_PASTE_HEADER}
+          </pre>
+          <p className="muted" style={{ margin: '8px 0 0' }}>
+            Types: <code>mcq_single</code>, <code>mcq_multi</code>, <code>matching</code>, <code>fill_blank</code>. MCQ options: one per line; correct line(s) start with <code>*</code>. Matching: lines like <code>Left =&gt; Right</code>. Blanks: <code>key =&gt; answer</code>.
+          </p>
+        </details>
+        <textarea
+          className="courseTextarea"
+          style={{ minHeight: 140, fontFamily: 'ui-monospace, monospace', fontSize: 12 }}
+          placeholder={`${QUIZ_PASTE_HEADER}\n"My Quiz","desc","v1",60,,1,mcq_single,"Pick one:",1,"*Yes\\nNo\\nMaybe",,`}
+          value={pasteText}
+          onChange={(e) => setPasteText(e.target.value)}
+        />
+        <div className="row" style={{ marginTop: 10 }}>
+          <button type="button" className="secondaryBtn" onClick={pasteCreateDraftQuiz} disabled={busy || !pasteText.trim()}>
+            Create draft quiz from paste
+          </button>
+          <button
+            type="button"
+            className="secondaryBtn"
+            onClick={pasteIntoOpenQuiz}
+            disabled={busy || !pasteText.trim() || !selectedQuizId || !canMutateDetail}
+          >
+            Load paste into open quiz (editor)
+          </button>
+        </div>
+        <p className="muted" style={{ margin: '10px 0 0', fontSize: 13 }}>
+          After loading, edit questions below as usual, then <strong>Publish New Version</strong>. Use <strong>Create draft quiz from paste</strong> when the quiz does not exist yet.
+        </p>
+      </SectionCard>
+
       <SectionCard title="Quiz Bank" subtitle="Reusable quizzes assignable to multiple courses and lessons">
         <form className="formGrid" onSubmit={createQuiz}>
           <input placeholder="Quiz title" value={createTitle} onChange={(e) => setCreateTitle(e.target.value)} required />
