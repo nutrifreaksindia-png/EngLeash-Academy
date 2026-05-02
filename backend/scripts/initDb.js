@@ -1,6 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
+const { ensureV1Tables } = require('../migrations/v1');
 
 const dataDir = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
@@ -13,7 +14,7 @@ db.exec(`
     email TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
     name TEXT,
-    role TEXT NOT NULL CHECK(role IN ('Admin', 'Trainer', 'Student', 'Lab')),
+    role TEXT NOT NULL CHECK(role IN ('Admin', 'Trainer', 'Student', 'Lab', 'Creator')),
     created_at TEXT DEFAULT (datetime('now'))
   );
 
@@ -86,10 +87,86 @@ db.exec(`
     attempted_at TEXT DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS sessions (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    token_jti TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    session_type TEXT NOT NULL CHECK(session_type IN ('group', 'one_to_one')),
+    trainer_id INTEGER NOT NULL REFERENCES users(id),
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS batch_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+    student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    joined_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(batch_id, student_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS live_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    agora_channel TEXT NOT NULL UNIQUE,
+    starts_at TEXT NOT NULL,
+    ends_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'scheduled' CHECK(status IN ('scheduled', 'live', 'ended', 'cancelled')),
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS live_session_participants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    joined_at TEXT DEFAULT (datetime('now')),
+    left_at TEXT,
+    UNIQUE(live_session_id, user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS live_session_speakers (
+    live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    promoted_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (live_session_id, user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS live_session_hands (
+    live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    raised_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (live_session_id, user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS live_session_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id),
+    event_type TEXT NOT NULL,
+    detail TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_live_session_logs_session ON live_session_logs(live_session_id);
+
   CREATE INDEX IF NOT EXISTS idx_lessons_course ON lessons(course_id);
   CREATE INDEX IF NOT EXISTS idx_enrollments_user ON enrollments(user_id);
   CREATE INDEX IF NOT EXISTS idx_enrollments_course ON enrollments(course_id);
+  CREATE INDEX IF NOT EXISTS idx_batches_trainer ON batches(trainer_id);
+  CREATE INDEX IF NOT EXISTS idx_batch_members_student ON batch_members(student_id);
+  CREATE INDEX IF NOT EXISTS idx_live_sessions_batch ON live_sessions(batch_id);
+  CREATE INDEX IF NOT EXISTS idx_live_sessions_starts_at ON live_sessions(starts_at);
 `);
+ensureV1Tables(db);
 
 console.log('Database initialized at', dbPath);
 db.close();

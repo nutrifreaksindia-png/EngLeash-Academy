@@ -11,8 +11,15 @@ function auth(req, res, next) {
   const token = header.slice(7);
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    const user = db.prepare('SELECT id, email, name, role FROM users WHERE id = ?').get(payload.userId);
-    if (!user) return res.status(401).json({ error: 'User not found' });
+    const user = db.prepare('SELECT id, email, name, role, status FROM users WHERE id = ?').get(payload.userId);
+    if (!user) return res.status(401).json({ error: 'User not found', code: 'SESSION_REPLACED' });
+    if (user.status && user.status !== 'approved') {
+      return res.status(403).json({ error: 'Account is not active', status: user.status });
+    }
+    const session = db.prepare('SELECT token_jti FROM sessions WHERE user_id = ?').get(user.id);
+    if (!session || session.token_jti !== (payload.jti || '')) {
+      return res.status(401).json({ error: 'Session replaced by another device', code: 'SESSION_REPLACED' });
+    }
     req.user = user;
     next();
   } catch (e) {

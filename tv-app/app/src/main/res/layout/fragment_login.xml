@@ -2,15 +2,22 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#1a237e"
+    android:background="@color/black"
     android:gravity="center"
     android:orientation="vertical"
     android:padding="48dp">
+    <ImageView
+        android:layout_width="280dp"
+        android:layout_height="80dp"
+        android:contentDescription="@string/app_name"
+        android:scaleType="fitCenter"
+        android:src="@drawable/logo_long" />
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
         android:text="EngLeash Academy"
-        android:textColor="#c41e3a"
+        android:textColor="@color/logo_red"
         android:textSize="32sp"
         android:textStyle="bold" />
     <TextView
@@ -18,36 +25,36 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
         android:text="Lab – Sign in"
-        android:textColor="#FFFFFF"
+        android:textColor="@color/white"
         android:textSize="18sp" />
     <EditText
         android:id="@+id/email"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="32dp"
+        android:background="@drawable/edit_bg"
         android:hint="@string/email_hint"
         android:inputType="textEmailAddress"
         android:padding="16dp"
-        android:textColor="#000"
-        android:textColorHint="#888"
-        android:background="@drawable/edit_bg" />
+        android:textColor="@color/black"
+        android:textColorHint="#80000000" />
     <EditText
         android:id="@+id/password"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
+        android:background="@drawable/edit_bg"
         android:hint="@string/password_hint"
         android:inputType="textPassword"
         android:padding="16dp"
-        android:textColor="#000"
-        android:textColorHint="#888"
-        android:background="@drawable/edit_bg" />
+        android:textColor="@color/black"
+        android:textColorHint="#80000000" />
     <Button
         android:id="@+id/signIn"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="24dp"
-        android:backgroundTint="#c41e3a"
+        android:backgroundTint="@color/logo_red"
         android:text="@string/sign_in"
-        android:textColor="#FFFFFF" />
+        android:textColor="@color/white" />
 </LinearLayout>

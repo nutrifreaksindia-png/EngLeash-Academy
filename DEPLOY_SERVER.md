@@ -72,7 +72,7 @@ API_URL=http://72.61.224.223:3001
 STORAGE_URL=http://72.61.224.223:3001/uploads
 ```
 
-- Replace `72.61.224.223` with your **domain** if you have one (e.g. `https://api.engleashacademy.com`), and use `https` if you set up SSL.
+- Replace `72.61.224.223` with your **domain** if you have one (e.g. `https://api.engleashacademy.in`), and use `https` if you set up SSL.
 - For `JWT_SECRET`, use a long random string (e.g. run `openssl rand -base64 32` and paste the result).
 
 Save and exit (Ctrl+O, Enter, Ctrl+X in nano).
@@ -210,7 +210,7 @@ On your Mac, edit the mobile app config:
 - **File:** `EngLeash-Academy/mobile-app/src/config.ts`
 - Set the production API base URL. For example, if using the IP:
 
-  - Change the production URL from `https://api.engleashacademy.com` to `http://72.61.224.223:3001`,  
+  - Change the production URL from `https://api.engleashacademy.in` to `http://72.61.224.223:3001`,  
   **or**
   - If you later use a domain and HTTPS, set it to `https://your-domain.com`.
 
@@ -231,11 +231,11 @@ Then rebuild or restart Expo and test the app against the server.
 
 ## Optional: Use a domain and HTTPS
 
-If you have a domain (e.g. `api.engleashacademy.com`) pointing to `72.61.224.223`:
+If you have a domain (e.g. `api.engleashacademy.in`) pointing to `72.61.224.223`:
 
 1. Install Nginx and a certificate (e.g. Certbot for Let’s Encrypt).
 2. Configure Nginx as a reverse proxy to `http://127.0.0.1:3001`.
-3. In `.env` set `API_URL=https://api.engleashacademy.com` and `STORAGE_URL=https://api.engleashacademy.com/uploads`.
+3. In `.env` set `API_URL=https://api.engleashacademy.in` and `STORAGE_URL=https://api.engleashacademy.in/uploads`.
 4. Restart the API: `pm2 restart engleash-api`.
 
-Then use `https://api.engleashacademy.com` in the mobile app config for production.
+Then use `https://api.engleashacademy.in` in the mobile app config for production.

@@ -85,5 +85,5 @@ Copy into the apps when you’re ready:
 1. Complete [HOSTINGER_SETUP.md](./HOSTINGER_SETUP.md) (domain, DB, SSL, storage).
 2. In `backend`, add a `.env` with `PORT`, `JWT_SECRET`, `API_URL`, `STORAGE_URL`, and (if you switch) MySQL vars.
 3. Upload the backend (e.g. Git deploy or FTP), run `npm install --production`, `npm run init-db` (if using SQLite there), then start the app (e.g. `node server.js` or PM2).
-4. In **mobile-app** and **tv-app**, set the API base URL to your Hostinger API (e.g. `https://api.engleashacademy.com`).
+4. In **mobile-app** and **tv-app**, set the API base URL to your Hostinger API (e.g. `https://api.engleashacademy.in`).
 5. Rebuild and test the Android and TV apps against the live API.

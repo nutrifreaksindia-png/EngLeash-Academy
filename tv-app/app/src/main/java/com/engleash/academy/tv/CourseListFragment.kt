@@ -29,13 +29,16 @@ class CourseListFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             Api.getCourses().fold(
                 onSuccess = { courses ->
-                    list.adapter = ArrayAdapter(requireContext(), android.R.layout.simple_list_item_1, courses.map { it.name })
+                    list.adapter = ArrayAdapter(requireContext(), R.layout.list_item, courses.map { it.name })
                     list.onItemClickListener = AdapterView.OnItemClickListener { _, _, position, _ ->
                         val c = courses[position]
                         (activity as? MainActivity)?.showLessons(c.id, c.name)
                     }
                 },
-                onFailure = { Toast.makeText(requireContext(), it.message ?: "Failed to load", Toast.LENGTH_SHORT).show() }
+                onFailure = {
+                    if (it.message == "SESSION_REPLACED") (activity as? MainActivity)?.sessionReplaced()
+                    else Toast.makeText(requireContext(), it.message ?: "Failed to load", Toast.LENGTH_SHORT).show()
+                }
             )
         }
     }

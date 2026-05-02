@@ -38,7 +38,7 @@ class LessonListFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             Api.getLessons(courseId).fold(
                 onSuccess = { lessons ->
-                    list.adapter = ArrayAdapter(requireContext(), android.R.layout.simple_list_item_1, lessons.map { it.title })
+                    list.adapter = ArrayAdapter(requireContext(), R.layout.list_item, lessons.map { it.title })
                     list.onItemClickListener = AdapterView.OnItemClickListener { _, _, position, _ ->
                         val lesson = lessons[position]
                         viewLifecycleOwner.lifecycleScope.launch {
@@ -46,12 +46,18 @@ class LessonListFragment : Fragment() {
                                 onSuccess = { detail ->
                                     (activity as? MainActivity)?.playVideo(detail.id, detail.title, detail.videoUrl)
                                 },
-                                onFailure = { Toast.makeText(requireContext(), it.message ?: "Failed", Toast.LENGTH_SHORT).show() }
+                                onFailure = {
+                                    if (it.message == "SESSION_REPLACED") (activity as? MainActivity)?.sessionReplaced()
+                                    else Toast.makeText(requireContext(), it.message ?: "Failed", Toast.LENGTH_SHORT).show()
+                                }
                             )
                         }
                     }
                 },
-                onFailure = { Toast.makeText(requireContext(), it.message ?: "Failed to load lessons", Toast.LENGTH_SHORT).show() }
+                onFailure = {
+                    if (it.message == "SESSION_REPLACED") (activity as? MainActivity)?.sessionReplaced()
+                    else Toast.makeText(requireContext(), it.message ?: "Failed to load lessons", Toast.LENGTH_SHORT).show()
+                }
             )
         }
     }

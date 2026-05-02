@@ -27,7 +27,7 @@ This plan covers **requirements first**, then **backend**, then **Android app**,
 On your Hostinger account, create or have ready:
 
 1. **Domain / subdomain**  
-   - e.g. `api.engleashacademy.com` or `academy.yourdomain.com` for the API.
+   - e.g. `api.engleashacademy.in` or `academy.yourdomain.com` for the API.
 
 2. **Web hosting or VPS**  
    - Node.js (recommended) or PHP; enough for API + DB.
@@ -41,7 +41,7 @@ On your Hostinger account, create or have ready:
 
 5. **Storage**  
    - Space for: lesson videos (streaming), class notes PDFs, worksheet PDFs.  
-   - Option: separate “storage” subdomain or path (e.g. `https://storage.engleashacademy.com/...`).
+   - Option: separate “storage” subdomain or path (e.g. `https://storage.engleashacademy.in/...`).
 
 6. **Environment variables (later)**  
    - Backend will need: `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `JWT_SECRET`, `API_URL`, `STORAGE_URL`, etc.
@@ -90,7 +90,7 @@ Build the API that both Android and Android TV apps will use.
 - Point domain to Node app (e.g. via reverse proxy or Node process manager like PM2).
 - Upload/store videos and PDFs in the chosen storage path; serve via API or direct URLs with token/expiry if needed.
 
-**Deliverable:** Working API base URL (e.g. `https://api.engleashacademy.com`), all above endpoints implemented and tested (e.g. Postman).
+**Deliverable:** Working API base URL (e.g. `https://api.engleashacademy.in`), all above endpoints implemented and tested (e.g. Postman).
 
 ---
 

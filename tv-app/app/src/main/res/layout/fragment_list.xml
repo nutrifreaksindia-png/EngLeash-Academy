@@ -2,6 +2,7 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@color/black"
     android:orientation="vertical"
     android:padding="32dp">
     <LinearLayout
@@ -13,31 +14,38 @@
             android:id="@+id/back"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:padding="16dp"
-            android:textColor="#FFFFFF"
-            android:textSize="18sp"
             android:focusable="true"
             android:clickable="true"
-            android:background="?attr/selectableItemBackground" />
+            android:padding="16dp"
+            android:textColor="@color/white"
+            android:textSize="18sp" />
+        <ImageView
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:contentDescription="@string/app_name"
+            android:scaleType="centerCrop"
+            android:src="@drawable/logo_icon" />
         <TextView
             android:id="@+id/title"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:gravity="center"
-            android:textColor="#c41e3a"
+            android:textColor="@color/logo_red"
             android:textSize="28sp"
             android:textStyle="bold" />
-        <View android:layout_width="80dp" android:layout_height="1dp" />
+        <View
+            android:layout_width="80dp"
+            android:layout_height="1dp" />
     </LinearLayout>
     <ListView
         android:id="@+id/list"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:layout_marginTop="24dp"
-        android:background="#1a1a1a"
-        android:divider="#333"
-        android:dividerHeight="1dp"
+        android:background="@color/logo_blue"
         android:choiceMode="singleChoice"
+        android:divider="@color/black"
+        android:dividerHeight="1dp"
         android:drawSelectorOnTop="false" />
 </LinearLayout>

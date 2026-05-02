@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="120dp"
+    android:height="120dp"
+    android:viewportWidth="120"
+    android:viewportHeight="120">
+    <!-- Blue circle background -->
+    <path
+        android:fillColor="#025590"
+        android:pathData="M60,60m-50,0a50,50 0,1 1,100 0a50,50 0,1 1,-100 0" />
+    <!-- Red stylized E / book mark -->
+    <path
+        android:fillColor="#ef3f3e"
+        android:pathData="M36,32 L84,32 L84,40 L44,40 L44,56 L76,56 L76,64 L44,64 L44,88 L36,88 Z" />
+</vector>

@@ -1,5 +1,6 @@
 package com.engleash.academy.tv
 
+import android.app.AlertDialog
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -25,10 +26,31 @@ class LoginFragment : Fragment() {
             }
             viewLifecycleOwner.lifecycleScope.launch {
                 Api.login(email, password, requireContext()).fold(
-                    onSuccess = { (activity as? MainActivity)?.onLoginSuccess() },
+                    onSuccess = { result ->
+                        when (result) {
+                            is LoginResult.Success -> (activity as? MainActivity)?.onLoginSuccess()
+                            is LoginResult.AlreadyLoggedIn -> showAlreadyLoggedInDialog(view, email, password, result.deviceName)
+                        }
+                    },
                     onFailure = { Toast.makeText(requireContext(), it.message ?: "Login failed", Toast.LENGTH_LONG).show() }
                 )
             }
         }
+    }
+
+    private fun showAlreadyLoggedInDialog(view: View, email: String, password: String, deviceName: String) {
+        AlertDialog.Builder(requireContext())
+            .setTitle("Already logged in")
+            .setMessage("Already logged in on another device: $deviceName. Do you want to log out from $deviceName and sign in here?")
+            .setPositiveButton("Yes, sign in here") { _, _ ->
+                viewLifecycleOwner.lifecycleScope.launch {
+                    Api.replaceSession(email, password, requireContext()).fold(
+                        onSuccess = { (activity as? MainActivity)?.onLoginSuccess() },
+                        onFailure = { Toast.makeText(requireContext(), it.message ?: "Failed", Toast.LENGTH_LONG).show() }
+                    )
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 }

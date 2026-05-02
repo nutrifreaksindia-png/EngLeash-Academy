@@ -6,7 +6,7 @@ Use this list to create everything needed on Hostinger **before** backend develo
 
 ## 1. Domain / Subdomain
 
-- [ ] Decide API base URL, e.g. `https://api.engleashacademy.com` or `https://academy.yourdomain.com`
+- [ ] Decide API base URL, e.g. `https://api.engleashacademy.in` or `https://academy.yourdomain.com`
 - [ ] In Hostinger: create **subdomain** or point domain to your hosting
 - [ ] Ensure **SSL (HTTPS)** is enabled (Let’s Encrypt or Hostinger SSL)
 
@@ -41,7 +41,7 @@ Use this list to create everything needed on Hostinger **before** backend develo
 - [ ] Options:
   - **Same server:** e.g. folder `public/uploads/` or `storage/` served via API or nginx
   - **Hostinger File Manager:** upload via API to a dedicated folder; serve via URL
-- [ ] Note the **base URL** for files (e.g. `https://api.engleashacademy.com/uploads/` or a separate subdomain)
+- [ ] Note the **base URL** for files (e.g. `https://api.engleashacademy.in/uploads/` or a separate subdomain)
 
 ---
 
@@ -56,8 +56,8 @@ When you build the backend, you will need at least:
 | `DB_PASSWORD` | `***`                  | Database password  |
 | `DB_NAME` | `u123_academy`            | Database name      |
 | `JWT_SECRET` | long random string     | Signing key for JWT |
-| `API_URL` | `https://api.engleashacademy.com` | Public API base (for CORS / links) |
-| `STORAGE_URL` | `https://api.engleashacademy.com/uploads` | Base URL for files |
+| `API_URL` | `https://api.engleashacademy.in` | Public API base (for CORS / links) |
+| `STORAGE_URL` | `https://api.engleashacademy.in/uploads` | Base URL for files |
 
 - [ ] Generate a strong **JWT_SECRET** (e.g. 32+ random characters)
 - [ ] In Hostinger: find where to set **environment variables** for your Node/PHP app (e.g. `.env` file or panel)
@@ -75,7 +75,7 @@ When you build the backend, you will need at least:
 
 Before starting backend development, have ready:
 
-1. **API base URL** (e.g. `https://api.engleashacademy.com`)
+1. **API base URL** (e.g. `https://api.engleashacademy.in`)
 2. **Database:** host, name, user, password
 3. **JWT_SECRET** (generated and stored safely)
 4. **Storage path / URL** for videos and PDFs
