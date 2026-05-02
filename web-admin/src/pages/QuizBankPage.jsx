@@ -277,7 +277,7 @@ export default function QuizBankPage({
             {QUIZ_PASTE_HEADER}
           </pre>
           <p className="muted" style={{ margin: '8px 0 0' }}>
-            Types: <code>mcq_single</code>, <code>mcq_multi</code>, <code>matching</code>, <code>fill_blank</code>. MCQ options: one per line; correct line(s) start with <code>*</code>. Matching: lines like <code>Left =&gt; Right</code>. Blanks: <code>key =&gt; answer</code>.
+            MCQ options: one per line, correct lines start with <code>*</code>. Matching / blanks need the right column — or extra commas after <code>points</code> so quoted text lines up; the parser also accepts matching pairs pasted in the mcq column. Quote prompts that contain commas.
           </p>
         </details>
         <textarea

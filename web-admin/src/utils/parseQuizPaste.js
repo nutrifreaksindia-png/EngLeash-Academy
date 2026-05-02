@@ -215,9 +215,17 @@ export function parseQuizPaste(text) {
       }
       q.optionsText = raw;
     } else if (type === 'matching') {
-      const raw = idxPairs >= 0 ? String(r[idxPairs] || '').trim() : '';
+      // Prefer matching_pairs; fall back to mcq_options when paste omits the empty mcq column
+      // (common mistake: ...points,"pairs..."  instead of ...points,,,"pairs...")
+      let raw = idxPairs >= 0 ? String(r[idxPairs] || '').trim() : '';
+      if (!raw && idxMcq >= 0) {
+        raw = String(r[idxMcq] || '').trim();
+      }
       if (!raw) {
-        return { ok: false, error: `Row ${i + 2}: matching_pairs required.` };
+        return {
+          ok: false,
+          error: `Row ${i + 2}: matching pairs missing — put pairs in the matching_pairs column, or after points leave mcq_options empty and use: ...points,,,"Left => Right" (note the extra commas before the quote).`,
+        };
       }
       const pairLines = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
       if (pairLines.length < 2) {
@@ -230,9 +238,11 @@ export function parseQuizPaste(text) {
       }
       q.pairsText = raw;
     } else if (type === 'fill_blank') {
-      const raw = idxBlanks >= 0 ? String(r[idxBlanks] || '').trim() : '';
+      let raw = idxBlanks >= 0 ? String(r[idxBlanks] || '').trim() : '';
+      if (!raw && idxMcq >= 0) raw = String(r[idxMcq] || '').trim();
+      if (!raw && idxPairs >= 0) raw = String(r[idxPairs] || '').trim();
       if (!raw) {
-        return { ok: false, error: `Row ${i + 2}: fill_blanks required.` };
+        return { ok: false, error: `Row ${i + 2}: fill_blanks required (key => answer per line).` };
       }
       const blankLines = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
       if (blankLines.length < 1) {
