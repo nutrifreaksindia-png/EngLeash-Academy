@@ -103,8 +103,8 @@ export default function App() {
   const [token, setToken] = useState('');
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [busyLogin, setBusyLogin] = useState(false);
-  const [email, setEmail] = useState('admin@engleash.com');
-  const [password, setPassword] = useState('password123');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [users, setUsers] = useState([]);
   const [pendingUsers, setPendingUsers] = useState([]);
   const [courses, setCourses] = useState([]);
@@ -789,9 +789,7 @@ export default function App() {
 
   if (!authReady) {
     return (
-      <div className="app">
-        <h1>EngLeash Web Admin</h1>
-        <StatusBanner error={error} message={message} />
+      <div className="loginAppRoot">
         <LoginCard
           email={email}
           password={password}
@@ -799,6 +797,7 @@ export default function App() {
           setPassword={setPassword}
           onLogin={doLogin}
           busy={busyLogin}
+          error={error}
         />
       </div>
     );
