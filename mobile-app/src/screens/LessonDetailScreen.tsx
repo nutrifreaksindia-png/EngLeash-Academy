@@ -1,0 +1,163 @@
+import React, { useEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import { ScreenPageTitle } from '../components/ScreenPageTitle';
+import { api } from '../api/client';
+import { useAuth } from '../context/AuthContext';
+
+const BRAND_RED = '#c41e3a';
+const BRAND_BLUE = '#1a237e';
+
+type LessonData = {
+  id: number;
+  title: string;
+  videoUrl: string | null;
+  allowVideoDownload: boolean;
+  classNotes: { id: number; title: string; fileUrl: string }[];
+  worksheets: { id: number; title: string; fileUrl: string }[];
+  quiz: { id: number; title: string; questions: { id: number; question_text: string; options: string[] }[] } | null;
+  quizAssignments?: { id: number; quiz_title?: string }[];
+  videoAssignments?: { id: number; video_id: number; video_title?: string; video_description?: string; video_url?: string }[];
+  studyMaterialAssignments?: { id: number; material_id: number; material_title?: string; material_description?: string }[];
+};
+
+export default function LessonDetailScreen({ route, navigation }: any) {
+  const { lessonId, lessonTitle } = route.params;
+  const { user } = useAuth();
+  const [data, setData] = useState<LessonData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.get(`/lessons/${lessonId}`)
+      .then(setData)
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
+  }, [lessonId]);
+
+  if (loading) {
+    return (
+      <View style={styles.pageRoot}>
+        <ScreenPageTitle title={lessonTitle || 'Lesson'} />
+        <View style={styles.centered}>
+          <ActivityIndicator size="large" color={BRAND_RED} />
+        </View>
+      </View>
+    );
+  }
+  if (!data) {
+    return (
+      <View style={styles.pageRoot}>
+        <ScreenPageTitle title={lessonTitle || 'Lesson'} />
+        <View style={styles.centered}>
+          <Text style={styles.error}>Failed to load lesson.</Text>
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.pageRoot}>
+      <ScreenPageTitle title={data.title || lessonTitle || 'Lesson'} />
+      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+
+      {(data.videoAssignments || []).length > 0 ? (
+        (data.videoAssignments || []).map((v) => (
+          <TouchableOpacity
+            key={`vid-${v.id}`}
+            style={styles.section}
+            onPress={() => navigation.navigate('VideoPlayer', { lessonId, videoUrl: v.video_url, allowDownload: data.allowVideoDownload })}
+          >
+            <Text style={styles.sectionTitle}>{v.video_title || 'Lesson video'}</Text>
+            <Text style={styles.sectionSub}>{v.video_description || `Stream only${!data.allowVideoDownload ? ' (no download)' : ''}`}</Text>
+          </TouchableOpacity>
+        ))
+      ) : (
+        <TouchableOpacity
+          style={styles.section}
+          onPress={() => navigation.navigate('VideoPlayer', { lessonId, videoUrl: data.videoUrl, allowDownload: data.allowVideoDownload })}
+        >
+          <Text style={styles.sectionTitle}>Lesson video</Text>
+          <Text style={styles.sectionSub}>Stream only{!data.allowVideoDownload ? ' (no download)' : ''}</Text>
+        </TouchableOpacity>
+      )}
+
+      {data.classNotes.length > 0 && (
+        <TouchableOpacity
+          style={styles.section}
+          onPress={() => navigation.navigate('ClassNotes', { notes: data.classNotes })}
+        >
+          <Text style={styles.sectionTitle}>Class notes</Text>
+          <Text style={styles.sectionSub}>View & download</Text>
+        </TouchableOpacity>
+      )}
+
+      {data.quiz && (
+        <TouchableOpacity
+          style={styles.section}
+          onPress={() => navigation.navigate('Quiz', { lessonId, quiz: data.quiz })}
+        >
+          <Text style={styles.sectionTitle}>Quiz</Text>
+          <Text style={styles.sectionSub}>{data.quiz.questions.length} questions</Text>
+        </TouchableOpacity>
+      )}
+
+      {!data.quiz && (data.quizAssignments || []).length > 0 && (
+        <TouchableOpacity
+          style={styles.section}
+          onPress={() => navigation.navigate('Quiz', { lessonId, assignmentId: data.quizAssignments?.[0]?.id })}
+        >
+          <Text style={styles.sectionTitle}>Quiz</Text>
+          <Text style={styles.sectionSub}>{data.quizAssignments?.[0]?.quiz_title || 'Assigned quiz'}</Text>
+        </TouchableOpacity>
+      )}
+
+      {(data.studyMaterialAssignments || []).length > 0 && (
+        (data.studyMaterialAssignments || []).map((m) => (
+          <TouchableOpacity
+            key={`sm-${m.id}`}
+            style={styles.section}
+            onPress={() => navigation.navigate('StudyMaterial', { materialId: m.material_id, materialTitle: m.material_title || 'Study material' })}
+          >
+            <Text style={styles.sectionTitle}>{m.material_title || 'Study material'}</Text>
+            <Text style={styles.sectionSub}>{m.material_description || 'Rich content for this lesson'}</Text>
+          </TouchableOpacity>
+        ))
+      )}
+
+      {data.worksheets.length > 0 && (
+        <TouchableOpacity
+          style={styles.section}
+          onPress={() => navigation.navigate('Worksheet', { worksheets: data.worksheets })}
+        >
+          <Text style={styles.sectionTitle}>Worksheet</Text>
+          <Text style={styles.sectionSub}>View & download</Text>
+        </TouchableOpacity>
+      )}
+    </ScrollView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  pageRoot: { flex: 1, backgroundColor: '#f5f5f5' },
+  container: { flex: 1, backgroundColor: '#f5f5f5' },
+  content: { padding: 20, paddingBottom: 40 },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  error: { color: '#c62828', fontSize: 16 },
+  section: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: BRAND_RED,
+  },
+  sectionTitle: { fontSize: 17, fontWeight: '600', color: '#333' },
+  sectionSub: { fontSize: 14, color: '#666', marginTop: 4 },
+});

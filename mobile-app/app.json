@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "EngLeash Academy",
+    "slug": "engleash-academy",
+    "version": "1.0.0",
+    "scheme": "engleashacademy",
+    "platforms": ["ios", "android"],
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "icon": "./assets/icon.png",
+    "splash": { "backgroundColor": "#1a237e" },
+    "assetBundlePatterns": ["**/*"],
+    "ios": { "supportsTablet": true, "bundleIdentifier": "com.engleash.academy" },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.engleash.academy"
+    },
+    "packagerOpts": { "port": 8082 }
+  }
+}

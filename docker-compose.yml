@@ -14,8 +14,8 @@ services:
 
   web:
     build:
-      context: ./web-admin
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: web-admin/Dockerfile
       args:
         VITE_API_BASE: ${VITE_API_BASE:-https://api.engleashacademy.com}
     restart: unless-stopped
