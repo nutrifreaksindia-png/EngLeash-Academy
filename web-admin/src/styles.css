@@ -252,7 +252,6 @@ button:hover {
   display: block;
   width: clamp(48px, 12vw, 72px);
   height: auto;
-  filter: brightness(0) invert(1);
 }
 
 .loginFormPanel {
