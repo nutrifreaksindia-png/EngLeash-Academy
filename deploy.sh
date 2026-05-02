@@ -10,4 +10,4 @@ fi
 docker compose build
 docker compose up -d --remove-orphans
 docker compose ps
-echo "If this server runs other sites on port 80: use host nginx + deploy/nginx-host-engleash.conf (API→127.0.0.1:3001, app→127.0.0.1:8080)."
+echo "Multi-site VPS: host nginx + deploy/nginx-host-engleash.conf → API 127.0.0.1:13001, app 127.0.0.1:18080 (see compose if remapped)."
