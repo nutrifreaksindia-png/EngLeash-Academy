@@ -93,6 +93,16 @@ router.get('/:id', auth, (req, res) => {
         OR (a.scope_type = 'course' AND a.scope_id = ?))
      ORDER BY a.order_index, a.id`
   ).all(lesson.id, lesson.course_id);
+  const libraryWorksheetAssignments = db.prepare(
+    `SELECT a.id, a.worksheet_id, a.scope_type, a.scope_id, a.is_required, a.order_index,
+            w.title AS worksheet_title, w.description AS worksheet_description, w.content_json
+     FROM worksheet_assignments a
+     JOIN worksheet_library w ON w.id = a.worksheet_id
+     WHERE COALESCE(w.is_draft, 0) = 0
+       AND ((a.scope_type = 'lesson' AND a.scope_id = ?)
+        OR (a.scope_type = 'course' AND a.scope_id = ?))
+     ORDER BY a.order_index, a.id`
+  ).all(lesson.id, lesson.course_id);
   const allowVideoDownload = req.user.role === 'Admin';
   const videoUrl = lesson.video_url
     ? (lesson.video_url.startsWith('http') ? lesson.video_url : `${baseUrl}${lesson.video_url}`)
@@ -108,6 +118,7 @@ router.get('/:id', auth, (req, res) => {
     quizAssignments,
     videoAssignments,
     studyMaterialAssignments,
+    libraryWorksheetAssignments,
   });
 });
 

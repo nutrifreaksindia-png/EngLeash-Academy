@@ -27,6 +27,7 @@ const NAV_SECTIONS = [
     items: [
       { id: 'videos', label: 'Videos' },
       { id: 'study-materials', label: 'Study Materials' },
+      { id: 'worksheets', label: 'Worksheets' },
       { id: 'quizzes', label: 'Quiz Bank' },
       { id: 'assignments', label: 'Assignments' },
     ],

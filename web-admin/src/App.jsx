@@ -13,12 +13,13 @@ import QuizBankPage from './pages/QuizBankPage';
 import VideosPage from './pages/VideosPage';
 import SettingsPage from './pages/SettingsPage';
 import StudyMaterialsPage from './pages/StudyMaterialsPage';
+import WorksheetsPage from './pages/WorksheetsPage';
 import SectionCard from './components/SectionCard';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
 
 const WEB_ADMIN_ROLES = ['Admin', 'Creator'];
-const CREATOR_ALLOWED_PAGES = new Set(['videos', 'study-materials', 'quizzes', 'assignments']);
+const CREATOR_ALLOWED_PAGES = new Set(['videos', 'study-materials', 'worksheets', 'quizzes', 'assignments']);
 
 async function apiFetch(path, token, options = {}) {
   const res = await fetch(`${API_BASE}/api${path}`, {
@@ -115,6 +116,7 @@ export default function App() {
   const [videos, setVideos] = useState([]);
   const [videoCategories, setVideoCategories] = useState([]);
   const [studyMaterials, setStudyMaterials] = useState([]);
+  const [worksheets, setWorksheets] = useState([]);
   const [selectedBatchId, setSelectedBatchId] = useState('');
   const [batchSessions, setBatchSessions] = useState([]);
   const [cancelAuditRows, setCancelAuditRows] = useState([]);
@@ -198,13 +200,14 @@ export default function App() {
       setCurrentUser(me);
 
       if (me.role === 'Creator') {
-        const [c, l, q, v, vc, sm] = await Promise.all([
+        const [c, l, q, v, vc, sm, ws] = await Promise.all([
           apiFetchSafe('/courses', nextToken),
           apiFetchSafe('/lessons/admin/all', nextToken),
           apiFetchSafe('/quizzes/v2', nextToken),
           apiFetchSafe('/videos', nextToken),
           apiFetchSafe('/videos/categories', nextToken),
           apiFetchSafe('/study-materials', nextToken),
+          apiFetchSafe('/worksheets', nextToken),
         ]);
         setUsers([]);
         setPendingUsers([]);
@@ -222,6 +225,8 @@ export default function App() {
         else setVideoCategories([]);
         if (sm.ok) setStudyMaterials(Array.isArray(sm.data) ? sm.data : []);
         else setStudyMaterials([]);
+        if (ws.ok) setWorksheets(Array.isArray(ws.data) ? ws.data : []);
+        else setWorksheets([]);
         setHealth(null);
         setLoadErrors([
           !c.ok ? `/courses: ${c.error}` : null,
@@ -230,11 +235,12 @@ export default function App() {
           !v.ok ? `/videos: ${v.error}` : null,
           !vc.ok ? `/videos/categories: ${vc.error}` : null,
           !sm.ok ? `/study-materials: ${sm.error}` : null,
+          !ws.ok ? `/worksheets: ${ws.error}` : null,
         ].filter(Boolean));
         return;
       }
 
-      const [u, pu, c, l, b, h, q, v, vc, sm] = await Promise.all([
+      const [u, pu, c, l, b, h, q, v, vc, sm, ws] = await Promise.all([
         apiFetchSafe('/users', nextToken),
         apiFetchSafe('/users/pending', nextToken),
         apiFetchSafe('/courses', nextToken),
@@ -245,6 +251,7 @@ export default function App() {
         apiFetchSafe('/videos', nextToken),
         apiFetchSafe('/videos/categories', nextToken),
         apiFetchSafe('/study-materials', nextToken),
+        apiFetchSafe('/worksheets', nextToken),
       ]);
 
       if (u.ok) setUsers(Array.isArray(u.data) ? u.data : []);
@@ -257,6 +264,7 @@ export default function App() {
       if (v.ok) setVideos(Array.isArray(v.data) ? v.data : []);
       if (vc.ok) setVideoCategories(Array.isArray(vc.data) ? vc.data : []);
       if (sm.ok) setStudyMaterials(Array.isArray(sm.data) ? sm.data : []);
+      if (ws.ok) setWorksheets(Array.isArray(ws.data) ? ws.data : []);
 
       const errs = [
         !u.ok ? `/users: ${u.error}` : null,
@@ -269,6 +277,7 @@ export default function App() {
         !v.ok ? `/videos: ${v.error}` : null,
         !vc.ok ? `/videos/categories: ${vc.error}` : null,
         !sm.ok ? `/study-materials: ${sm.error}` : null,
+        !ws.ok ? `/worksheets: ${ws.error}` : null,
       ].filter(Boolean);
       setLoadErrors(errs);
     } catch (e) {
@@ -293,6 +302,7 @@ export default function App() {
     setVideos([]);
     setVideoCategories([]);
     setStudyMaterials([]);
+    setWorksheets([]);
     setBatchSessions([]);
     setCancelAuditRows([]);
     setBatchMembers([]);
@@ -751,6 +761,43 @@ export default function App() {
     return data;
   }
 
+  async function createWorksheet(payload) {
+    const created = await apiFetch('/worksheets', token, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    await loadAll();
+    return created;
+  }
+
+  async function updateWorksheet(id, payload) {
+    await apiFetch(`/worksheets/${id}`, token, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+    await loadAll();
+  }
+
+  async function deleteWorksheet(id) {
+    await apiFetch(`/worksheets/${id}`, token, { method: 'DELETE' });
+    await loadAll();
+  }
+
+  async function uploadWorksheetAsset(id, payload) {
+    const body = new FormData();
+    body.append('assetType', payload.assetType || 'image');
+    body.append('file', payload.file);
+    const res = await fetch(`${API_BASE}/api/worksheets/${id}/assets`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Worksheet asset upload failed');
+    await loadAll();
+    return data;
+  }
+
   async function createQuizBank(payload) {
     const created = await apiFetch('/quizzes/v2', token, {
       method: 'POST',
@@ -784,6 +831,13 @@ export default function App() {
     await apiFetch(`/quizzes/v2/${id}/assignments`, token, {
       method: 'POST',
       body: JSON.stringify(payload),
+    });
+    await loadAll();
+  }
+
+  async function deleteQuizBank(id) {
+    await apiFetch(`/quizzes/v2/${id}`, token, {
+      method: 'DELETE',
     });
     await loadAll();
   }
@@ -900,6 +954,7 @@ export default function App() {
         onUpdateQuiz={updateQuizBank}
         onPublishVersion={publishQuizVersion}
         onAssignQuiz={assignQuiz}
+        onDeleteQuiz={deleteQuizBank}
       />
     );
   } else if (currentPage === 'videos') {
@@ -927,6 +982,18 @@ export default function App() {
         onUpdate={updateStudyMaterial}
         onDelete={deleteStudyMaterial}
         onUploadAsset={uploadStudyMaterialAsset}
+      />
+    );
+  } else if (currentPage === 'worksheets') {
+    page = (
+      <WorksheetsPage
+        worksheets={worksheets}
+        showCreatedBy={showCreatedBy}
+        libraryCanMutate={libraryCanMutate}
+        onCreate={createWorksheet}
+        onUpdate={updateWorksheet}
+        onDelete={deleteWorksheet}
+        onUploadAsset={uploadWorksheetAsset}
       />
     );
   } else if (currentPage === 'settings') {

@@ -1457,8 +1457,8 @@ function duplicateStudyBlock(block) {
   return next;
 }
 
-export default function StudyMaterialsPage({
-  materials,
+export default function WorksheetsPage({
+  worksheets,
   showCreatedBy = false,
   libraryCanMutate = () => true,
   onCreate,
@@ -1482,7 +1482,6 @@ export default function StudyMaterialsPage({
   function cloneDoc(d) {
     return JSON.parse(JSON.stringify(d));
   }
-  /** Push previous doc to undo stack, then apply updater (block-structure edits only — not per-keystroke typing). */
   function commitDoc(updater) {
     setDoc((prev) => {
       undoStackRef.current.push(cloneDoc(prev));
@@ -1529,14 +1528,14 @@ export default function StudyMaterialsPage({
   const [activeCropKey, setActiveCropKey] = useState('');
   const [cropPosition, setCropPosition] = useState({ x: 0, y: 0 });
   const pasteAreaRef = useRef(null);
-  const [viewingMaterial, setViewingMaterial] = useState(null);
+  const [viewingWorksheet, setViewingWorksheet] = useState(null);
   const [draftNotice, setDraftNotice] = useState('');
   const [editorIsDraft, setEditorIsDraft] = useState(false);
   const [creatingDraft, setCreatingDraft] = useState(false);
   const [autosaveStatus, setAutosaveStatus] = useState('idle'); // idle | saving | saved | error
 
   const lastPersistedSnapshotRef = useRef('');
-  const newMaterialSessionRef = useRef(0);
+  const newWorksheetSessionRef = useRef(0);
   const autosaveClearSavedTimerRef = useRef(null);
   const onUpdateRef = useRef(onUpdate);
   const onCreateRef = useRef(onCreate);
@@ -1554,15 +1553,15 @@ export default function StudyMaterialsPage({
 
   const filtered = useMemo(() => {
     const needle = q.toLowerCase().trim();
-    if (!needle) return materials || [];
-    return (materials || []).filter((m) =>
+    if (!needle) return worksheets || [];
+    return (worksheets || []).filter((m) =>
       String(m.title || '').toLowerCase().includes(needle) || String(m.description || '').toLowerCase().includes(needle)
     );
-  }, [materials, q]);
+  }, [worksheets, q]);
 
   const editingLibraryRow = useMemo(
-    () => (materials || []).find((m) => m.id === editingId) ?? null,
-    [materials, editingId],
+    () => (worksheets || []).find((w) => w.id === editingId) ?? null,
+    [worksheets, editingId],
   );
   const canDeleteFromEditor =
     Boolean(editingId) &&
@@ -1683,17 +1682,17 @@ export default function StudyMaterialsPage({
 
   async function uploadAssetForBlock(blockId, assetTypeValue, fileOrDraft, opts = {}) {
     if (!fileOrDraft) return;
-    let materialId = editingId;
-    if (!materialId) {
+    let worksheetId = editingId;
+    if (!worksheetId) {
       const created = await onCreate({
         title: title?.trim() || 'Untitled draft',
         description,
         contentJson: doc,
         isDraft: true,
       });
-      materialId = created?.id;
-      if (!materialId) return;
-      setEditingId(materialId);
+      worksheetId = created?.id;
+      if (!worksheetId) return;
+      setEditingId(worksheetId);
     }
     try {
       setUploadingBlockId(blockId);
@@ -1705,7 +1704,7 @@ export default function StudyMaterialsPage({
           uploadFile = await optimizeImageAtRatio(fileOrDraft, opts.cropRatio || '16:9');
         }
       }
-      const row = await onUploadAsset(Number(materialId), {
+      const row = await onUploadAsset(Number(worksheetId), {
         assetType: assetTypeValue === 'carousel' ? 'image' : assetTypeValue,
         file: uploadFile,
       });
@@ -1866,7 +1865,7 @@ export default function StudyMaterialsPage({
   }
 
   function resetEditor() {
-    newMaterialSessionRef.current += 1;
+    newWorksheetSessionRef.current += 1;
     lastPersistedSnapshotRef.current = '';
     undoStackRef.current = [];
     setAutosaveStatus('idle');
@@ -1889,9 +1888,9 @@ export default function StudyMaterialsPage({
     setPreviewPopup(null);
   }
 
-  async function openNewMaterialCreator() {
-    newMaterialSessionRef.current += 1;
-    const session = newMaterialSessionRef.current;
+  async function openNewWorksheetCreator() {
+    newWorksheetSessionRef.current += 1;
+    const session = newWorksheetSessionRef.current;
     undoStackRef.current = [];
     setEditingId(null);
     setTitle('');
@@ -1918,13 +1917,13 @@ export default function StudyMaterialsPage({
         isDraft: true,
         is_draft: true,
       });
-      if (newMaterialSessionRef.current !== session) return;
+      if (newWorksheetSessionRef.current !== session) return;
       if (!created?.id) throw new Error('Could not create draft');
       setEditingId(created.id);
       setEditorIsDraft(true);
       lastPersistedSnapshotRef.current = normalizedEditorSnapshot('', '', emptyDoc, true);
     } catch (err) {
-      if (newMaterialSessionRef.current === session) {
+      if (newWorksheetSessionRef.current === session) {
         window.alert(err?.message || 'Could not create draft. Try again.');
         resetEditor();
       }
@@ -2043,10 +2042,10 @@ export default function StudyMaterialsPage({
   async function deleteCurrentFromEditor() {
     if (!editingId || creatingDraft) return;
     if (editingLibraryRow && !libraryCanMutate(editingLibraryRow)) {
-      window.alert('You can only delete materials you created (or as staff).');
+      window.alert('You can only delete worksheets you created (or as staff).');
       return;
     }
-    if (!window.confirm('Delete this study material from the library? This cannot be undone.')) return;
+    if (!window.confirm('Delete this worksheet from the library? This cannot be undone.')) return;
     setDraftNotice('');
     try {
       await onDelete(editingId);
@@ -2073,10 +2072,10 @@ export default function StudyMaterialsPage({
 
   return (
     <div className="stack">
-      <SectionCard title="Study Material Library" subtitle="Reusable rich learning content with mobile preview parity">
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search study materials" />
+      <SectionCard title="Worksheet Library" subtitle="Reusable rich learning content with mobile preview parity">
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search worksheets" />
         <div className="row">
-          <button type="button" className="uploadPrimaryBtn" onClick={() => openNewMaterialCreator()}>
+          <button type="button" className="uploadPrimaryBtn" onClick={() => openNewWorksheetCreator()}>
             + Open Full Screen Creator
           </button>
         </div>
@@ -2105,7 +2104,7 @@ export default function StudyMaterialsPage({
                     <td>{isDraft ? <span className="studyDraftBadge">Draft</span> : <span className="muted">Published</span>}</td>
                     <td>
                       <div className="row studyMaterialRowActions">
-                        <button type="button" className="secondaryBtn" onClick={() => setViewingMaterial(m)}>
+                        <button type="button" className="secondaryBtn" onClick={() => setViewingWorksheet(m)}>
                           View
                         </button>
                         {libraryCanMutate(m) ? (
@@ -2117,7 +2116,7 @@ export default function StudyMaterialsPage({
                               type="button"
                               className="dangerBtn"
                               onClick={async () => {
-                                if (!window.confirm('Delete this study material from the library? This cannot be undone.')) return;
+                                if (!window.confirm('Delete this worksheet from the library? This cannot be undone.')) return;
                                 await onDelete(m.id);
                               }}
                             >
@@ -2135,37 +2134,37 @@ export default function StudyMaterialsPage({
         </div>
       </SectionCard>
 
-      {viewingMaterial ? (
+      {viewingWorksheet ? (
         <div
           className="studyViewOverlay"
           role="presentation"
-          onClick={() => setViewingMaterial(null)}
+          onClick={() => setViewingWorksheet(null)}
         >
-          <div className="studyViewModal" role="dialog" aria-labelledby="study-view-title" onClick={(e) => e.stopPropagation()}>
+          <div className="studyViewModal" role="dialog" aria-labelledby="worksheet-view-title" onClick={(e) => e.stopPropagation()}>
             <div className="modalHead">
-              <h3 id="study-view-title">{viewingMaterial.title || 'Study material'}</h3>
-              <button type="button" className="secondaryBtn" onClick={() => setViewingMaterial(null)}>
+              <h3 id="worksheet-view-title">{viewingWorksheet.title || 'Worksheet'}</h3>
+              <button type="button" className="secondaryBtn" onClick={() => setViewingWorksheet(null)}>
                 Close
               </button>
             </div>
-            {viewingMaterial.description ? (
-              <p className="fieldHint" style={{ marginTop: 0 }}>{viewingMaterial.description}</p>
+            {viewingWorksheet.description ? (
+              <p className="fieldHint" style={{ marginTop: 0 }}>{viewingWorksheet.description}</p>
             ) : null}
-            {Number(viewingMaterial.is_draft) === 1 ? (
-              <p className="studyDraftBanner">This material is a draft and is hidden from learners until published.</p>
+            {Number(viewingWorksheet.is_draft) === 1 ? (
+              <p className="studyDraftBanner">This worksheet is a draft and is hidden from learners until published.</p>
             ) : null}
             <div className="studyViewPreviewWrap">
-              <Preview blocks={safeParse(viewingMaterial.content_json).blocks} cropDrafts={{}} />
+              <Preview blocks={safeParse(viewingWorksheet.content_json).blocks} cropDrafts={{}} />
             </div>
             <div className="row" style={{ marginTop: 12 }}>
-              {libraryCanMutate(viewingMaterial) ? (
+              {libraryCanMutate(viewingWorksheet) ? (
                 <>
                   <button
                     type="button"
                     className="secondaryBtn"
                     onClick={() => {
-                      startEdit(viewingMaterial);
-                      setViewingMaterial(null);
+                      startEdit(viewingWorksheet);
+                      setViewingWorksheet(null);
                     }}
                   >
                     Edit in creator
@@ -2174,16 +2173,16 @@ export default function StudyMaterialsPage({
                     type="button"
                     className="dangerBtn"
                     onClick={async () => {
-                      if (!window.confirm('Delete this study material from the library? This cannot be undone.')) return;
-                      await onDelete(viewingMaterial.id);
-                      setViewingMaterial(null);
+                      if (!window.confirm('Delete this worksheet from the library? This cannot be undone.')) return;
+                      await onDelete(viewingWorksheet.id);
+                      setViewingWorksheet(null);
                     }}
                   >
                     Delete
                   </button>
                 </>
               ) : (
-                <p className="muted" style={{ margin: 0 }}>You can view this material; only the author or staff can edit or delete it.</p>
+                <p className="muted" style={{ margin: 0 }}>You can view this worksheet; only the author or staff can edit or delete it.</p>
               )}
             </div>
           </div>
@@ -2195,7 +2194,7 @@ export default function StudyMaterialsPage({
           <form className="studyFullscreenShell" onSubmit={submit}>
             <div className="studyFullscreenTopbar studyFullscreenTopbar--editorTools">
               <div className="studyTopInputs">
-                <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Study material title (required to publish)" />
+                <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Worksheet title (required to publish)" />
                 <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description" />
                 {editorIsDraft ? <span className="studyDraftBadge studyDraftBadgeLarge">Draft</span> : null}
                 {creatingDraft ? (

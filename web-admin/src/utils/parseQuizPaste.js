@@ -1,11 +1,13 @@
 /**
  * Parse pasted CSV (RFC-style quoted fields, multiline cells) into quiz editor state.
  * Expected header:
- * quiz_title,quiz_description,version_title,passing_pct,time_limit_sec,question_index,type,prompt,points,mcq_options,matching_pairs,fill_blanks
+ * quiz_title,...,prompt1,prompt2,...,feedback,fill_case_sensitive
  */
 
+import { emptyQuestion, normalizeEditorQuestion } from './quizQuestionFormat.js';
+
 export const QUIZ_PASTE_HEADER =
-  'quiz_title,quiz_description,version_title,passing_pct,time_limit_sec,question_index,type,prompt,points,mcq_options,matching_pairs,fill_blanks';
+  'quiz_title,quiz_description,version_title,passing_pct,time_limit_sec,question_index,type,prompt1,prompt2,points,mcq_options,matching_pairs,fill_blanks,feedback,fill_case_sensitive';
 
 const TYPE_ALIASES = {
   mcq_single: 'mcq_single',
@@ -98,15 +100,11 @@ function normalizeType(raw) {
   return TYPE_ALIASES[k] || null;
 }
 
-function emptyEditorQuestion() {
-  return {
-    type: 'mcq_single',
-    prompt: '',
-    points: 1,
-    optionsText: '',
-    pairsText: '',
-    blanksText: '',
-  };
+function parseBoolCell(raw) {
+  const s = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  return ['1', 'true', 'yes', 'y', 'on'].includes(s);
 }
 
 /**
@@ -116,6 +114,11 @@ export function parseQuizPaste(text) {
   const rows = parseCsv(text);
   if (rows.length < 2) {
     return { ok: false, error: 'Paste needs a header row and at least one question row.' };
+  }
+
+  const headerLen = rows[0].length;
+  for (const r of rows) {
+    while (r.length < headerLen) r.push('');
   }
 
   const header = rows[0].map(normalizeHeader);
@@ -128,18 +131,30 @@ export function parseQuizPaste(text) {
   const idxTime = col('time_limit_sec');
   const idxQ = col('question_index');
   const idxType = col('type');
-  const idxPrompt = col('prompt');
+  const idxPrompt1 = col('prompt1');
+  const idxPrompt2 = col('prompt2');
+  const idxLegacyPrompt = col('prompt');
   const idxPoints = col('points');
   const idxMcq = col('mcq_options');
   const idxPairs = col('matching_pairs');
   const idxBlanks = col('fill_blanks');
+  const idxFeedback = col('feedback');
+  const idxLegacyExpl = col('explanation');
+  const idxLegacySlot = col('slot_feedback');
+  const idxFillCase = col('fill_case_sensitive');
 
-  if ([idxType, idxPrompt].some((x) => x < 0)) {
+  if (idxType < 0) {
     return {
       ok: false,
       error:
-        'Missing required columns. First row must include at least: type, prompt (and usually quiz_title, question_index). See placeholder in the paste box.',
+        'Missing required column: type. First row must match the header in the paste box (including prompt1, prompt2, feedback).',
     };
+  }
+
+  const hasPrompt1 = idxPrompt1 >= 0;
+  const hasLegacy = idxLegacyPrompt >= 0;
+  if (!hasPrompt1 && !hasLegacy) {
+    return { ok: false, error: 'Header must include prompt1 (or legacy column prompt).' };
   }
 
   const dataRows = rows.slice(1).filter((r) => r.some((c) => String(c || '').trim() !== ''));
@@ -149,8 +164,7 @@ export function parseQuizPaste(text) {
   }
 
   const first = dataRows[0];
-  const quizTitle =
-    idxTitle >= 0 ? String(first[idxTitle] || '').trim() : '';
+  const quizTitle = idxTitle >= 0 ? String(first[idxTitle] || '').trim() : '';
   if (!quizTitle) {
     return { ok: false, error: 'quiz_title is empty in the first data row.' };
   }
@@ -180,7 +194,7 @@ export function parseQuizPaste(text) {
     if (rowQuizTitle && rowQuizTitle !== quizTitle) {
       return {
         ok: false,
-        error: `Multiple quiz_title values found ("${quizTitle}" vs "${rowQuizTitle}"). Use one quiz per paste.`,
+        error: `Multiple quiz_title values found ("${quizTitle}" vs "${rowQuizTitle}"). Use one quiz per paste — or an unquoted newline inside a cell split the CSV into an extra row. Wrap multiline cells in double quotes.`,
       };
     }
 
@@ -189,13 +203,36 @@ export function parseQuizPaste(text) {
       return { ok: false, error: `Row ${i + 2}: unknown or missing type.` };
     }
 
-    const prompt = idxPrompt >= 0 ? String(r[idxPrompt] || '').trim() : '';
-    if (!prompt) {
-      return { ok: false, error: `Row ${i + 2}: prompt is required.` };
+    let prompt1 = hasPrompt1 ? String(r[idxPrompt1] || '').trim() : '';
+    let prompt2 = idxPrompt2 >= 0 ? String(r[idxPrompt2] || '').trim() : '';
+    if (!prompt1 && hasLegacy) {
+      const legacy = String(r[idxLegacyPrompt] || '').trim();
+      const re = /\bPrompt2:\s*/i;
+      const idx = legacy.search(re);
+      if (idx === -1) {
+        prompt1 = legacy;
+      } else {
+        prompt1 = legacy
+          .slice(0, idx)
+          .trim()
+          .replace(/^\s*Prompt1:\s*/i, '')
+          .replace(/,\s*$/, '')
+          .trim();
+        prompt2 = legacy.slice(idx).replace(re, '').trim();
+      }
+    }
+    if (!prompt1 && !prompt2) {
+      return { ok: false, error: `Row ${i + 2}: prompt1 (or prompt) is required.` };
     }
 
     const points = idxPoints >= 0 && String(r[idxPoints] || '').trim() !== '' ? Number(r[idxPoints]) : 1;
-    const q = { ...emptyEditorQuestion(), type, prompt, points: Number.isFinite(points) && points > 0 ? points : 1 };
+    const q = {
+      ...emptyQuestion(),
+      type,
+      prompt1,
+      prompt2,
+      points: Number.isFinite(points) && points > 0 ? points : 1,
+    };
 
     if (type === 'mcq_single' || type === 'mcq_multi') {
       const raw = idxMcq >= 0 ? String(r[idxMcq] || '').trim() : '';
@@ -215,9 +252,6 @@ export function parseQuizPaste(text) {
       }
       q.optionsText = raw;
     } else if (type === 'matching') {
-      // Order after points: mcq_options (9), matching_pairs (10), fill_blanks (11).
-      // Use TWO commas before opening quote for pairs: ...points,,"Left=>Right" (empty mcq only).
-      // THREE commas ...points,,," puts the quoted block in fill_blanks — we recover that below.
       let raw = idxPairs >= 0 ? String(r[idxPairs] || '').trim() : '';
       if (!raw && idxMcq >= 0) {
         raw = String(r[idxMcq] || '').trim();
@@ -254,9 +288,17 @@ export function parseQuizPaste(text) {
         return { ok: false, error: `Row ${i + 2}: fill_blank needs at least one blank_key => answer line.` };
       }
       q.blanksText = raw;
+      if (idxFillCase >= 0) {
+        q.fillCaseSensitive = parseBoolCell(r[idxFillCase]);
+      }
     }
 
-    questions.push(q);
+    let fb = idxFeedback >= 0 ? String(r[idxFeedback] || '').trim() : '';
+    if (!fb && idxLegacyExpl >= 0) fb = String(r[idxLegacyExpl] || '').trim();
+    if (!fb && idxLegacySlot >= 0) fb = String(r[idxLegacySlot] || '').trim();
+    if (fb) q.incorrectFeedback = fb;
+
+    questions.push(normalizeEditorQuestion(q));
   }
 
   return { ok: true, meta, questions };

@@ -25,6 +25,12 @@ type LessonData = {
   quizAssignments?: { id: number; quiz_title?: string }[];
   videoAssignments?: { id: number; video_id: number; video_title?: string; video_description?: string; video_url?: string }[];
   studyMaterialAssignments?: { id: number; material_id: number; material_title?: string; material_description?: string }[];
+  libraryWorksheetAssignments?: {
+    id: number;
+    worksheet_id: number;
+    worksheet_title?: string;
+    worksheet_description?: string;
+  }[];
 };
 
 export default function LessonDetailScreen({ route, navigation }: any) {
@@ -129,6 +135,23 @@ export default function LessonDetailScreen({ route, navigation }: any) {
           </TouchableOpacity>
         ))
       )}
+
+      {(data.libraryWorksheetAssignments || []).length > 0 &&
+        (data.libraryWorksheetAssignments || []).map((w) => (
+          <TouchableOpacity
+            key={`lws-${w.id}`}
+            style={styles.section}
+            onPress={() =>
+              navigation.navigate('WorksheetLibrary', {
+                worksheetId: w.worksheet_id,
+                worksheetTitle: w.worksheet_title || 'Worksheet',
+              })
+            }
+          >
+            <Text style={styles.sectionTitle}>{w.worksheet_title || 'Worksheet'}</Text>
+            <Text style={styles.sectionSub}>{w.worksheet_description || 'Interactive worksheet content'}</Text>
+          </TouchableOpacity>
+        ))}
 
       {data.worksheets.length > 0 && (
         <TouchableOpacity

@@ -19,6 +19,15 @@ function canViewStudyMaterial(user, row) {
   return false;
 }
 
+/** Draft worksheets (library): same visibility rules as study materials. */
+function canViewWorksheet(user, row) {
+  if (!row) return false;
+  if (Number(row.is_draft) !== 1) return true;
+  if (user.role === 'Admin' || user.role === 'Trainer') return true;
+  if (user.role === 'Creator') return Number(row.created_by) === Number(user.id);
+  return false;
+}
+
 /** Draft quiz bank rows: others' drafts hidden from Creators (Admin/Trainer see all). */
 function canViewQuizBank(user, bank) {
   if (!bank) return false;
@@ -52,6 +61,7 @@ module.exports = {
   isAdmin,
   canMutateLibraryByCreatedBy,
   canViewStudyMaterial,
+  canViewWorksheet,
   canViewQuizBank,
   stripCreatorFields,
   stripRows,

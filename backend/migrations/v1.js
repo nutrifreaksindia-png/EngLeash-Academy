@@ -312,6 +312,42 @@ function ensureV1Tables(db) {
     CREATE INDEX IF NOT EXISTS idx_study_material_assets_material ON study_material_assets(material_id, sort_order, id);
     CREATE INDEX IF NOT EXISTS idx_study_material_assignments_scope ON study_material_assignments(scope_type, scope_id, order_index, id);
     CREATE INDEX IF NOT EXISTS idx_study_material_assignments_material ON study_material_assignments(material_id);
+
+    CREATE TABLE IF NOT EXISTS worksheet_library (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      description TEXT,
+      content_json TEXT NOT NULL DEFAULT '{"schema_version":1,"blocks":[]}',
+      created_by INTEGER REFERENCES users(id),
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS worksheet_assets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      worksheet_id INTEGER NOT NULL REFERENCES worksheet_library(id) ON DELETE CASCADE,
+      asset_type TEXT NOT NULL CHECK(asset_type IN ('image','gif','pdf','audio')),
+      url TEXT NOT NULL,
+      storage_key TEXT,
+      meta_json TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS worksheet_assignments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      worksheet_id INTEGER NOT NULL REFERENCES worksheet_library(id) ON DELETE CASCADE,
+      scope_type TEXT NOT NULL CHECK(scope_type IN ('course','lesson')),
+      scope_id INTEGER NOT NULL,
+      order_index INTEGER NOT NULL DEFAULT 0,
+      is_required INTEGER NOT NULL DEFAULT 0,
+      created_by INTEGER REFERENCES users(id),
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_worksheet_assets_worksheet ON worksheet_assets(worksheet_id, sort_order, id);
+    CREATE INDEX IF NOT EXISTS idx_worksheet_assignments_scope ON worksheet_assignments(scope_type, scope_id, order_index, id);
+    CREATE INDEX IF NOT EXISTS idx_worksheet_assignments_worksheet ON worksheet_assignments(worksheet_id);
   `);
 
   safeAlter(db, "ALTER TABLE batches ADD COLUMN title TEXT");
@@ -324,6 +360,7 @@ function ensureV1Tables(db) {
   safeAlter(db, "ALTER TABLE batches ADD COLUMN batch_status TEXT DEFAULT 'draft'");
   safeAlter(db, "ALTER TABLE video_library ADD COLUMN category_id INTEGER REFERENCES video_categories(id)");
   safeAlter(db, "ALTER TABLE study_material_library ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0");
+  safeAlter(db, "ALTER TABLE worksheet_library ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0");
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS video_categories (

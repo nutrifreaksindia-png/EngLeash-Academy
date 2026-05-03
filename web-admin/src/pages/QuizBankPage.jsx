@@ -1,65 +1,425 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import SectionCard from '../components/SectionCard';
+import QuizPreviewPanel, { QuizInteractivePreview } from '../components/QuizPreviewPanel';
+import {
+  apiQuestionsToEditorQuestions,
+  editorDefaultsForType,
+  emptyQuestion,
+  normalizeEditorQuestion,
+  parseQuestionInput,
+} from '../utils/quizQuestionFormat';
 import { parseQuizPaste, QUIZ_PASTE_HEADER } from '../utils/parseQuizPaste';
 
 const QUESTION_TYPES = [
-  { value: 'mcq_single', label: 'Multiple Choice (single)' },
-  { value: 'mcq_multi', label: 'Multiple Choice (multi)' },
+  { value: 'mcq_single', label: 'Multiple choice (single)' },
+  { value: 'mcq_multi', label: 'Multiple choice (multi)' },
   { value: 'matching', label: 'Matching' },
-  { value: 'fill_blank', label: 'Completion (fill blank)' },
+  { value: 'fill_blank', label: 'Fill in the blank' },
 ];
 
-function emptyQuestion() {
-  return {
-    type: 'mcq_single',
-    prompt: '',
-    points: 1,
-    optionsText: '*Option A\nOption B',
-    pairsText: 'Word => Meaning',
-    blanksText: 'blank1 => answer',
-  };
+/** @returns {string | null} Error message or null if OK */
+function validateQuestionsForPublish(questions) {
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    const num = i + 1;
+    if (!String(q.prompt1 || '').trim()) {
+      return `Question ${num}: add question text.`;
+    }
+
+    if (q.type === 'mcq_single' || q.type === 'mcq_multi') {
+      const opts = Array.isArray(q.mcqOptions) ? q.mcqOptions : [];
+      for (let j = 0; j < opts.length; j++) {
+        if (!String(opts[j]?.text ?? '').trim()) {
+          return `Question ${num}: fill in every option or remove empty rows.`;
+        }
+      }
+      const withText = opts.filter((o) => String(o?.text ?? '').trim());
+      if (withText.length < 2) {
+        return `Question ${num}: add at least two answer options with text.`;
+      }
+      const correctCount = withText.filter((o) => o.correct).length;
+      if (q.type === 'mcq_single') {
+        if (correctCount !== 1) {
+          return `Question ${num}: select exactly one correct answer.`;
+        }
+      } else if (correctCount < 1) {
+        return `Question ${num}: mark at least one option as correct.`;
+      }
+    }
+
+    if (q.type === 'matching') {
+      const pairs = Array.isArray(q.matchPairs) ? q.matchPairs : [];
+      let complete = 0;
+      for (let j = 0; j < pairs.length; j++) {
+        const L = String(pairs[j]?.left ?? '').trim();
+        const R = String(pairs[j]?.right ?? '').trim();
+        if (L && !R) {
+          return `Question ${num}: pair ${j + 1} needs text on the right.`;
+        }
+        if (!L && R) {
+          return `Question ${num}: pair ${j + 1} needs text on the left.`;
+        }
+        if (L && R) complete += 1;
+      }
+      if (complete < 2) {
+        return `Question ${num}: add at least two pairs with both left and right filled in.`;
+      }
+    }
+
+    if (q.type === 'fill_blank') {
+      const blanks = Array.isArray(q.fillBlanks) ? q.fillBlanks : [];
+      let okBlanks = 0;
+      for (let j = 0; j < blanks.length; j++) {
+        const k = String(blanks[j]?.key ?? '').trim();
+        const a = String(blanks[j]?.answer ?? '').trim();
+        if (k && !a) {
+          return `Question ${num}: blank ${j + 1} needs an expected answer.`;
+        }
+        if (!k && a) {
+          return `Question ${num}: blank ${j + 1} needs a blank key.`;
+        }
+        if (k && a) okBlanks += 1;
+      }
+      if (okBlanks < 1) {
+        return `Question ${num}: add at least one blank with a key and answer.`;
+      }
+    }
+  }
+  return null;
 }
 
-function parseQuestionInput(q) {
-  const base = {
-    type: q.type,
-    prompt: q.prompt,
-    points: Number(q.points || 1),
-  };
-  if (q.type === 'mcq_single' || q.type === 'mcq_multi') {
-    const lines = String(q.optionsText || '')
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    return {
-      ...base,
-      options: lines.map((line, idx) => ({
-        option_text: line.replace(/^\*/, '').trim(),
-        is_correct: line.startsWith('*'),
-        sort_order: idx,
-      })),
-    };
+function QuizQuestionCard({
+  index,
+  q,
+  canMutate,
+  questionTypes,
+  onPatch,
+  onRemove,
+  canRemove,
+}) {
+  const opts = Array.isArray(q.mcqOptions) ? q.mcqOptions : [];
+  const pairs = Array.isArray(q.matchPairs) ? q.matchPairs : [];
+  const blanks = Array.isArray(q.fillBlanks) ? q.fillBlanks : [];
+
+  const [secondLineOpen, setSecondLineOpen] = useState(() => String(q.prompt2 || '').trim() !== '');
+
+  useEffect(() => {
+    if (String(q.prompt2 || '').trim()) setSecondLineOpen(true);
+  }, [q.prompt2]);
+
+  function patchMcq(nextOpts) {
+    onPatch({ mcqOptions: nextOpts });
   }
-  if (q.type === 'matching') {
-    const pairs = String(q.pairsText || '')
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((line, idx) => {
-        const [left, right] = line.split('=>').map((x) => (x || '').trim());
-        return { left_text: left, right_text: right, sort_order: idx };
-      });
-    return { ...base, pairs };
+
+  function setMcqOptionText(i, text) {
+    patchMcq(opts.map((o, j) => (j === i ? { ...o, text } : o)));
   }
-  const solutions = String(q.blanksText || '')
-    .split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [key, answer] = line.split('=>').map((x) => (x || '').trim());
-      return { blank_key: key, answer_text: answer, is_case_sensitive: false };
-    });
-  return { ...base, solutions };
+
+  function setMcqCorrectSingle(i) {
+    patchMcq(opts.map((o, j) => ({ ...o, correct: j === i })));
+  }
+
+  function toggleMcqCorrectMulti(i) {
+    patchMcq(opts.map((o, j) => (j === i ? { ...o, correct: !o.correct } : o)));
+  }
+
+  function addMcqOption() {
+    patchMcq([...opts, { text: `Option ${opts.length + 1}`, correct: false }]);
+  }
+
+  function removeMcqOption(i) {
+    if (opts.length <= 2) return;
+    const next = opts.filter((_, j) => j !== i);
+    if (q.type === 'mcq_single' && !next.some((o) => o.correct)) next[0] = { ...next[0], correct: true };
+    patchMcq(next);
+  }
+
+  function patchPairs(nextPairs) {
+    onPatch({ matchPairs: nextPairs });
+  }
+
+  function setPair(i, field, value) {
+    patchPairs(pairs.map((p, j) => (j === i ? { ...p, [field]: value } : p)));
+  }
+
+  function addPair() {
+    patchPairs([...pairs, { left: '', right: '' }]);
+  }
+
+  function removePair(i) {
+    if (pairs.length <= 2) return;
+    patchPairs(pairs.filter((_, j) => j !== i));
+  }
+
+  function patchBlanks(nextBlanks) {
+    onPatch({ fillBlanks: nextBlanks });
+  }
+
+  function setBlank(i, field, value) {
+    patchBlanks(blanks.map((b, j) => (j === i ? { ...b, [field]: value } : b)));
+  }
+
+  function addBlank() {
+    patchBlanks([...blanks, { key: '', answer: '' }]);
+  }
+
+  function removeBlank(i) {
+    if (blanks.length <= 1) return;
+    patchBlanks(blanks.filter((_, j) => j !== i));
+  }
+
+  return (
+    <div className="quizQuestionCard">
+      <div className="quizQuestionCard__toolbar">
+        <span className="quizQuestionCard__index">{index + 1}</span>
+        <select
+          className="quizQuestionCard__type"
+          value={q.type}
+          disabled={!canMutate}
+          onChange={(e) => {
+            const type = e.target.value;
+            onPatch({ type, ...editorDefaultsForType(type) });
+          }}
+        >
+          {questionTypes.map((t) => (
+            <option key={t.value} value={t.value}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+        <label className="quizQuestionCard__points">
+          <span className="quizQuestionCard__pointsLabel">Pts</span>
+          <input
+            type="number"
+            min={1}
+            className="quizQuestionCard__pointsInput"
+            value={q.points}
+            disabled={!canMutate}
+            onChange={(e) => onPatch({ points: e.target.value })}
+          />
+        </label>
+        <button
+          type="button"
+          className="dangerBtn quizQuestionCard__remove"
+          disabled={!canMutate || !canRemove}
+          onClick={onRemove}
+        >
+          Remove
+        </button>
+      </div>
+      <div className="quizQuestionCard__body">
+        <label className="fieldLabel quizFieldLabelCompact">Question</label>
+        <textarea
+          className="quizQuestionCard__textarea quizQuestionCard__textarea--sm"
+          placeholder="Question text"
+          value={q.prompt1}
+          disabled={!canMutate}
+          onChange={(e) => onPatch({ prompt1: e.target.value })}
+        />
+        {secondLineOpen ? (
+          <>
+            <label className="fieldLabel quizFieldLabelCompact" htmlFor={`quiz-prompt2-${index}`}>
+              Second line
+            </label>
+            <textarea
+              id={`quiz-prompt2-${index}`}
+              className="quizQuestionCard__textarea quizQuestionCard__textarea--sm"
+              placeholder="Optional second line (italics in preview)"
+              value={q.prompt2}
+              disabled={!canMutate}
+              onChange={(e) => onPatch({ prompt2: e.target.value })}
+            />
+          </>
+        ) : (
+          <button
+            type="button"
+            className="quizEditorAddSecondLine"
+            disabled={!canMutate}
+            onClick={() => setSecondLineOpen(true)}
+          >
+            Add optional second line
+          </button>
+        )}
+        <label className="fieldLabel quizFieldLabelCompact">Feedback</label>
+        <textarea
+          className="quizQuestionCard__textarea quizQuestionCard__textarea--xs"
+          placeholder="Optional — shown when the answer is not fully correct"
+          value={q.incorrectFeedback || ''}
+          disabled={!canMutate}
+          onChange={(e) => onPatch({ incorrectFeedback: e.target.value })}
+        />
+
+        {(q.type === 'mcq_single' || q.type === 'mcq_multi') && (
+          <div className="quizStructuredBlock">
+            <span className="fieldLabel quizFieldLabelCompact" style={{ margin: 0 }}>
+              Answer choices
+            </span>
+            <div className="quizMcqTable">
+              <div className="quizMcqHeader">
+                <span className="quizMcqColCorrect">{q.type === 'mcq_single' ? 'Correct' : '✓'}</span>
+                <span className="quizMcqColText">Option text</span>
+                <span className="quizMcqColAct" />
+              </div>
+              {opts.map((o, i) => (
+                <div key={i} className="quizMcqRow">
+                  <div className="quizMcqColCorrect">
+                    {q.type === 'mcq_single' ? (
+                      <input
+                        type="radio"
+                        name={`mcq-single-${index}`}
+                        checked={!!o.correct}
+                        disabled={!canMutate}
+                        onChange={() => setMcqCorrectSingle(i)}
+                        title="Correct answer"
+                      />
+                    ) : (
+                      <input
+                        type="checkbox"
+                        checked={!!o.correct}
+                        disabled={!canMutate}
+                        onChange={() => toggleMcqCorrectMulti(i)}
+                        title="Correct answer"
+                      />
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    className="quizInlineInput"
+                    value={o.text}
+                    disabled={!canMutate}
+                    onChange={(e) => setMcqOptionText(i, e.target.value)}
+                    placeholder={`Option ${i + 1}`}
+                  />
+                  <div className="quizMcqColAct">
+                    <button
+                      type="button"
+                      className="quizMiniBtn quizMiniBtn--danger"
+                      disabled={!canMutate || opts.length <= 2}
+                      onClick={() => removeMcqOption(i)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button type="button" className="quizMiniBtn quizMcqAddBelow" disabled={!canMutate} onClick={addMcqOption}>
+              + Add option
+            </button>
+          </div>
+        )}
+
+        {q.type === 'matching' && (
+          <div className="quizStructuredBlock">
+            <div className="quizStructuredHead">
+              <span className="fieldLabel quizFieldLabelCompact" style={{ margin: 0 }}>
+                Pairs
+              </span>
+              <button type="button" className="quizMiniBtn" disabled={!canMutate} onClick={addPair}>
+                + Add pair
+              </button>
+            </div>
+            <div className="quizPairTable">
+              <div className="quizPairHeader">
+                <span>Left</span>
+                <span>Right</span>
+                <span className="quizMcqColAct" />
+              </div>
+              {pairs.map((p, i) => (
+                <div key={i} className="quizPairRow">
+                  <input
+                    type="text"
+                    className="quizInlineInput"
+                    value={p.left}
+                    disabled={!canMutate}
+                    onChange={(e) => setPair(i, 'left', e.target.value)}
+                    placeholder="Prompt"
+                  />
+                  <input
+                    type="text"
+                    className="quizInlineInput"
+                    value={p.right}
+                    disabled={!canMutate}
+                    onChange={(e) => setPair(i, 'right', e.target.value)}
+                    placeholder="Match"
+                  />
+                  <div className="quizMcqColAct">
+                    <button
+                      type="button"
+                      className="quizMiniBtn quizMiniBtn--danger"
+                      disabled={!canMutate || pairs.length <= 2}
+                      onClick={() => removePair(i)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {q.type === 'fill_blank' && (
+          <div className="quizStructuredBlock">
+            <label className="quizCaseSensitive quizCaseSensitive--compact">
+              <input
+                type="checkbox"
+                checked={!!q.fillCaseSensitive}
+                disabled={!canMutate}
+                onChange={(e) => onPatch({ fillCaseSensitive: e.target.checked })}
+              />
+              <span>Case-sensitive</span>
+            </label>
+            <div className="quizStructuredHead">
+              <span className="fieldLabel quizFieldLabelCompact" style={{ margin: 0 }}>
+                Blanks
+              </span>
+              <button type="button" className="quizMiniBtn" disabled={!canMutate} onClick={addBlank}>
+                + Add blank
+              </button>
+            </div>
+            <div className="quizPairTable">
+              <div className="quizPairHeader">
+                <span>Blank key</span>
+                <span>Expected answer</span>
+                <span className="quizMcqColAct" />
+              </div>
+              {blanks.map((b, i) => (
+                <div key={i} className="quizPairRow">
+                  <input
+                    type="text"
+                    className="quizInlineInput"
+                    value={b.key}
+                    disabled={!canMutate}
+                    onChange={(e) => setBlank(i, 'key', e.target.value)}
+                    placeholder="e.g. verb"
+                  />
+                  <input
+                    type="text"
+                    className="quizInlineInput"
+                    value={b.answer}
+                    disabled={!canMutate}
+                    onChange={(e) => setBlank(i, 'answer', e.target.value)}
+                    placeholder="Answer"
+                  />
+                  <div className="quizMcqColAct">
+                    <button
+                      type="button"
+                      className="quizMiniBtn quizMiniBtn--danger"
+                      disabled={!canMutate || blanks.length <= 1}
+                      onClick={() => removeBlank(i)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function QuizBankPage({
@@ -73,11 +433,14 @@ export default function QuizBankPage({
   onUpdateQuiz,
   onPublishVersion,
   onAssignQuiz,
+  onDeleteQuiz = null,
 }) {
+  const [librarySearch, setLibrarySearch] = useState('');
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorTitle, setEditorTitle] = useState('');
+  const [editorDescription, setEditorDescription] = useState('');
   const [selectedQuizId, setSelectedQuizId] = useState(null);
   const [detail, setDetail] = useState(null);
-  const [createTitle, setCreateTitle] = useState('');
-  const [createDescription, setCreateDescription] = useState('');
   const [questions, setQuestions] = useState([emptyQuestion()]);
   const [versionTitle, setVersionTitle] = useState('');
   const [passingPct, setPassingPct] = useState(60);
@@ -86,14 +449,28 @@ export default function QuizBankPage({
   const [assignScopeId, setAssignScopeId] = useState('');
   const [assignVersionId, setAssignVersionId] = useState('');
   const [assignRequired, setAssignRequired] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
   const [pasteText, setPasteText] = useState('');
   const [pasteHint, setPasteHint] = useState('');
+  const [previewSession, setPreviewSession] = useState(null);
+  const [previewLoadingId, setPreviewLoadingId] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const createDraftInFlightRef = useRef(false);
+
+  function preventFormSubmitOnEnter(e) {
+    if (e.key === 'Enter') e.preventDefault();
+  }
 
   const selectedVersions = detail?.versions || [];
   const selectedAssignments = detail?.assignments || [];
   const canMutateDetail = Boolean(detail && libraryCanMutate(detail));
+
+  const filteredQuizzes = useMemo(() => {
+    const q = librarySearch.trim().toLowerCase();
+    const list = quizzes || [];
+    if (!q) return list;
+    return list.filter((z) => String(z.title || '').toLowerCase().includes(q));
+  }, [quizzes, librarySearch]);
 
   const scopeOptions = useMemo(() => {
     if (assignScopeType === 'course') {
@@ -104,41 +481,10 @@ export default function QuizBankPage({
       .map((l) => ({ id: l.id, label: l.title }));
   }, [assignScopeType, courses, lessons]);
 
-  async function refreshDetails(id) {
-    if (!id) return;
-    const d = await onGetQuiz(id);
-    setDetail(d);
-  }
-
-  async function pickQuiz(id) {
-    setSelectedQuizId(id);
-    setError('');
-    try {
-      await refreshDetails(id);
-    } catch (e) {
-      setError(e.message);
-    }
-  }
-
-  async function createQuiz(e) {
-    e.preventDefault();
-    setBusy(true);
-    setError('');
-    setPasteHint('');
-    try {
-      const created = await onCreateQuiz({ title: createTitle, description: createDescription, status: 'draft' });
-      setCreateTitle('');
-      setCreateDescription('');
-      if (created?.id) await pickQuiz(created.id);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   function applyPasteToEditor(parsed) {
-    setQuestions(parsed.questions.length ? parsed.questions : [emptyQuestion()]);
+    setQuestions(
+      (parsed.questions.length ? parsed.questions : [emptyQuestion()]).map(normalizeEditorQuestion),
+    );
     setVersionTitle(parsed.meta.versionTitle || '');
     setPassingPct(Number.isFinite(Number(parsed.meta.passingPct)) ? Number(parsed.meta.passingPct) : 60);
     setTimeLimitSec(
@@ -146,46 +492,94 @@ export default function QuizBankPage({
         ? ''
         : String(parsed.meta.timeLimitSec),
     );
+    if (parsed.meta.title && canMutateDetail) {
+      setEditorTitle(parsed.meta.title);
+    }
+    if (parsed.meta.description != null && canMutateDetail) {
+      setEditorDescription(parsed.meta.description);
+    }
   }
 
-  async function pasteIntoOpenQuiz() {
+  async function openEditor(quizId) {
     setError('');
     setPasteHint('');
-    const result = parseQuizPaste(pasteText);
-    if (!result.ok) {
-      setError(result.error);
-      return;
+    setBusy(true);
+    try {
+      const d = await onGetQuiz(quizId);
+      setDetail(d);
+      setSelectedQuizId(quizId);
+      setEditorTitle(d.title || '');
+      setEditorDescription(d.description || '');
+      const v = (d.versions || [])[0];
+      if (v && Array.isArray(v.questions) && v.questions.length > 0) {
+        setQuestions(apiQuestionsToEditorQuestions(v.questions).map(normalizeEditorQuestion));
+        setVersionTitle(v.title || '');
+        setTimeLimitSec(
+          v.time_limit_sec != null && v.time_limit_sec !== '' ? String(v.time_limit_sec) : '',
+        );
+        setPassingPct(Number.isFinite(Number(v.passing_pct)) ? Number(v.passing_pct) : 60);
+      } else {
+        setQuestions([emptyQuestion()]);
+        setVersionTitle('');
+        setTimeLimitSec('');
+        setPassingPct(60);
+      }
+      setEditorOpen(true);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
     }
-    if (!selectedQuizId || !canMutateDetail) {
-      setError('Open one of your quizzes first, then load the paste into the editor.');
-      return;
-    }
-    applyPasteToEditor(result);
-    setPasteHint(`Loaded ${result.questions.length} question(s) into the editor. Review and click “Publish New Version”.`);
   }
 
-  async function pasteCreateDraftQuiz() {
+  function resetEditorAndClose() {
+    setEditorOpen(false);
+    setPasteHint('');
+    setSelectedQuizId(null);
+    setDetail(null);
+    setQuestions([emptyQuestion()]);
+    setEditorTitle('');
+    setEditorDescription('');
+    setVersionTitle('');
+    setTimeLimitSec('');
+    setPassingPct(60);
+    setPasteText('');
+    setAssignVersionId('');
+    setAssignScopeId('');
+  }
+
+  async function createDraftAndOpen() {
+    if (createDraftInFlightRef.current) return;
+    createDraftInFlightRef.current = true;
     setBusy(true);
     setError('');
-    setPasteHint('');
     try {
-      const result = parseQuizPaste(pasteText);
-      if (!result.ok) {
-        setError(result.error);
-        return;
-      }
       const created = await onCreateQuiz({
-        title: result.meta.title,
-        description: result.meta.description || '',
+        title: 'Untitled quiz',
+        description: '',
         status: 'draft',
       });
       if (!created?.id) throw new Error('Create quiz did not return an id.');
-      setSelectedQuizId(created.id);
-      applyPasteToEditor(result);
-      await refreshDetails(created.id);
-      setPasteHint(
-        `Draft quiz “${result.meta.title}” created with ${result.questions.length} question(s). Review below, then Publish New Version.`,
-      );
+      await openEditor(created.id);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      createDraftInFlightRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  async function saveDraftAndClose() {
+    if (!selectedQuizId || !canMutateDetail) return;
+    setBusy(true);
+    setError('');
+    try {
+      await onUpdateQuiz(selectedQuizId, {
+        title: editorTitle.trim() || 'Untitled quiz',
+        description: editorDescription,
+        status: 'draft',
+      });
+      resetEditorAndClose();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -196,9 +590,18 @@ export default function QuizBankPage({
   async function publishVersion(e) {
     e.preventDefault();
     if (!selectedQuizId || !canMutateDetail) return;
+    const validationError = validateQuestionsForPublish(questions);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     setBusy(true);
     setError('');
     try {
+      await onUpdateQuiz(selectedQuizId, {
+        title: editorTitle.trim() || 'Untitled quiz',
+        description: editorDescription,
+      });
       await onPublishVersion(selectedQuizId, {
         title: versionTitle || null,
         timeLimitSec: timeLimitSec ? Number(timeLimitSec) : null,
@@ -206,10 +609,7 @@ export default function QuizBankPage({
         passingPct: Number(passingPct || 0),
         questions: questions.map(parseQuestionInput),
       });
-      setQuestions([emptyQuestion()]);
-      setVersionTitle('');
-      setTimeLimitSec('');
-      await refreshDetails(selectedQuizId);
+      resetEditorAndClose();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -217,22 +617,77 @@ export default function QuizBankPage({
     }
   }
 
-  async function updateStatus(status) {
-    if (!selectedQuizId || !canMutateDetail) return;
-    setBusy(true);
+  /** Applies pasted text to the current quiz in the editor only — does not create a new quiz row. */
+  function applyPasteImport() {
+    setError('');
+    setPasteHint('');
+    if (!selectedQuizId || !editorOpen) {
+      setError('Use “+ New quiz” or open an existing quiz, then apply import here.');
+      return;
+    }
+    if (!canMutateDetail) {
+      setError('You cannot edit this quiz.');
+      return;
+    }
+    const result = parseQuizPaste(pasteText);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    applyPasteToEditor(result);
+    setPasteHint(
+      `Imported ${result.questions.length} question(s). Save draft or publish when ready.`,
+    );
+  }
+
+  async function openPreviewQuiz(quizId) {
+    setPreviewLoadingId(quizId);
     setError('');
     try {
-      await onUpdateQuiz(selectedQuizId, { status });
-      await refreshDetails(selectedQuizId);
+      const d = await onGetQuiz(quizId);
+      const v = (d.versions || [])[0];
+      let previewQuestions = [];
+      if (v && Array.isArray(v.questions) && v.questions.length > 0) {
+        previewQuestions = apiQuestionsToEditorQuestions(v.questions).map(normalizeEditorQuestion);
+      }
+      const passingPct = v && Number.isFinite(Number(v.passing_pct)) ? Number(v.passing_pct) : 60;
+      setPreviewSession({
+        quizId,
+        title: d.title || 'Quiz',
+        questions: previewQuestions,
+        passingPct,
+      });
     } catch (e) {
       setError(e.message);
     } finally {
-      setBusy(false);
+      setPreviewLoadingId(null);
     }
   }
 
-  async function assign(e) {
-    e.preventDefault();
+  function closePreviewQuiz() {
+    setPreviewSession(null);
+  }
+
+  async function deleteQuiz(id) {
+    if (!onDeleteQuiz) return;
+    if (!window.confirm('Delete this quiz and all its versions and assignments? This cannot be undone.')) {
+      return;
+    }
+    setError('');
+    try {
+      await onDeleteQuiz(id);
+      if (selectedQuizId === id) {
+        resetEditorAndClose();
+      }
+      if (previewSession?.quizId === id) {
+        setPreviewSession(null);
+      }
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function assign() {
     if (!selectedQuizId || !assignVersionId || !assignScopeId || !canMutateDetail) return;
     setBusy(true);
     setError('');
@@ -243,7 +698,8 @@ export default function QuizBankPage({
         scopeId: Number(assignScopeId),
         isRequired: assignRequired,
       });
-      await refreshDetails(selectedQuizId);
+      const fresh = await onGetQuiz(selectedQuizId);
+      setDetail(fresh);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -254,85 +710,87 @@ export default function QuizBankPage({
   return (
     <div className="stack">
       {error ? <div className="partialErrorBox">{error}</div> : null}
-      {pasteHint ? <div className="banner success">{pasteHint}</div> : null}
+      {pasteHint && editorOpen ? <div className="banner success">{pasteHint}</div> : null}
 
       <SectionCard
-        title="Paste quiz content"
-        subtitle="Paste CSV-style text from ChatGPT or a spreadsheet (one quiz per paste). Then create a new draft or load into the open quiz."
+        title="Quiz bank"
+        subtitle="Reusable quizzes — full-screen editor, learner preview, and course or lesson assignment."
       >
-        <details className="muted" style={{ marginBottom: 12 }}>
-          <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Required header row (copy as first line)</summary>
-          <pre
-            style={{
-              margin: '8px 0 0',
-              padding: 10,
-              background: '#f8fafc',
-              border: '1px solid #e2e8f0',
-              borderRadius: 8,
-              fontSize: 11,
-              overflow: 'auto',
-              lineHeight: 1.4,
-            }}
-          >
-            {QUIZ_PASTE_HEADER}
-          </pre>
-          <p className="muted" style={{ margin: '8px 0 0' }}>
-            MCQ options: one per line, correct lines start with <code>*</code>. Matching / blanks need the right column — or extra commas after <code>points</code> so quoted text lines up; the parser also accepts matching pairs pasted in the mcq column. Quote prompts that contain commas.
-          </p>
-        </details>
-        <textarea
-          className="courseTextarea"
-          style={{ minHeight: 140, fontFamily: 'ui-monospace, monospace', fontSize: 12 }}
-          placeholder={`${QUIZ_PASTE_HEADER}\n"My Quiz","desc","v1",60,,1,mcq_single,"Pick one:",1,"*Yes\\nNo\\nMaybe",,`}
-          value={pasteText}
-          onChange={(e) => setPasteText(e.target.value)}
+        <input
+          className="quizBankSearch"
+          value={librarySearch}
+          onChange={(e) => setLibrarySearch(e.target.value)}
+          placeholder="Search quizzes"
         />
         <div className="row" style={{ marginTop: 10 }}>
-          <button type="button" className="secondaryBtn" onClick={pasteCreateDraftQuiz} disabled={busy || !pasteText.trim()}>
-            Create draft quiz from paste
-          </button>
           <button
             type="button"
-            className="secondaryBtn"
-            onClick={pasteIntoOpenQuiz}
-            disabled={busy || !pasteText.trim() || !selectedQuizId || !canMutateDetail}
+            className="uploadPrimaryBtn"
+            onClick={createDraftAndOpen}
+            disabled={busy}
           >
-            Load paste into open quiz (editor)
+            + New quiz
           </button>
         </div>
-        <p className="muted" style={{ margin: '10px 0 0', fontSize: 13 }}>
-          After loading, edit questions below as usual, then <strong>Publish New Version</strong>. Use <strong>Create draft quiz from paste</strong> when the quiz does not exist yet.
-        </p>
-      </SectionCard>
-
-      <SectionCard title="Quiz Bank" subtitle="Reusable quizzes assignable to multiple courses and lessons">
-        <form className="formGrid" onSubmit={createQuiz}>
-          <input placeholder="Quiz title" value={createTitle} onChange={(e) => setCreateTitle(e.target.value)} required />
-          <input placeholder="Description" value={createDescription} onChange={(e) => setCreateDescription(e.target.value)} />
-          <button type="submit" disabled={busy}>Create Quiz</button>
-        </form>
-      </SectionCard>
-
-      <SectionCard title="Quizzes" subtitle="Select a quiz to edit, publish versions and assign">
-        <div className="tableWrap">
+        <div className="tableWrap quizBankTableWrap">
           <table>
             <thead>
               <tr>
                 <th>Title</th>
                 <th>Status</th>
                 {showCreatedBy ? <th>Created by</th> : null}
-                <th>Latest Version</th>
-                <th>Action</th>
+                <th>Latest version</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {(quizzes || []).map((q) => (
+              {filteredQuizzes.map((q) => (
                 <tr key={q.id}>
                   <td>{q.title}</td>
-                  <td>{q.status}</td>
-                  {showCreatedBy ? <td>{q.creator_name || `#${q.created_by}` || '—'}</td> : null}
-                  <td>{q.latest_version || '-'}</td>
-                  <td><button type="button" className="secondaryBtn" onClick={() => pickQuiz(q.id)}>Open</button></td>
+                  <td>
+                    {q.status === 'draft' ? (
+                      <span className="studyDraftBadge">Draft</span>
+                    ) : q.status === 'published' ? (
+                      <span className="muted">Published</span>
+                    ) : (
+                      <span className="muted">{q.status}</span>
+                    )}
+                  </td>
+                  {showCreatedBy ? (
+                    <td>{q.creator_name || `#${q.created_by}` || '—'}</td>
+                  ) : null}
+                  <td>{q.latest_version ?? '—'}</td>
+                  <td>
+                    <div className="row studyMaterialRowActions">
+                      <button
+                        type="button"
+                        className="secondaryBtn"
+                        onClick={() => openPreviewQuiz(q.id)}
+                        disabled={previewLoadingId === q.id}
+                      >
+                        Preview
+                      </button>
+                      {libraryCanMutate(q) ? (
+                        <>
+                          <button
+                            type="button"
+                            className="secondaryBtn"
+                            onClick={() => openEditor(q.id)}
+                            disabled={busy}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            className="dangerBtn"
+                            onClick={() => deleteQuiz(q.id)}
+                          >
+                            Delete
+                          </button>
+                        </>
+                      ) : null}
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -340,118 +798,266 @@ export default function QuizBankPage({
         </div>
       </SectionCard>
 
-      {selectedQuizId ? (
-        <>
-          <SectionCard
-            title={`Quiz #${selectedQuizId}`}
-            subtitle={canMutateDetail ? 'Manage status and publish versions' : 'View quiz versions (read-only — not your quiz)'}
-            actions={
-              canMutateDetail ? (
-                <div className="row">
-                  <button type="button" className="secondaryBtn" onClick={() => updateStatus('draft')}>Set Draft</button>
-                  <button type="button" className="secondaryBtn" onClick={() => updateStatus('published')}>Set Published</button>
-                  <button type="button" className="secondaryBtn" onClick={() => updateStatus('archived')}>Set Archived</button>
-                </div>
-              ) : (
-                <span className="muted">View only</span>
-              )
-            }
+      {previewSession ? (
+        <div
+          className="studyViewOverlay"
+          role="presentation"
+          onClick={closePreviewQuiz}
+        >
+          <div
+            className="studyViewModal quizBankPreviewModal"
+            role="dialog"
+            aria-labelledby="quiz-bank-preview-title"
+            onClick={(e) => e.stopPropagation()}
           >
-            <form className="stack" onSubmit={publishVersion}>
-              <fieldset disabled={!canMutateDetail} style={{ border: 'none', margin: 0, padding: 0 }}>
-              <input placeholder="Version title (optional)" value={versionTitle} onChange={(e) => setVersionTitle(e.target.value)} />
-              <div className="row">
-                <input type="number" min="0" placeholder="Time limit sec (optional)" value={timeLimitSec} onChange={(e) => setTimeLimitSec(e.target.value)} />
-                <input type="number" min="0" max="100" placeholder="Passing %" value={passingPct} onChange={(e) => setPassingPct(e.target.value)} />
+            <div className="modalHead">
+              <h3 id="quiz-bank-preview-title">Preview: {previewSession.title}</h3>
+              <button type="button" className="secondaryBtn" onClick={closePreviewQuiz}>
+                Close
+              </button>
+            </div>
+            <p className="quizBankPreviewHint">
+              Mobile-sized learner view — answer questions and submit to see scoring (same logic as the app).
+            </p>
+            <div className="quizBankPreviewPhone">
+              <div className="quizBankPreviewPhoneInner">
+                <QuizInteractivePreview
+                  quizTitle={previewSession.title}
+                  questions={previewSession.questions}
+                  passingPct={previewSession.passingPct}
+                  showViewportSwitcher={false}
+                />
               </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
-              {questions.map((q, idx) => (
-                <div key={idx} className="sectionCard" style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: 10 }}>
-                  <div className="row">
-                    <strong>Question {idx + 1}</strong>
+      {editorOpen ? (
+        <div className="studyFullscreenOverlay">
+          <form className="studyFullscreenShell" onSubmit={publishVersion}>
+            <div className="studyFullscreenTopbar">
+              <div className="studyTopInputsBlock">
+                <div className="studyTopInputs">
+                  <input
+                    value={editorTitle}
+                    onChange={(e) => setEditorTitle(e.target.value)}
+                    onKeyDown={preventFormSubmitOnEnter}
+                    placeholder="Quiz title"
+                    disabled={!canMutateDetail}
+                  />
+                  <input
+                    value={editorDescription}
+                    onChange={(e) => setEditorDescription(e.target.value)}
+                    onKeyDown={preventFormSubmitOnEnter}
+                    placeholder="Description (optional)"
+                    disabled={!canMutateDetail}
+                  />
+                  {detail?.status === 'draft' ? (
+                    <span className="studyDraftBadge studyDraftBadgeLarge">Draft</span>
+                  ) : null}
+                </div>
+                <div className="studyTopMetaRow">
+                  <label className="studyTopMetaField">
+                    <span className="fieldLabel">Version title (optional)</span>
+                    <input
+                      value={versionTitle}
+                      onChange={(e) => setVersionTitle(e.target.value)}
+                      onKeyDown={preventFormSubmitOnEnter}
+                      disabled={!canMutateDetail}
+                    />
+                  </label>
+                  <label className="studyTopMetaField">
+                    <span className="fieldLabel">Time limit (sec)</span>
+                    <input
+                      type="number"
+                      min={0}
+                      value={timeLimitSec}
+                      onChange={(e) => setTimeLimitSec(e.target.value)}
+                      onKeyDown={preventFormSubmitOnEnter}
+                      disabled={!canMutateDetail}
+                    />
+                  </label>
+                  <label className="studyTopMetaField">
+                    <span className="fieldLabel">Passing %</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={passingPct}
+                      onChange={(e) => setPassingPct(e.target.value)}
+                      onKeyDown={preventFormSubmitOnEnter}
+                      disabled={!canMutateDetail}
+                    />
+                  </label>
+                </div>
+              </div>
+              <div className="studyTopActions">
+                {canMutateDetail ? (
+                  <button type="button" className="secondaryBtn" disabled={busy} onClick={saveDraftAndClose}>
+                    Save draft &amp; close
+                  </button>
+                ) : (
+                  <button type="button" className="secondaryBtn" onClick={resetEditorAndClose}>
+                    Exit
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  className="uploadPrimaryBtn"
+                  formNoValidate
+                  disabled={busy || !canMutateDetail}
+                >
+                  Publish
+                </button>
+                {onDeleteQuiz && canMutateDetail ? (
+                  <button
+                    type="button"
+                    className="dangerBtn"
+                    disabled={busy || !selectedQuizId}
+                    onClick={() => deleteQuiz(selectedQuizId)}
+                  >
+                    Delete quiz
+                  </button>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="studyFullscreenBody">
+              <div className="studyFullscreenEditor quizBankFullscreenEditor">
+                <details className="quizBankDetails">
+                  <summary>Import</summary>
+                  <textarea
+                    className="courseTextarea quizBankPasteArea"
+                    value={pasteText}
+                    onChange={(e) => setPasteText(e.target.value)}
+                    placeholder={`${QUIZ_PASTE_HEADER}\n...`}
+                  />
+                  <div className="row" style={{ marginTop: 8 }}>
                     <button
                       type="button"
-                      className="dangerBtn"
-                      onClick={() => setQuestions((prev) => prev.filter((_, i) => i !== idx))}
-                      disabled={questions.length <= 1}
+                      className="secondaryBtn"
+                      disabled={busy || !pasteText.trim() || !selectedQuizId || !canMutateDetail}
+                      onClick={applyPasteImport}
                     >
-                      Remove
+                      Apply import to editor
                     </button>
                   </div>
-                  <select value={q.type} onChange={(e) => setQuestions((prev) => prev.map((x, i) => (i === idx ? { ...x, type: e.target.value } : x)))}>
-                    {QUESTION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                  </select>
-                  <textarea placeholder="Prompt" value={q.prompt} onChange={(e) => setQuestions((prev) => prev.map((x, i) => (i === idx ? { ...x, prompt: e.target.value } : x)))} />
-                  <input type="number" min="1" placeholder="Points" value={q.points} onChange={(e) => setQuestions((prev) => prev.map((x, i) => (i === idx ? { ...x, points: e.target.value } : x)))} />
+                </details>
 
-                  {(q.type === 'mcq_single' || q.type === 'mcq_multi') ? (
-                    <textarea
-                      placeholder="Options (one per line, prefix correct option with *)"
-                      value={q.optionsText}
-                      onChange={(e) => setQuestions((prev) => prev.map((x, i) => (i === idx ? { ...x, optionsText: e.target.value } : x)))}
-                    />
-                  ) : null}
-                  {q.type === 'matching' ? (
-                    <textarea
-                      placeholder="Pairs one per line: left => right"
-                      value={q.pairsText}
-                      onChange={(e) => setQuestions((prev) => prev.map((x, i) => (i === idx ? { ...x, pairsText: e.target.value } : x)))}
-                    />
-                  ) : null}
-                  {q.type === 'fill_blank' ? (
-                    <textarea
-                      placeholder="Solutions one per line: blank_key => answer"
-                      value={q.blanksText}
-                      onChange={(e) => setQuestions((prev) => prev.map((x, i) => (i === idx ? { ...x, blanksText: e.target.value } : x)))}
-                    />
-                  ) : null}
+                <div className="quizBankSectionHead">
+                  <h4 className="quizBankSectionTitle">Questions</h4>
+                  <button
+                    type="button"
+                    className="secondaryBtn"
+                    disabled={!canMutateDetail}
+                    onClick={() => setQuestions((prev) => [...prev, emptyQuestion()])}
+                  >
+                    + Add question
+                  </button>
                 </div>
-              ))}
-              <button type="button" className="secondaryBtn" onClick={() => setQuestions((prev) => [...prev, emptyQuestion()])}>+ Add Question</button>
-              <button type="submit" disabled={busy}>Publish New Version</button>
-              </fieldset>
-            </form>
-          </SectionCard>
 
-          <SectionCard title="Assignments" subtitle="Attach selected version to course or lesson">
-            <form className="formGrid" onSubmit={assign}>
-              <fieldset disabled={!canMutateDetail} style={{ border: 'none', margin: 0, padding: 0 }} className="formGrid">
-              <select value={assignVersionId} onChange={(e) => setAssignVersionId(e.target.value)} required>
-                <option value="">Select version</option>
-                {selectedVersions.map((v) => <option key={v.id} value={v.id}>v{v.version_no} - {v.title || 'Untitled'}</option>)}
-              </select>
-              <select value={assignScopeType} onChange={(e) => { setAssignScopeType(e.target.value); setAssignScopeId(''); }}>
-                <option value="course">Course</option>
-                <option value="lesson">Lesson</option>
-              </select>
-              <select value={assignScopeId} onChange={(e) => setAssignScopeId(e.target.value)} required>
-                <option value="">Select {assignScopeType}</option>
-                {scopeOptions.map((o) => <option key={`${assignScopeType}-${o.id}`} value={o.id}>{o.label}</option>)}
-              </select>
-              <label className="checkboxRow">
-                <input type="checkbox" checked={assignRequired} onChange={(e) => setAssignRequired(e.target.checked)} />
-                <span>Required</span>
-              </label>
-              <button type="submit" disabled={busy}>Assign</button>
-              </fieldset>
-            </form>
-            <div className="tableWrap">
-              <table>
-                <thead><tr><th>Scope</th><th>Scope ID</th><th>Version ID</th><th>Required</th></tr></thead>
-                <tbody>
-                  {selectedAssignments.map((a) => (
-                    <tr key={a.id}>
-                      <td>{a.scope_type}</td>
-                      <td>{a.scope_id}</td>
-                      <td>{a.quiz_version_id}</td>
-                      <td>{a.is_required ? 'Yes' : 'No'}</td>
-                    </tr>
+                <div className="quizBankQuestionList">
+                  {questions.map((q, idx) => (
+                    <QuizQuestionCard
+                      key={idx}
+                      index={idx}
+                      q={q}
+                      canMutate={canMutateDetail}
+                      questionTypes={QUESTION_TYPES}
+                      canRemove={questions.length > 1}
+                      onPatch={(patch) =>
+                        setQuestions((prev) => prev.map((x, i) => (i === idx ? { ...x, ...patch } : x)))
+                      }
+                      onRemove={() => setQuestions((prev) => prev.filter((_, i) => i !== idx))}
+                    />
                   ))}
-                </tbody>
-              </table>
+                </div>
+
+                <details className="quizBankDetails quizBankDetailsAssignments">
+                  <summary>Assignments</summary>
+                  <div className="formGrid quizBankAssignForm">
+                    <fieldset disabled={!canMutateDetail} style={{ border: 'none', margin: 0, padding: 0 }}>
+                      <select
+                        value={assignVersionId}
+                        onChange={(e) => setAssignVersionId(e.target.value)}
+                      >
+                        <option value="">Version</option>
+                        {selectedVersions.map((v) => (
+                          <option key={v.id} value={v.id}>
+                            v{v.version_no} — {v.title || 'Untitled'}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={assignScopeType}
+                        onChange={(e) => {
+                          setAssignScopeType(e.target.value);
+                          setAssignScopeId('');
+                        }}
+                      >
+                        <option value="course">Course</option>
+                        <option value="lesson">Lesson</option>
+                      </select>
+                      <select
+                        value={assignScopeId}
+                        onChange={(e) => setAssignScopeId(e.target.value)}
+                      >
+                        <option value="">{assignScopeType === 'course' ? 'Course' : 'Lesson'}</option>
+                        {scopeOptions.map((o) => (
+                          <option key={`${assignScopeType}-${o.id}`} value={o.id}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                      <label className="checkboxRow">
+                        <input
+                          type="checkbox"
+                          checked={assignRequired}
+                          onChange={(e) => setAssignRequired(e.target.checked)}
+                        />
+                        <span>Required</span>
+                      </label>
+                      <button type="button" disabled={busy || !canMutateDetail} onClick={assign}>
+                        Assign
+                      </button>
+                    </fieldset>
+                  </div>
+                  {selectedAssignments.length > 0 ? (
+                    <div className="tableWrap" style={{ marginTop: 10 }}>
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Scope</th>
+                            <th>Scope ID</th>
+                            <th>Version</th>
+                            <th>Required</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedAssignments.map((a) => (
+                            <tr key={a.id}>
+                              <td>{a.scope_type}</td>
+                              <td>{a.scope_id}</td>
+                              <td>{a.quiz_version_id}</td>
+                              <td>{a.is_required ? 'Yes' : 'No'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="muted" style={{ marginTop: 8 }}>
+                      No assignments yet.
+                    </p>
+                  )}
+                </details>
+              </div>
+
+              <QuizPreviewPanel quizTitle={editorTitle} questions={questions} passingPct={Number(passingPct) || 0} />
             </div>
-          </SectionCard>
-        </>
+          </form>
+        </div>
       ) : null}
     </div>
   );

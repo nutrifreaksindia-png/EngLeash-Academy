@@ -311,6 +311,15 @@ router.put('/v2/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, re
   res.json(stripCreatorFields(req.user, row));
 });
 
+router.delete('/v2/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+  const id = Number(req.params.id);
+  const prev = db.prepare('SELECT * FROM quiz_bank WHERE id = ?').get(id);
+  if (!prev) return res.status(404).json({ error: 'Quiz not found' });
+  if (!canMutateLibraryByCreatedBy(req.user, prev)) return res.status(403).json({ error: 'Forbidden' });
+  db.prepare('DELETE FROM quiz_bank WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
 router.post('/v2/:id/versions', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
   const quizBankId = Number(req.params.id);
   const bank = db.prepare('SELECT * FROM quiz_bank WHERE id = ?').get(quizBankId);
