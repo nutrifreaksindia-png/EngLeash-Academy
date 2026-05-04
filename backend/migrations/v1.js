@@ -86,10 +86,9 @@ function ensureV1Tables(db) {
     CREATE TABLE IF NOT EXISTS course_lessons (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-      lesson_id INTEGER NOT NULL REFERENCES lesson_library(id) ON DELETE CASCADE,
+      lesson_id INTEGER REFERENCES lesson_library(id) ON DELETE CASCADE,
       day_number INTEGER NOT NULL,
       sequence_in_day INTEGER NOT NULL DEFAULT 1,
-      UNIQUE(course_id, lesson_id),
       UNIQUE(course_id, day_number, sequence_in_day)
     );
 
@@ -149,6 +148,18 @@ function ensureV1Tables(db) {
     CREATE INDEX IF NOT EXISTS idx_course_enrollments_course ON course_enrollments(course_id);
     CREATE INDEX IF NOT EXISTS idx_course_lessons_course_day ON course_lessons(course_id, day_number, sequence_in_day);
     CREATE INDEX IF NOT EXISTS idx_batch_sessions_batch_day ON batch_sessions(batch_id, session_day);
+
+    CREATE TABLE IF NOT EXISTS batch_session_attendance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_session_id INTEGER NOT NULL REFERENCES batch_sessions(id) ON DELETE CASCADE,
+      student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK(status IN ('present', 'absent', 'late', 'excused')),
+      marked_by INTEGER NOT NULL REFERENCES users(id),
+      updated_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(batch_session_id, student_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_batch_session_attendance_session ON batch_session_attendance(batch_session_id);
+
     CREATE INDEX IF NOT EXISTS idx_assignment_submissions_assignment ON assignment_submissions(assignment_id);
 
     CREATE TABLE IF NOT EXISTS quiz_bank (
@@ -348,6 +359,30 @@ function ensureV1Tables(db) {
     CREATE INDEX IF NOT EXISTS idx_worksheet_assets_worksheet ON worksheet_assets(worksheet_id, sort_order, id);
     CREATE INDEX IF NOT EXISTS idx_worksheet_assignments_scope ON worksheet_assignments(scope_type, scope_id, order_index, id);
     CREATE INDEX IF NOT EXISTS idx_worksheet_assignments_worksheet ON worksheet_assignments(worksheet_id);
+
+    CREATE TABLE IF NOT EXISTS assignment_library (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      description TEXT,
+      content_html TEXT NOT NULL DEFAULT '',
+      created_by INTEGER REFERENCES users(id),
+      is_draft INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_assignment_library_updated ON assignment_library (updated_at DESC, id DESC);
+
+    CREATE TABLE IF NOT EXISTS lesson_library_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lesson_id INTEGER NOT NULL REFERENCES lesson_library(id) ON DELETE CASCADE,
+      sort_order INTEGER NOT NULL,
+      item_type TEXT NOT NULL CHECK(item_type IN ('video','study_material','worksheet','quiz','assignment')),
+      item_id INTEGER NOT NULL,
+      UNIQUE(lesson_id, item_type, item_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_lesson_library_items_lesson_order ON lesson_library_items (lesson_id, sort_order);
   `);
 
   safeAlter(db, "ALTER TABLE batches ADD COLUMN title TEXT");
@@ -358,9 +393,24 @@ function ensureV1Tables(db) {
   safeAlter(db, "ALTER TABLE batches ADD COLUMN actual_start_date TEXT");
   safeAlter(db, "ALTER TABLE batches ADD COLUMN notes TEXT");
   safeAlter(db, "ALTER TABLE batches ADD COLUMN batch_status TEXT DEFAULT 'draft'");
+  safeAlter(db, 'ALTER TABLE batches ADD COLUMN batch_number INTEGER');
+  safeAlter(db, 'ALTER TABLE batches ADD COLUMN duration_days INTEGER');
   safeAlter(db, "ALTER TABLE video_library ADD COLUMN category_id INTEGER REFERENCES video_categories(id)");
   safeAlter(db, "ALTER TABLE study_material_library ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0");
   safeAlter(db, "ALTER TABLE worksheet_library ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0");
+  safeAlter(db, 'ALTER TABLE worksheet_library ADD COLUMN answer_key_json TEXT');
+
+  safeAlter(
+    db,
+    'ALTER TABLE live_sessions ADD COLUMN batch_session_id INTEGER REFERENCES batch_sessions(id) ON DELETE CASCADE'
+  );
+  try {
+    db.exec(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_live_sessions_batch_session_id ON live_sessions(batch_session_id) WHERE batch_session_id IS NOT NULL'
+    );
+  } catch (_) {
+    /* ignore */
+  }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS video_categories (
@@ -374,7 +424,80 @@ function ensureV1Tables(db) {
   db.prepare('INSERT OR IGNORE INTO video_categories (name, slug) VALUES (?, ?)').run('English Grammar', 'english-grammar');
   db.prepare('INSERT OR IGNORE INTO video_categories (name, slug) VALUES (?, ?)').run('English Vocabulary', 'english-vocabulary');
 
+  migrateBatchesBatchNumber(db);
+  migrateCourseLessonsSchema(db);
   migrateUsersTableCreatorRole(db);
+}
+
+/** Unique batch number per session_type (group vs one_to_one). */
+function migrateBatchesBatchNumber(db) {
+  const cols = db.prepare('PRAGMA table_info(batches)').all();
+  if (!cols.some((c) => c.name === 'batch_number')) return;
+
+  const idx = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_batches_session_type_batch_number'")
+    .get();
+  if (idx) return;
+
+  const rows = db.prepare('SELECT id, session_type FROM batches ORDER BY session_type, id').all();
+  let prevType = null;
+  let seq = 0;
+  const upd = db.prepare('UPDATE batches SET batch_number = ? WHERE id = ?');
+  for (const r of rows) {
+    if (r.session_type !== prevType) {
+      prevType = r.session_type;
+      seq = 0;
+    }
+    seq += 1;
+    upd.run(seq, r.id);
+  }
+
+  db.exec(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_session_type_batch_number ON batches(session_type, batch_number)'
+  );
+}
+
+/** Nullable lesson_id + drop UNIQUE(course_id, lesson_id) so the same template can repeat on different days. */
+function migrateCourseLessonsSchema(db) {
+  const cols = db.prepare('PRAGMA table_info(course_lessons)').all();
+  if (!cols.length) return;
+  const lessonCol = cols.find((c) => c.name === 'lesson_id');
+  const lessonNotNull = lessonCol && Number(lessonCol.notnull) === 1;
+  const sqlRow = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='course_lessons'").get();
+  const sql = String(sqlRow?.sql || '');
+  const hasLessonPairUnique = sql.includes('UNIQUE(course_id, lesson_id)');
+
+  if (!lessonNotNull && !hasLessonPairUnique) return;
+
+  const { syncCourseLessonSlots } = require('../lib/syncCourseLessonSlots');
+
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS course_lessons__next (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+        lesson_id INTEGER REFERENCES lesson_library(id) ON DELETE CASCADE,
+        day_number INTEGER NOT NULL,
+        sequence_in_day INTEGER NOT NULL DEFAULT 1,
+        UNIQUE(course_id, day_number, sequence_in_day)
+      );
+    `);
+    db.exec(`
+      INSERT INTO course_lessons__next (id, course_id, lesson_id, day_number, sequence_in_day)
+      SELECT id, course_id, lesson_id, day_number, sequence_in_day FROM course_lessons;
+    `);
+    db.exec('DROP TABLE course_lessons;');
+    db.exec('ALTER TABLE course_lessons__next RENAME TO course_lessons;');
+    db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_course_lessons_course_day ON course_lessons(course_id, day_number, sequence_in_day);'
+    );
+
+    const ids = db.prepare('SELECT id FROM courses').all();
+    for (const { id } of ids) syncCourseLessonSlots(id);
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 /** Expand users.role CHECK to allow Creator (SQLite cannot ALTER CHECK). */

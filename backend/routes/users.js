@@ -14,7 +14,11 @@ router.get('/me', auth, (req, res) => {
 });
 
 router.get('/', auth, requireRole('Admin'), (req, res) => {
-  const users = db.prepare('SELECT id, email, name, role, status, mobile_number, profile_photo_url, created_at FROM users ORDER BY id').all();
+  const users = db
+    .prepare(
+      'SELECT id, email, name, role, status, mobile_number, profile_photo_url, created_at FROM users ORDER BY id DESC'
+    )
+    .all();
   res.json(users);
 });
 
@@ -31,17 +35,22 @@ router.get('/:id', auth, requireRole('Admin'), (req, res) => {
 });
 
 router.post('/', auth, requireRole('Admin'), (req, res) => {
-  const { email, password, name, role, mobileNumber, profilePhotoUrl } = req.body;
+  const { email, password, name, role: rawRole, mobileNumber, profilePhotoUrl } = req.body;
+  const role = typeof rawRole === 'string' ? rawRole.trim() : rawRole;
   if (!email || !password || !role) {
     return res.status(400).json({ error: 'Email, password and role are required' });
   }
   const allowed = ['Admin', 'Trainer', 'Student', 'Lab', 'Creator'];
   if (!allowed.includes(role)) return res.status(400).json({ error: 'Invalid role' });
   const hash = bcrypt.hashSync(password, 10);
+  let userId;
   try {
-    db.prepare('INSERT INTO users (email, password_hash, name, role, status, mobile_number, profile_photo_url) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    const info = db
+      .prepare(
+        'INSERT INTO users (email, password_hash, name, role, status, mobile_number, profile_photo_url) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      )
       .run(email.trim().toLowerCase(), hash, name || '', role, 'approved', mobileNumber || null, profilePhotoUrl || null);
-    const userId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+    userId = Number(info.lastInsertRowid);
     db.prepare(`
       INSERT INTO user_profiles (user_id, full_name, email, role, profile_photo_url, mobile_number)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -50,7 +59,9 @@ router.post('/', auth, requireRole('Admin'), (req, res) => {
     if (e.message.includes('UNIQUE')) return res.status(409).json({ error: 'Email already exists' });
     throw e;
   }
-  const row = db.prepare('SELECT id, email, name, role, status, mobile_number, profile_photo_url, created_at FROM users WHERE id = last_insert_rowid()').get();
+  const row = db
+    .prepare('SELECT id, email, name, role, status, mobile_number, profile_photo_url, created_at FROM users WHERE id = ?')
+    .get(userId);
   res.status(201).json(row);
 });
 

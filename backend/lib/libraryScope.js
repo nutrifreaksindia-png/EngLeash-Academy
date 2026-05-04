@@ -19,6 +19,15 @@ function canViewStudyMaterial(user, row) {
   return false;
 }
 
+/** Library assignments: same draft visibility as study materials. */
+function canViewAssignment(user, row) {
+  if (!row) return false;
+  if (Number(row.is_draft) !== 1) return true;
+  if (user.role === 'Admin' || user.role === 'Trainer') return true;
+  if (user.role === 'Creator') return Number(row.created_by) === Number(user.id);
+  return false;
+}
+
 /** Draft worksheets (library): same visibility rules as study materials. */
 function canViewWorksheet(user, row) {
   if (!row) return false;
@@ -57,12 +66,31 @@ function stripRows(user, rows) {
   return rows.map((r) => stripCreatorFields(user, r));
 }
 
+/** Staff and worksheet author may read answer key; learners and other Creators may not. */
+function mayViewWorksheetAnswerKey(user, row) {
+  if (!row) return false;
+  if (user.role === 'Admin' || user.role === 'Trainer') return true;
+  if (user.role === 'Creator' && Number(row.created_by) === Number(user.id)) return true;
+  return false;
+}
+
+function stripWorksheetAnswerKeyIfNeeded(user, row) {
+  if (!row) return row;
+  if (mayViewWorksheetAnswerKey(user, row)) return row;
+  const o = { ...row };
+  delete o.answer_key_json;
+  return o;
+}
+
 module.exports = {
   isAdmin,
   canMutateLibraryByCreatedBy,
   canViewStudyMaterial,
+  canViewAssignment,
   canViewWorksheet,
   canViewQuizBank,
   stripCreatorFields,
   stripRows,
+  mayViewWorksheetAnswerKey,
+  stripWorksheetAnswerKeyIfNeeded,
 };

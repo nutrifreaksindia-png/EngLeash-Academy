@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
+import { useAuth } from '../context/AuthContext';
+import { joinOpensAtLabel, userMayJoinLiveSession } from '../utils/liveJoinWindow';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -25,6 +27,7 @@ function formatTime(value: string) {
 }
 
 export default function LiveSessionsScreen({ navigation }: any) {
+  const { user } = useAuth();
   const [sessions, setSessions] = useState<LiveSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -74,7 +77,16 @@ export default function LiveSessionsScreen({ navigation }: any) {
         contentContainerStyle={styles.list}
         ListEmptyComponent={<Text style={styles.empty}>No live sessions available yet.</Text>}
         renderItem={({ item }) => {
-          const canJoin = item.status === 'scheduled' || item.status === 'live';
+          const canJoin = userMayJoinLiveSession({
+            userRole: user?.role,
+            liveStatus: item.status,
+            startsAt: item.starts_at,
+            endsAt: item.ends_at,
+          });
+          const showWaitHint =
+            !canJoin &&
+            (user?.role === 'Student' || user?.role === 'Lab') &&
+            item.status === 'scheduled';
           return (
             <TouchableOpacity
               style={styles.card}
@@ -91,8 +103,13 @@ export default function LiveSessionsScreen({ navigation }: any) {
               <Text style={styles.meta}>Trainer: {item.trainer_name}</Text>
               <Text style={styles.meta}>Starts: {formatTime(item.starts_at)}</Text>
               <Text style={styles.meta}>Ends: {formatTime(item.ends_at)}</Text>
+              {showWaitHint ? (
+                <Text style={styles.hint}>{joinOpensAtLabel(item.starts_at)}</Text>
+              ) : null}
               <View style={[styles.joinBtn, !canJoin && styles.joinBtnDisabled]}>
-                <Text style={styles.joinBtnText}>{canJoin ? 'Join class' : 'View only'}</Text>
+                <Text style={styles.joinBtnText}>
+                  {canJoin ? 'Join class' : item.status === 'ended' || item.status === 'cancelled' ? 'Ended' : 'Not yet'}
+                </Text>
               </View>
             </TouchableOpacity>
           );
@@ -133,4 +150,5 @@ const styles = StyleSheet.create({
     backgroundColor: '#9e9e9e',
   },
   joinBtnText: { color: '#fff', fontWeight: '700' },
+  hint: { fontSize: 12, color: '#666', marginTop: 6, fontStyle: 'italic' },
 });

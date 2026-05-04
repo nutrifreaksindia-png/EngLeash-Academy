@@ -145,6 +145,18 @@ h1 {
   gap: 8px;
 }
 
+.usersListSearch {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  max-width: min(420px, 100%);
+}
+
+.usersListSearchInput {
+  width: 100%;
+}
+
 .checkboxRow {
   display: flex;
   align-items: flex-start;
@@ -651,6 +663,401 @@ button:hover {
 
 .courseFormField .richWrap .rsw-ce {
   min-height: 200px;
+}
+
+.courseViewReadonly {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 720px;
+  font-size: 1rem;
+  line-height: 1.5;
+  color: #334155;
+}
+
+.courseViewHeader {
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.courseViewActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.courseViewActions .secondaryBtn,
+.courseViewActions .dangerBtn {
+  font-size: 0.875rem;
+  padding: 0.5rem 0.875rem;
+  min-height: 40px;
+}
+
+.courseViewBlock {
+  margin: 0;
+}
+
+.courseViewBlockMeta {
+  padding-top: 0.25rem;
+}
+
+.courseViewLabel {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #64748b;
+  margin: 0 0 0.5rem;
+  line-height: 1.3;
+}
+
+.courseViewText {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.55;
+  color: #334155;
+}
+
+.courseViewList {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 1rem;
+  line-height: 1.55;
+  color: #334155;
+}
+
+.courseViewList li {
+  margin-bottom: 0.35rem;
+}
+
+.courseViewList li:last-child {
+  margin-bottom: 0;
+}
+
+.courseViewEmpty {
+  list-style: none;
+  margin-left: -1.25rem;
+  padding-left: 0;
+}
+
+.courseViewSpecs {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #fafbff;
+  font-size: 1rem;
+  line-height: 1.55;
+  color: #334155;
+  max-height: min(50vh, 320px);
+  overflow-y: auto;
+}
+
+.courseViewSpecs h1,
+.courseViewSpecs h2,
+.courseViewSpecs h3,
+.courseViewSpecs h4 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0.85em 0 0.4em;
+  color: #0f172a;
+}
+
+.courseViewSpecs h1:first-child,
+.courseViewSpecs h2:first-child,
+.courseViewSpecs h3:first-child,
+.courseViewSpecs h4:first-child {
+  margin-top: 0;
+}
+
+.courseViewSpecs p {
+  margin: 0.5em 0;
+  font-size: 1rem;
+}
+
+.courseViewMetaGrid {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) 1fr;
+  gap: 0.5rem 1.25rem;
+  margin: 0;
+  font-size: 0.9375rem;
+  line-height: 1.45;
+}
+
+.courseViewMetaGrid dt {
+  font-weight: 600;
+  color: #64748b;
+  margin: 0;
+}
+
+.courseViewMetaGrid dd {
+  margin: 0;
+  color: #1e293b;
+}
+
+.lessonScheduleHint {
+  margin: 0 0 12px;
+  line-height: 1.45;
+  max-width: 52ch;
+}
+
+.scheduleSlotDayReadonly {
+  margin: 4px 0 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.lessonScheduleTableWrap {
+  margin-top: 4px;
+}
+
+.lessonScheduleDayCol {
+  width: 6rem;
+  vertical-align: middle;
+}
+
+.lessonScheduleLessonCol {
+  vertical-align: middle;
+}
+
+.lessonScheduleInlineSelect {
+  width: 100%;
+  max-width: 100%;
+  min-height: 40px;
+}
+
+.courseActionsCell {
+  vertical-align: middle;
+}
+
+.courseActionsRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.courseQuickAction {
+  font-size: 0.85rem;
+  padding: 8px 12px;
+  white-space: nowrap;
+}
+
+/* —— Batches admin —— */
+.batchCreateForm {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.batchCreateLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #334155;
+}
+
+.batchCreateLabel input,
+.batchCreateLabel select,
+.batchCreateLabel textarea {
+  font-weight: 400;
+}
+
+.batchCreateSpan2 {
+  grid-column: 1 / -1;
+}
+
+.batchCreateDetails {
+  grid-column: 1 / -1;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #f8fafc;
+}
+
+.batchCreateDetails summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #475569;
+}
+
+.batchScheduleInner {
+  margin-top: 10px;
+}
+
+.batchCreateActions {
+  margin-top: 4px;
+}
+
+.batchListWrap {
+  overflow-x: auto;
+}
+
+.batchListTable .batchColExpand {
+  width: 2rem;
+  text-align: center;
+  color: #64748b;
+}
+
+.batchListRow {
+  cursor: pointer;
+}
+
+.batchListRow:hover {
+  background: #f8fafc;
+}
+
+.batchListRowOpen {
+  background: #eef2ff;
+}
+
+.batchExpandRow td {
+  padding: 0 !important;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.batchExpandBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 14px;
+  background: #fafbff;
+}
+
+.batchListTable .batchColActions {
+  width: 1%;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.batchRowActionBtn {
+  font-size: 0.8rem;
+  padding: 6px 10px;
+  margin-right: 4px;
+}
+
+.batchRowActionBtn:last-child {
+  margin-right: 0;
+}
+
+.batchWeekdayRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 16px;
+}
+
+.batchWeekdayPill {
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.batchWeekdayPillOn {
+  background: #4f46e5;
+  border-color: #4f46e5;
+  color: #fff;
+}
+
+.batchScheduleEditor {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #fafafa;
+}
+
+.batchViewNotes {
+  white-space: pre-wrap;
+  margin-top: 0;
+}
+
+.batchModalBody {
+  max-width: 720px;
+}
+
+.batchModalSubhead {
+  margin: 12px 0 8px;
+  font-size: 0.9rem;
+}
+
+.batchAssignSubRow td {
+  background: #f8fafc;
+  padding-top: 0 !important;
+}
+
+.batchSubmissionList {
+  margin: 0 0 8px;
+  padding-left: 1.2rem;
+}
+
+.batchAttendanceHint {
+  margin: 0 0 12px;
+  font-size: 0.9rem;
+}
+
+.batchAttendanceWrap {
+  max-width: min(960px, 100%);
+}
+
+.batchAttendanceTable {
+  font-size: 0.875rem;
+}
+
+.batchAttendanceSticky {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: #fff;
+  box-shadow: 4px 0 8px -4px rgba(15, 23, 42, 0.15);
+  min-width: 11rem;
+  vertical-align: top;
+}
+
+.batchAttendanceEmail {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+.batchAttendanceSessionHead {
+  text-align: center;
+  min-width: 6.5rem;
+  vertical-align: bottom;
+}
+
+.batchAttendanceDay {
+  display: block;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.batchAttendanceDate {
+  display: block;
+  font-size: 0.75rem;
+  color: #64748b;
+  font-weight: 400;
+}
+
+.batchAttendanceMiniBadge {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 0.65rem;
+  padding: 2px 6px;
+}
+
+.batchAttendanceSelect {
+  width: 100%;
+  min-width: 5.5rem;
+  font-size: 0.8rem;
+  padding: 4px 6px;
 }
 
 /* Videos uploader */
@@ -2830,4 +3237,522 @@ th {
     position: static;
     height: auto;
   }
+}
+
+/* Assignment library (rich-text homework briefs) */
+.assignmentLibraryToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.assignmentLibrarySearch {
+  flex: 1;
+  min-width: 200px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #dbe3f0;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.assignmentLibraryTitleCell {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.assignmentLibraryDescCell {
+  max-width: 280px;
+}
+
+.assignmentLibraryDateCell {
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.assignmentLibraryEmpty {
+  padding: 12px 0;
+  margin: 0;
+}
+
+.assignmentLibraryModal {
+  width: min(720px, 100%);
+}
+
+.assignmentLibraryModal .richWrap .rsw-ce {
+  min-height: 220px;
+}
+
+.assignmentEditorForm {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-top: 4px;
+}
+
+.assignmentEditorActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.assignmentViewModal .assignmentViewHtml {
+  font-size: 15px;
+  line-height: 1.55;
+  color: #1e293b;
+}
+
+.assignmentViewModal .assignmentViewHtml p {
+  margin: 0 0 0.65em;
+}
+
+.assignmentViewModal .assignmentViewHtml ul,
+.assignmentViewModal .assignmentViewHtml ol {
+  margin: 0 0 0.65em 1.25em;
+}
+
+.assignmentViewModal .assignmentViewHtml h1,
+.assignmentViewModal .assignmentViewHtml h2,
+.assignmentViewModal .assignmentViewHtml h3 {
+  margin: 0.5em 0 0.35em;
+  color: #0f172a;
+}
+
+/* Lessons composer */
+.lessonPageToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.lessonPageSearch {
+  min-width: 200px;
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #dbe3f0;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.lessonLibraryTableWrap {
+  margin-top: 4px;
+}
+
+.lessonLibraryTitleCell {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.lessonLibraryDescCell {
+  max-width: 320px;
+}
+
+.lessonItemCountBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+}
+
+.lessonLibraryPager {
+  margin-top: 12px;
+  align-items: center;
+}
+
+.lessonLibraryEmpty {
+  padding: 14px 0;
+  margin: 0;
+}
+
+.lessonComposerForm {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-top: 8px;
+  max-width: 720px;
+}
+
+.lessonComposerSection {
+  border-top: 1px solid #e2e8f0;
+  padding-top: 14px;
+}
+
+.lessonComposerSectionHead {
+  margin-bottom: 10px;
+}
+
+.lessonComposerSectionTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.lessonContentList {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lessonContentRow {
+  display: grid;
+  grid-template-columns: auto auto minmax(100px, 120px) 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  cursor: grab;
+}
+
+.lessonContentGrip {
+  color: #94a3b8;
+  font-size: 14px;
+  user-select: none;
+}
+
+.lessonContentOrder {
+  font-size: 13px;
+  font-weight: 700;
+  color: #64748b;
+  min-width: 22px;
+}
+
+.lessonContentType {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #0f766e;
+}
+
+.lessonContentTitle {
+  font-size: 14px;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lessonContentRemove {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.lessonAddRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.lessonAddSelect {
+  flex: 1;
+  min-width: 200px;
+}
+
+.lessonComposerActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+  margin-top: 4px;
+}
+
+@media (max-width: 640px) {
+  .lessonContentRow {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .lessonContentGrip {
+    display: none;
+  }
+}
+
+.lessonViewBody {
+  padding-top: 4px;
+  max-width: 560px;
+}
+
+.lessonViewTitle {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.lessonViewOrderedList {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lessonViewOrderedList li {
+  padding-left: 4px;
+}
+
+.lessonViewType {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #0f766e;
+  margin-right: 8px;
+}
+
+.lessonViewItemTitle {
+  font-size: 14px;
+  color: #1e293b;
+}
+
+/* Full-screen live classroom (Phase 3 — Agora Web) */
+.liveClassroomRoot {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.liveClassroomBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+}
+
+.liveClassroomTitle {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.liveClassroomTitle strong {
+  font-size: 16px;
+  color: #fff;
+}
+
+.liveClassroomChannel {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.liveClassroomRtc {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.liveClassroomParticipants {
+  font-size: 12px;
+  color: #a5b4fc;
+  line-height: 1.45;
+  max-width: min(92vw, 640px);
+  word-break: break-word;
+}
+
+.liveStageHint {
+  font-size: 12px;
+  color: #94a3b8;
+  font-weight: 400;
+}
+
+.liveClassroomSub {
+  font-size: 14px;
+  color: #94a3b8;
+  margin-top: 8px;
+}
+
+.liveToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 16px;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+}
+
+.liveToolBtn {
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid #475569;
+  background: #334155;
+  color: #f1f5f9;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.liveToolBtn:hover {
+  background: #475569;
+}
+
+.liveToolBtnOff {
+  background: #7f1d1d;
+  border-color: #991b1b;
+}
+
+.liveBarBtn {
+  padding: 10px 18px;
+  border-radius: 8px;
+  border: 1px solid #64748b;
+  background: #334155;
+  color: #f8fafc;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.liveBarBtn:hover {
+  background: #475569;
+}
+
+.liveBarBtnLeave {
+  background: #c41e3a;
+  border-color: #b91c1c;
+  color: #fff;
+}
+
+.liveBarBtnLeave:hover {
+  opacity: 0.92;
+}
+
+.liveStageLabel {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+  margin: 4px 0 6px;
+}
+
+.liveDeviceError {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #fecaca;
+  max-width: 360px;
+}
+
+.liveClassroomBarActions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.liveBadge {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #334155;
+  color: #e2e8f0;
+}
+
+.liveBadgeHost {
+  background: #14532d;
+  color: #bbf7d0;
+}
+
+.liveClassroomCenter {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+  text-align: center;
+}
+
+.liveClassroomError {
+  color: #fecaca;
+}
+
+.liveClassroomStage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px;
+  gap: 12px;
+}
+
+.liveRemoteGrid {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-content: flex-start;
+  min-height: 120px;
+  background: #020617;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.liveRemoteTile {
+  width: min(100%, 480px);
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.liveRemoteTile video,
+.liveLocalVideo video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover;
+  display: block;
+}
+
+.liveLocalWrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.liveLocalVideo {
+  width: 200px;
+  max-width: 40vw;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid #475569;
+}
+
+.liveHint {
+  margin: 0;
+  font-size: 12px;
+  color: #94a3b8;
+  max-width: 320px;
+  text-align: right;
 }

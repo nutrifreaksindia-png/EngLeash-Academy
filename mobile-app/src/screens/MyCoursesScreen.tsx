@@ -13,6 +13,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { joinOpensAtLabel, userMayJoinLiveSession } from '../utils/liveJoinWindow';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -27,6 +28,11 @@ type TodaySession = {
   batch_title?: string;
   batch_name?: string;
   starts_at?: string;
+  status?: string;
+  live_session_id?: number | null;
+  live_status?: string | null;
+  live_starts_at?: string | null;
+  live_ends_at?: string | null;
 };
 
 export default function MyCoursesScreen({ navigation }: any) {
@@ -43,9 +49,12 @@ export default function MyCoursesScreen({ navigation }: any) {
     try {
       const data = await api.get('/courses');
       setCourses(Array.isArray(data) ? data : []);
-      if (user.role === 'Student' || user.role === 'Lab') {
+      const wantsToday = user.role === 'Student' || user.role === 'Lab' || user.role === 'Trainer';
+      if (wantsToday) {
+        const batchPromise =
+          user.role === 'Student' || user.role === 'Lab' ? api.get('/batch-manager') : Promise.resolve([]);
         const [batchRows, todayRows] = await Promise.all([
-          api.get('/batch-manager'),
+          batchPromise,
           api.get('/batch-manager/my/today'),
         ]);
         setBatches(Array.isArray(batchRows) ? batchRows : []);
@@ -97,7 +106,7 @@ export default function MyCoursesScreen({ navigation }: any) {
     <View style={[styles.container, { paddingBottom: insets.bottom }]}>
       <ScreenPageTitle title="My Courses" />
       <Text style={styles.greeting}>Hello, {user.name || user.email}</Text>
-      {(user.role === 'Student' || user.role === 'Lab') ? (
+      {user.role === 'Student' || user.role === 'Lab' ? (
         <View style={styles.infoBox}>
           <Text style={styles.infoTitle}>My Batches</Text>
           {batches.length === 0 ? (
@@ -120,22 +129,76 @@ export default function MyCoursesScreen({ navigation }: any) {
               </View>
             ))
           )}
-          <Text style={[styles.infoTitle, { marginTop: 10 }]}>Today’s lesson shortcut</Text>
+        </View>
+      ) : null}
+      {user.role === 'Student' || user.role === 'Lab' || user.role === 'Trainer' ? (
+        <View style={[styles.infoBox, user.role === 'Trainer' ? { marginTop: 12 } : null]}>
+          <Text style={styles.infoTitle}>{user.role === 'Trainer' ? 'Today’s classes' : 'Today’s lesson shortcut'}</Text>
           {todaySessions.length === 0 ? (
             <Text style={styles.infoText}>No scheduled session today.</Text>
           ) : (
-            todaySessions.map((s) => (
-              <TouchableOpacity
-                key={s.id}
-                style={styles.todayShortcut}
-                onPress={() => navigation.getParent()?.getParent()?.navigate('MySessions', { screen: 'LiveSessions' })}
-              >
-                <Text style={styles.todayTitle}>
-                  Day {s.session_day}: {s.lesson_title || 'Session'}
-                </Text>
-                <Text style={styles.todaySub}>{s.batch_title || s.batch_name}</Text>
-              </TouchableOpacity>
-            ))
+            todaySessions.map((s) => {
+              const title = `Day ${s.session_day}: ${s.lesson_title || 'Session'}`;
+              const liveStarts = s.live_starts_at || '';
+              const liveEnds = s.live_ends_at || '';
+              let canJoin = false;
+              if (s.live_session_id && s.status !== 'cancelled' && s.live_status) {
+                if (!liveStarts || !liveEnds) {
+                  canJoin =
+                    (user.role === 'Admin' || user.role === 'Trainer') &&
+                    (s.live_status === 'scheduled' || s.live_status === 'live');
+                } else {
+                  canJoin = userMayJoinLiveSession({
+                    userRole: user.role,
+                    liveStatus: s.live_status,
+                    startsAt: liveStarts,
+                    endsAt: liveEnds,
+                  });
+                }
+              }
+              const showWaitHint =
+                !canJoin &&
+                (user.role === 'Student' || user.role === 'Lab') &&
+                s.live_session_id &&
+                s.live_status === 'scheduled' &&
+                Boolean(liveStarts);
+              return (
+                <View key={s.id} style={styles.todayRow}>
+                  <View style={styles.todayTextCol}>
+                    <Text style={styles.todayTitle}>{title}</Text>
+                    <Text style={styles.todaySub}>{s.batch_title || s.batch_name}</Text>
+                    {s.status === 'cancelled' ? (
+                      <Text style={styles.todayCancelled}>Cancelled</Text>
+                    ) : null}
+                    {showWaitHint ? (
+                      <Text style={styles.todayHint}>{joinOpensAtLabel(liveStarts)}</Text>
+                    ) : null}
+                  </View>
+                  {canJoin ? (
+                    <TouchableOpacity
+                      style={styles.todayJoinBtn}
+                      onPress={() =>
+                        navigation.getParent()?.getParent()?.navigate('MySessions', {
+                          screen: 'LiveClassroom',
+                          params: { liveSessionId: s.live_session_id!, title },
+                        })
+                      }
+                    >
+                      <Text style={styles.todayJoinText}>Join live</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      style={styles.todayBrowseBtn}
+                      onPress={() =>
+                        navigation.getParent()?.getParent()?.navigate('MySessions', { screen: 'LiveSessions' })
+                      }
+                    >
+                      <Text style={styles.todayBrowseText}>Sessions</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              );
+            })
           )}
         </View>
       ) : null}
@@ -209,6 +272,35 @@ const styles = StyleSheet.create({
   batchRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 },
   assignmentMiniBtn: { backgroundColor: BRAND_BLUE, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5 },
   assignmentMiniText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  todayRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    padding: 12,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#e8e8e8',
+  },
+  todayTextCol: { flex: 1, paddingRight: 10 },
+  todayJoinBtn: {
+    backgroundColor: BRAND_RED,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  todayJoinText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  todayBrowseBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: BRAND_BLUE,
+  },
+  todayBrowseText: { color: BRAND_BLUE, fontWeight: '600', fontSize: 13 },
+  todayCancelled: { color: '#999', fontSize: 12, marginTop: 4 },
+  todayHint: { color: '#666', fontSize: 11, marginTop: 4, fontStyle: 'italic' },
   todayShortcut: {
     backgroundColor: '#eef2ff',
     borderRadius: 8,

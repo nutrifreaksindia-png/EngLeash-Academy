@@ -9,7 +9,6 @@ import {
 } from 'react-native';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
-import { useAuth } from '../context/AuthContext';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -31,11 +30,19 @@ type LessonData = {
     worksheet_title?: string;
     worksheet_description?: string;
   }[];
+  orderedContent?: {
+    orderIndex: number;
+    type: string;
+    id: number;
+    title?: string;
+    description?: string;
+    videoUrl?: string | null;
+    quizAssignmentId?: number | null;
+  }[];
 };
 
 export default function LessonDetailScreen({ route, navigation }: any) {
   const { lessonId, lessonTitle } = route.params;
-  const { user } = useAuth();
   const [data, setData] = useState<LessonData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -63,6 +70,121 @@ export default function LessonDetailScreen({ route, navigation }: any) {
         <View style={styles.centered}>
           <Text style={styles.error}>Failed to load lesson.</Text>
         </View>
+      </View>
+    );
+  }
+
+  const ordered = data.orderedContent;
+
+  if (ordered != null) {
+    if (ordered.length === 0) {
+      return (
+        <View style={styles.pageRoot}>
+          <ScreenPageTitle title={data.title || lessonTitle || 'Lesson'} />
+          <View style={styles.centered}>
+            <Text style={styles.sectionSub}>No content has been added to this lesson yet.</Text>
+          </View>
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.pageRoot}>
+        <ScreenPageTitle title={data.title || lessonTitle || 'Lesson'} />
+        <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+          {ordered.map((row) => {
+            const label = row.title || 'Item';
+            const sub = row.description || '';
+            const key = `${row.type}-${row.id}-${row.orderIndex}`;
+            if (row.type === 'video') {
+              return (
+                <TouchableOpacity
+                  key={key}
+                  style={styles.section}
+                  onPress={() =>
+                    navigation.navigate('VideoPlayer', {
+                      lessonId,
+                      videoUrl: row.videoUrl || data.videoUrl,
+                      allowDownload: data.allowVideoDownload,
+                    })
+                  }
+                >
+                  <Text style={styles.sectionTitle}>{label}</Text>
+                  <Text style={styles.sectionSub}>{sub || `Stream only${!data.allowVideoDownload ? ' (no download)' : ''}`}</Text>
+                </TouchableOpacity>
+              );
+            }
+            if (row.type === 'study_material') {
+              return (
+                <TouchableOpacity
+                  key={key}
+                  style={styles.section}
+                  onPress={() =>
+                    navigation.navigate('StudyMaterial', {
+                      materialId: row.id,
+                      materialTitle: label,
+                    })
+                  }
+                >
+                  <Text style={styles.sectionTitle}>{label}</Text>
+                  <Text style={styles.sectionSub}>{sub || 'Study material'}</Text>
+                </TouchableOpacity>
+              );
+            }
+            if (row.type === 'worksheet') {
+              return (
+                <TouchableOpacity
+                  key={key}
+                  style={styles.section}
+                  onPress={() =>
+                    navigation.navigate('WorksheetLibrary', {
+                      worksheetId: row.id,
+                      worksheetTitle: label,
+                    })
+                  }
+                >
+                  <Text style={styles.sectionTitle}>{label}</Text>
+                  <Text style={styles.sectionSub}>{sub || 'Worksheet'}</Text>
+                </TouchableOpacity>
+              );
+            }
+            if (row.type === 'quiz') {
+              return (
+                <TouchableOpacity
+                  key={key}
+                  style={styles.section}
+                  onPress={() =>
+                    navigation.navigate('Quiz', {
+                      lessonId,
+                      assignmentId: row.quizAssignmentId,
+                    })
+                  }
+                >
+                  <Text style={styles.sectionTitle}>{label}</Text>
+                  <Text style={styles.sectionSub}>{sub || 'Quiz'}</Text>
+                </TouchableOpacity>
+              );
+            }
+            if (row.type === 'assignment') {
+              return (
+                <TouchableOpacity
+                  key={key}
+                  style={styles.section}
+                  onPress={() =>
+                    navigation.navigate('AssignmentLibraryDetail', {
+                      assignmentId: row.id,
+                      title: label,
+                    })
+                  }
+                >
+                  <Text style={styles.sectionTitle}>{label}</Text>
+                  <Text style={styles.sectionSub}>{sub || 'Assignment'}</Text>
+                </TouchableOpacity>
+              );
+            }
+            return null;
+          })}
+        </ScrollView>
       </View>
     );
   }

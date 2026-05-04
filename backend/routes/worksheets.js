@@ -9,6 +9,7 @@ const {
   canViewWorksheet,
   stripCreatorFields,
   stripRows,
+  stripWorksheetAnswerKeyIfNeeded,
 } = require('../lib/libraryScope');
 
 const router = express.Router();
@@ -72,7 +73,8 @@ router.get('/', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => 
   if (req.user.role === 'Creator') {
     rows = rows.filter((m) => Number(m.is_draft) !== 1 || Number(m.created_by) === Number(req.user.id));
   }
-  res.json(stripRows(req.user, rows));
+  const stripped = stripRows(req.user, rows).map((r) => stripWorksheetAnswerKeyIfNeeded(req.user, r));
+  res.json(stripped);
 });
 
 router.post('/', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
@@ -94,10 +96,14 @@ router.post('/', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) =>
     const description = String(req.body?.description || '').trim();
     const content = parseContentJson(req.body?.contentJson || { schema_version: 1, blocks: [] });
     const draftFlag = isDraft ? 1 : 0;
+    const answerKeyStr =
+      req.body?.answerKeyJson != null
+        ? JSON.stringify(parseContentJson(req.body.answerKeyJson))
+        : null;
     const r = db.prepare(`
-      INSERT INTO worksheet_library (title, description, content_json, created_by, is_draft)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(title, description || null, JSON.stringify(content), req.user.id, draftFlag);
+      INSERT INTO worksheet_library (title, description, content_json, created_by, is_draft, answer_key_json)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(title, description || null, JSON.stringify(content), req.user.id, draftFlag, answerKeyStr);
     const created = db.prepare('SELECT * FROM worksheet_library WHERE id = ?').get(r.lastInsertRowid);
     res.status(201).json(stripCreatorFields(req.user, created));
   } catch (error) {
@@ -116,7 +122,7 @@ router.get('/:id', auth, (req, res) => {
   }
   const assets = db.prepare('SELECT * FROM worksheet_assets WHERE worksheet_id = ? ORDER BY sort_order, id').all(id);
   const assignments = db.prepare('SELECT * FROM worksheet_assignments WHERE worksheet_id = ? ORDER BY created_at DESC').all(id);
-  const base = stripCreatorFields(req.user, row);
+  const base = stripWorksheetAnswerKeyIfNeeded(req.user, stripCreatorFields(req.user, row));
   res.json({ ...base, assets, assignments });
 });
 
@@ -139,6 +145,10 @@ router.put('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) 
     if (req.body?.contentJson != null) {
       contentJson = JSON.stringify(parseContentJson(req.body.contentJson));
     }
+    let answerKeyJson = null;
+    if (req.body?.answerKeyJson != null) {
+      answerKeyJson = JSON.stringify(parseContentJson(req.body.answerKeyJson));
+    }
 
     db.prepare(`
       UPDATE worksheet_library SET
@@ -146,9 +156,10 @@ router.put('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) 
         description = COALESCE(?, description),
         content_json = COALESCE(?, content_json),
         is_draft = COALESCE(?, is_draft),
+        answer_key_json = COALESCE(?, answer_key_json),
         updated_at = datetime('now')
       WHERE id = ?
-    `).run(title, description, contentJson, nextIsDraft, id);
+    `).run(title, description, contentJson, nextIsDraft, answerKeyJson, id);
     const updated = db.prepare('SELECT * FROM worksheet_library WHERE id = ?').get(id);
     res.json(stripCreatorFields(req.user, updated));
   } catch (error) {

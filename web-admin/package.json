@@ -9,9 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "agora-rtc-sdk-ng": "^4.24.3",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-easy-crop": "^5.5.7",
+    "react-router-dom": "^7.14.2",
     "react-simple-wysiwyg": "^3.4.1"
   },
   "devDependencies": {

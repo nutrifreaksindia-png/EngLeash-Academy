@@ -4,9 +4,242 @@ const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
 const uploadMemory = require('../uploadMemory');
 const { isSpacesConfigured, uploadLessonTemplateVideoToSpaces } = require('../services/spaces');
+const {
+  canViewStudyMaterial,
+  canViewWorksheet,
+  canViewAssignment,
+} = require('../lib/libraryScope');
+const { syncCourseLessonSlots } = require('../lib/syncCourseLessonSlots');
 
 const router = express.Router();
 const baseUrl = process.env.STORAGE_URL || process.env.API_URL || '';
+
+const ITEM_TYPES = new Set(['video', 'study_material', 'worksheet', 'quiz', 'assignment']);
+
+function normalizeCompositionItems(body) {
+  const raw = body?.items;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((row, idx) => {
+      const type = String(row?.type || row?.itemType || '').trim();
+      const id = Number(row?.id ?? row?.itemId);
+      if (!ITEM_TYPES.has(type) || !Number.isFinite(id)) return null;
+      return { type, id, sortOrder: idx };
+    })
+    .filter(Boolean);
+}
+
+function validateLibraryRef(type, id) {
+  if (type === 'video') {
+    const r = db.prepare('SELECT id FROM video_library WHERE id = ?').get(id);
+    if (!r) throw new Error(`Video ${id} not found`);
+    return;
+  }
+  if (type === 'study_material') {
+    const r = db.prepare('SELECT id, is_draft FROM study_material_library WHERE id = ?').get(id);
+    if (!r) throw new Error(`Study material ${id} not found`);
+    if (Number(r.is_draft) === 1) throw new Error('Draft study materials cannot be added to a lesson');
+    return;
+  }
+  if (type === 'worksheet') {
+    const r = db.prepare('SELECT id, is_draft FROM worksheet_library WHERE id = ?').get(id);
+    if (!r) throw new Error(`Worksheet ${id} not found`);
+    if (Number(r.is_draft) === 1) throw new Error('Draft worksheets cannot be added to a lesson');
+    return;
+  }
+  if (type === 'quiz') {
+    const r = db.prepare('SELECT id FROM quiz_bank WHERE id = ?').get(id);
+    if (!r) throw new Error(`Quiz bank ${id} not found`);
+    const ver = db.prepare('SELECT id FROM quiz_versions WHERE quiz_bank_id = ? ORDER BY version_no DESC LIMIT 1').get(id);
+    if (!ver) throw new Error(`Quiz bank ${id} has no version — publish a version first`);
+    return;
+  }
+  if (type === 'assignment') {
+    const r = db.prepare('SELECT id, is_draft FROM assignment_library WHERE id = ?').get(id);
+    if (!r) throw new Error(`Assignment ${id} not found`);
+    if (Number(r.is_draft) === 1) throw new Error('Draft assignments cannot be added to a lesson');
+    return;
+  }
+}
+
+function replaceLessonLibraryComposition(lessonId, items, userId) {
+  const seen = new Set();
+  items.forEach((row) => {
+    const key = `${row.type}:${row.id}`;
+    if (seen.has(key)) throw new Error('Duplicate library item in composition');
+    seen.add(key);
+    validateLibraryRef(row.type, row.id);
+  });
+
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM lesson_library_items WHERE lesson_id = ?').run(lessonId);
+    db.prepare("DELETE FROM video_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(lessonId);
+    db.prepare("DELETE FROM study_material_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(lessonId);
+    db.prepare("DELETE FROM worksheet_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(lessonId);
+    db.prepare("DELETE FROM quiz_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(lessonId);
+
+    const insItem = db.prepare(
+      `INSERT INTO lesson_library_items (lesson_id, sort_order, item_type, item_id) VALUES (?, ?, ?, ?)`,
+    );
+    const insVid = db.prepare(
+      `INSERT INTO video_assignments (video_id, scope_type, scope_id, order_index, is_required, created_by)
+       VALUES (?, 'lesson', ?, ?, 0, ?)`,
+    );
+    const insMat = db.prepare(
+      `INSERT INTO study_material_assignments (material_id, scope_type, scope_id, order_index, is_required, created_by)
+       VALUES (?, 'lesson', ?, ?, 0, ?)`,
+    );
+    const insWs = db.prepare(
+      `INSERT INTO worksheet_assignments (worksheet_id, scope_type, scope_id, order_index, is_required, created_by)
+       VALUES (?, 'lesson', ?, ?, 0, ?)`,
+    );
+    const insQz = db.prepare(
+      `INSERT INTO quiz_assignments (quiz_version_id, scope_type, scope_id, order_index, is_required, created_by)
+       VALUES (?, 'lesson', ?, ?, 0, ?)`,
+    );
+
+    items.forEach((row, idx) => {
+      insItem.run(lessonId, idx, row.type, row.id);
+      if (row.type === 'video') insVid.run(row.id, lessonId, idx, userId);
+      else if (row.type === 'study_material') insMat.run(row.id, lessonId, idx, userId);
+      else if (row.type === 'worksheet') insWs.run(row.id, lessonId, idx, userId);
+      else if (row.type === 'quiz') {
+        const ver = db.prepare('SELECT id FROM quiz_versions WHERE quiz_bank_id = ? ORDER BY version_no DESC LIMIT 1').get(row.id);
+        insQz.run(ver.id, lessonId, idx, userId);
+      }
+    });
+  });
+  tx();
+}
+
+function resolveCompositionLabels(lessonId) {
+  const rows = db
+    .prepare(
+      `SELECT sort_order, item_type, item_id FROM lesson_library_items WHERE lesson_id = ? ORDER BY sort_order ASC`,
+    )
+    .all(lessonId);
+  const out = [];
+  for (const r of rows) {
+    let title = '';
+    let description = '';
+    if (r.item_type === 'video') {
+      const v = db.prepare('SELECT title, description FROM video_library WHERE id = ?').get(r.item_id);
+      title = v?.title || 'Video';
+      description = v?.description || '';
+    } else if (r.item_type === 'study_material') {
+      const m = db.prepare('SELECT title, description FROM study_material_library WHERE id = ?').get(r.item_id);
+      title = m?.title || 'Study material';
+      description = m?.description || '';
+    } else if (r.item_type === 'worksheet') {
+      const w = db.prepare('SELECT title, description FROM worksheet_library WHERE id = ?').get(r.item_id);
+      title = w?.title || 'Worksheet';
+      description = w?.description || '';
+    } else if (r.item_type === 'quiz') {
+      const b = db.prepare('SELECT title, description FROM quiz_bank WHERE id = ?').get(r.item_id);
+      title = b?.title || 'Quiz';
+      description = b?.description || '';
+    } else if (r.item_type === 'assignment') {
+      const a = db.prepare('SELECT title, description FROM assignment_library WHERE id = ?').get(r.item_id);
+      title = a?.title || 'Assignment';
+      description = a?.description || '';
+    }
+    out.push({
+      sortOrder: r.sort_order,
+      type: r.item_type,
+      id: r.item_id,
+      title,
+      description,
+    });
+  }
+  return out;
+}
+
+function buildOrderedContentForLearner(reqUser, lessonId) {
+  const rows = db
+    .prepare(
+      `SELECT sort_order, item_type, item_id FROM lesson_library_items WHERE lesson_id = ? ORDER BY sort_order ASC`,
+    )
+    .all(lessonId);
+  const out = [];
+  for (const r of rows) {
+    if (r.item_type === 'video') {
+      const v = db.prepare('SELECT id, title, description, video_url FROM video_library WHERE id = ?').get(r.item_id);
+      if (!v) continue;
+      const a = db
+        .prepare(
+          `SELECT a.id FROM video_assignments a WHERE a.video_id = ? AND a.scope_type = 'lesson' AND a.scope_id = ?`,
+        )
+        .get(r.item_id, lessonId);
+      const videoUrl = v.video_url
+        ? v.video_url.startsWith('http')
+          ? v.video_url
+          : `${baseUrl}${v.video_url}`
+        : null;
+      out.push({
+        orderIndex: r.sort_order,
+        type: 'video',
+        id: v.id,
+        title: v.title,
+        description: v.description || '',
+        videoUrl,
+        videoAssignmentId: a?.id ?? null,
+      });
+    } else if (r.item_type === 'study_material') {
+      const m = db.prepare('SELECT * FROM study_material_library WHERE id = ?').get(r.item_id);
+      if (!m || !canViewStudyMaterial(reqUser, m)) continue;
+      out.push({
+        orderIndex: r.sort_order,
+        type: 'study_material',
+        id: m.id,
+        title: m.title,
+        description: m.description || '',
+      });
+    } else if (r.item_type === 'worksheet') {
+      const w = db.prepare('SELECT * FROM worksheet_library WHERE id = ?').get(r.item_id);
+      if (!w || !canViewWorksheet(reqUser, w)) continue;
+      out.push({
+        orderIndex: r.sort_order,
+        type: 'worksheet',
+        id: w.id,
+        title: w.title,
+        description: w.description || '',
+      });
+    } else if (r.item_type === 'quiz') {
+      const b = db.prepare('SELECT id, title, description FROM quiz_bank WHERE id = ?').get(r.item_id);
+      if (!b) continue;
+      const ver = db
+        .prepare('SELECT id FROM quiz_versions WHERE quiz_bank_id = ? ORDER BY version_no DESC LIMIT 1')
+        .get(r.item_id);
+      if (!ver) continue;
+      const qa = db
+        .prepare(
+          `SELECT a.id FROM quiz_assignments a
+           WHERE a.quiz_version_id = ? AND a.scope_type = 'lesson' AND a.scope_id = ?`,
+        )
+        .get(ver.id, lessonId);
+      out.push({
+        orderIndex: r.sort_order,
+        type: 'quiz',
+        id: b.id,
+        title: b.title,
+        description: b.description || '',
+        quizVersionId: ver.id,
+        quizAssignmentId: qa?.id ?? null,
+      });
+    } else if (r.item_type === 'assignment') {
+      const al = db.prepare('SELECT * FROM assignment_library WHERE id = ?').get(r.item_id);
+      if (!al || !canViewAssignment(reqUser, al)) continue;
+      out.push({
+        orderIndex: r.sort_order,
+        type: 'assignment',
+        id: al.id,
+        title: al.title,
+        description: al.description || '',
+      });
+    }
+  }
+  return out;
+}
 
 function canAccessCourse(db, userId, role, courseId) {
   if (role === 'Admin') return true;
@@ -14,6 +247,23 @@ function canAccessCourse(db, userId, role, courseId) {
     || db.prepare('SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?').get(userId, courseId);
   return !!e;
 }
+
+/** Admin: one row per day 1..duration (synced with course); lesson optional until assigned. */
+router.get('/course/:courseId/schedule', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+  const courseId = Number(req.params.courseId);
+  const course = db.prepare('SELECT id FROM courses WHERE id = ?').get(courseId);
+  if (!course) return res.status(404).json({ error: 'Course not found' });
+  syncCourseLessonSlots(courseId);
+  const rows = db.prepare(`
+    SELECT cl.id AS mapId, cl.day_number AS dayNumber, cl.sequence_in_day AS sequenceInDay,
+           cl.lesson_id AS lessonId, ll.title AS lessonTitle
+    FROM course_lessons cl
+    LEFT JOIN lesson_library ll ON ll.id = cl.lesson_id
+    WHERE cl.course_id = ? AND cl.sequence_in_day = 1
+    ORDER BY cl.day_number, cl.id
+  `).all(courseId);
+  res.json(rows);
+});
 
 router.get('/course/:courseId', auth, (req, res) => {
   const { courseId } = req.params;
@@ -107,6 +357,14 @@ router.get('/:id', auth, (req, res) => {
   const videoUrl = lesson.video_url
     ? (lesson.video_url.startsWith('http') ? lesson.video_url : `${baseUrl}${lesson.video_url}`)
     : null;
+  let orderedContent = null;
+  if (fromLibrary) {
+    try {
+      orderedContent = buildOrderedContentForLearner(req.user, lesson.id);
+    } catch (_) {
+      orderedContent = [];
+    }
+  }
   res.json({
     ...lesson,
     source: fromLibrary ? 'lesson_library' : 'lessons',
@@ -119,6 +377,7 @@ router.get('/:id', auth, (req, res) => {
     videoAssignments,
     studyMaterialAssignments,
     libraryWorksheetAssignments,
+    orderedContent,
   });
 });
 
@@ -143,9 +402,10 @@ router.get('/library', auth, requireRole('Admin', 'Trainer'), (req, res) => {
 
 router.get('/admin/all', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
   const library = db.prepare(`
-    SELECT id, title, description, video_url, study_material_html, worksheet_html, worksheet_answer_key_html, assignment_title, created_at
-    FROM lesson_library
-    ORDER BY id DESC
+    SELECT ll.*,
+           (SELECT COUNT(*) FROM lesson_library_items li WHERE li.lesson_id = ll.id) AS item_count
+    FROM lesson_library ll
+    ORDER BY ll.id DESC
   `).all().map((r) => ({ ...r, source: 'lesson_library' }));
 
   const legacy = db.prepare(`
@@ -196,6 +456,32 @@ router.post('/library', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   );
   const row = db.prepare('SELECT * FROM lesson_library WHERE id = last_insert_rowid()').get();
   res.status(201).json(row);
+});
+
+router.get('/library/:id/composition', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+  const id = Number(req.params.id);
+  const row = db.prepare('SELECT id FROM lesson_library WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Lesson not found' });
+  try {
+    const items = resolveCompositionLabels(id);
+    res.json({ lessonId: id, items });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Failed to load composition' });
+  }
+});
+
+router.put('/library/:id/composition', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+  const id = Number(req.params.id);
+  const existing = db.prepare('SELECT id FROM lesson_library WHERE id = ?').get(id);
+  if (!existing) return res.status(404).json({ error: 'Lesson not found' });
+  try {
+    const items = normalizeCompositionItems(req.body);
+    replaceLessonLibraryComposition(id, items, req.user.id);
+    const labels = resolveCompositionLabels(id);
+    res.json({ lessonId: id, items: labels });
+  } catch (e) {
+    res.status(400).json({ error: e.message || 'Invalid composition' });
+  }
 });
 
 router.put('/library/:id', auth, requireRole('Admin', 'Trainer'), (req, res) => {
@@ -265,25 +551,43 @@ router.post('/library/:id/video', auth, requireRole('Admin', 'Trainer'), uploadM
 
 router.delete('/library/:id', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const id = Number(req.params.id);
+  db.prepare("DELETE FROM video_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(id);
+  db.prepare("DELETE FROM study_material_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(id);
+  db.prepare("DELETE FROM worksheet_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(id);
+  db.prepare("DELETE FROM quiz_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(id);
   db.prepare('DELETE FROM lesson_library WHERE id = ?').run(id);
   res.status(204).end();
 });
 
-router.post('/course/:courseId/map', auth, requireRole('Admin', 'Trainer'), (req, res) => {
-  const courseId = Number(req.params.courseId);
-  const { lessonId, dayNumber, sequenceInDay } = req.body;
-  if (!lessonId || !dayNumber) {
-    return res.status(400).json({ error: 'lessonId and dayNumber are required' });
+/** Assign or clear the lesson template for a fixed day slot (day count comes from course duration). */
+router.put('/schedule/:mapId', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+  const mapId = Number(req.params.mapId);
+  const row = db.prepare('SELECT * FROM course_lessons WHERE id = ?').get(mapId);
+  if (!row) return res.status(404).json({ error: 'Schedule entry not found' });
+  if (Number(row.sequence_in_day) !== 1) {
+    return res.status(400).json({ error: 'Invalid schedule row' });
   }
-  const course = db.prepare('SELECT id FROM courses WHERE id = ?').get(courseId);
-  if (!course) return res.status(404).json({ error: 'Course not found' });
-  const lesson = db.prepare('SELECT id FROM lesson_library WHERE id = ?').get(Number(lessonId));
+  const { lessonId } = req.body;
+  if (!Object.prototype.hasOwnProperty.call(req.body, 'lessonId')) {
+    return res.status(400).json({ error: 'lessonId is required (null clears the assignment)' });
+  }
+  if (lessonId === null || lessonId === '') {
+    db.prepare('UPDATE course_lessons SET lesson_id = NULL WHERE id = ?').run(mapId);
+    return res.json({ ok: true });
+  }
+  const lid = Number(lessonId);
+  if (!Number.isFinite(lid)) return res.status(400).json({ error: 'Invalid lessonId' });
+  const lesson = db.prepare('SELECT id FROM lesson_library WHERE id = ?').get(lid);
   if (!lesson) return res.status(404).json({ error: 'Lesson not found' });
-  db.prepare(`
-    INSERT INTO course_lessons (course_id, lesson_id, day_number, sequence_in_day)
-    VALUES (?, ?, ?, ?)
-  `).run(courseId, Number(lessonId), Number(dayNumber), Number(sequenceInDay || 1));
-  res.status(201).json({ ok: true });
+  try {
+    db.prepare('UPDATE course_lessons SET lesson_id = ? WHERE id = ?').run(lid, mapId);
+  } catch (e) {
+    if (e && e.code && String(e.code).includes('CONSTRAINT')) {
+      return res.status(409).json({ error: 'Could not assign lesson (constraint conflict)' });
+    }
+    throw e;
+  }
+  res.json({ ok: true });
 });
 
 router.put('/:id', auth, requireRole('Admin'), (req, res) => {

@@ -17,6 +17,11 @@ function normalizedEditorSnapshot(title, description, doc, isDraft) {
     c: doc,
   });
 }
+
+/** Autosave dedupe for answer-key-only edits (same block schema as worksheet body). */
+function normalizedAnswerKeySnapshot(doc) {
+  return JSON.stringify({ ak: doc });
+}
 const STANDARD_COLORS = ['#111827', '#334155', '#1e3a8a', '#0f766e', '#166534', '#b45309', '#b91c1c', '#7c3aed'];
 const HEADING_COLOR = '#1e3a8a';
 const SUBHEADING_ONE_COLOR = '#0f766e';
@@ -69,6 +74,10 @@ function safeParse(input) {
   } catch {
     return emptyDoc;
   }
+}
+
+function worksheetHasAnswerKeyContent(row) {
+  return (safeParse(row?.answer_key_json).blocks || []).length > 0;
 }
 
 function sanitizePastedHtmlString(html) {
@@ -1475,6 +1484,8 @@ export default function WorksheetsPage({
   const [pasteNotice, setPasteNotice] = useState('');
   const [dragBlockId, setDragBlockId] = useState(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  /** 'worksheet' = main library body; 'answerKey' = answer key JSON (same block editor). */
+  const [editorMode, setEditorMode] = useState('worksheet');
   const [previewPopup, setPreviewPopup] = useState(null); // null | 'tablet' | 'desktop'
 
   const MAX_DOC_UNDO = 100;
@@ -1549,7 +1560,7 @@ export default function WorksheetsPage({
     editorIsDraft: false,
     editingId: null,
   });
-  autosaveFieldsRef.current = { title, description, doc, editorIsDraft, editingId };
+  autosaveFieldsRef.current = { title, description, doc, editorIsDraft, editingId, editorMode };
 
   const filtered = useMemo(() => {
     const needle = q.toLowerCase().trim();
@@ -1840,6 +1851,7 @@ export default function WorksheetsPage({
   function startEdit(item) {
     const parsed = safeParse(item.content_json);
     undoStackRef.current = [];
+    setEditorMode('worksheet');
     setEditingId(item.id);
     setTitle(item.title || '');
     setDescription(item.description || '');
@@ -1859,6 +1871,29 @@ export default function WorksheetsPage({
       parsed,
       Number(item.is_draft) === 1,
     );
+    requestAnimationFrame(() => {
+      if (pasteAreaRef.current) pasteAreaRef.current.innerHTML = '';
+    });
+  }
+
+  function startAnswerKeyEdit(item) {
+    const parsed = safeParse(item.answer_key_json);
+    undoStackRef.current = [];
+    setEditorMode('answerKey');
+    setEditingId(item.id);
+    setTitle(item.title || '');
+    setDescription(item.description || '');
+    setDoc(parsed);
+    setPasteInput('');
+    setPasteNotice('');
+    setEditorIsDraft(Number(item.is_draft) === 1);
+    setDraftNotice('');
+    setPreviewPopup(null);
+    setEditorOpen(true);
+    setOpenBlockId('');
+    setAutosaveStatus('idle');
+    setCreatingDraft(false);
+    lastPersistedSnapshotRef.current = normalizedAnswerKeySnapshot(parsed);
     requestAnimationFrame(() => {
       if (pasteAreaRef.current) pasteAreaRef.current.innerHTML = '';
     });
@@ -1886,12 +1921,14 @@ export default function WorksheetsPage({
     setEditorIsDraft(false);
     setDraftNotice('');
     setPreviewPopup(null);
+    setEditorMode('worksheet');
   }
 
   async function openNewWorksheetCreator() {
     newWorksheetSessionRef.current += 1;
     const session = newWorksheetSessionRef.current;
     undoStackRef.current = [];
+    setEditorMode('worksheet');
     setEditingId(null);
     setTitle('');
     setDescription('');
@@ -1933,13 +1970,14 @@ export default function WorksheetsPage({
   }
 
   useEffect(() => {
-    if (!editorOpen || !editingId || creatingDraft) return undefined;
+    if (!editorOpen || !editingId || creatingDraft || editorMode !== 'worksheet') return undefined;
     const cur = autosaveFieldsRef.current;
     const snap = normalizedEditorSnapshot(cur.title, cur.description, cur.doc, cur.editorIsDraft);
     if (snap === lastPersistedSnapshotRef.current) return undefined;
 
     const tid = window.setTimeout(async () => {
       const latest = autosaveFieldsRef.current;
+      if (latest.editorMode !== 'worksheet') return;
       const snapNow = normalizedEditorSnapshot(latest.title, latest.description, latest.doc, latest.editorIsDraft);
       if (snapNow === lastPersistedSnapshotRef.current) return;
       setAutosaveStatus('saving');
@@ -1963,7 +2001,36 @@ export default function WorksheetsPage({
     }, AUTOSAVE_DEBOUNCE_MS);
 
     return () => window.clearTimeout(tid);
-  }, [editorOpen, editingId, creatingDraft, title, description, doc, editorIsDraft]);
+  }, [editorOpen, editingId, creatingDraft, title, description, doc, editorIsDraft, editorMode]);
+
+  useEffect(() => {
+    if (!editorOpen || !editingId || creatingDraft || editorMode !== 'answerKey') return undefined;
+    const cur = autosaveFieldsRef.current;
+    const snap = normalizedAnswerKeySnapshot(cur.doc);
+    if (snap === lastPersistedSnapshotRef.current) return undefined;
+
+    const tid = window.setTimeout(async () => {
+      const latest = autosaveFieldsRef.current;
+      if (latest.editorMode !== 'answerKey') return;
+      const snapNow = normalizedAnswerKeySnapshot(latest.doc);
+      if (snapNow === lastPersistedSnapshotRef.current) return;
+      setAutosaveStatus('saving');
+      try {
+        await onUpdateRef.current(latest.editingId, { answerKeyJson: latest.doc });
+        lastPersistedSnapshotRef.current = snapNow;
+        setAutosaveStatus('saved');
+        if (autosaveClearSavedTimerRef.current) window.clearTimeout(autosaveClearSavedTimerRef.current);
+        autosaveClearSavedTimerRef.current = window.setTimeout(() => {
+          setAutosaveStatus((s) => (s === 'saved' ? 'idle' : s));
+          autosaveClearSavedTimerRef.current = null;
+        }, 2500);
+      } catch {
+        setAutosaveStatus('error');
+      }
+    }, AUTOSAVE_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(tid);
+  }, [editorOpen, editingId, creatingDraft, doc, editorMode]);
 
   useEffect(
     () => () => {
@@ -1999,6 +2066,7 @@ export default function WorksheetsPage({
 
   async function submit(e) {
     e.preventDefault();
+    if (editorMode === 'answerKey') return;
     const t = String(title || '').trim();
     if (!t) {
       window.alert('Enter a title before publishing.');
@@ -2015,6 +2083,24 @@ export default function WorksheetsPage({
     if (creatingDraft || !editingId) {
       setDraftNotice(creatingDraft ? 'Draft is still initializing…' : 'Nothing to save.');
       window.setTimeout(() => setDraftNotice(''), 4000);
+      return;
+    }
+    if (editorMode === 'answerKey') {
+      setAutosaveStatus('saving');
+      try {
+        const latest = autosaveFieldsRef.current;
+        await onUpdateRef.current(latest.editingId, { answerKeyJson: latest.doc });
+        setAutosaveStatus('idle');
+        if (autosaveClearSavedTimerRef.current) {
+          window.clearTimeout(autosaveClearSavedTimerRef.current);
+          autosaveClearSavedTimerRef.current = null;
+        }
+        resetEditor();
+      } catch (err) {
+        setDraftNotice(err?.message || 'Could not save answer key.');
+        setAutosaveStatus('error');
+        window.setTimeout(() => setDraftNotice(''), 6000);
+      }
       return;
     }
     setAutosaveStatus('saving');
@@ -2109,6 +2195,13 @@ export default function WorksheetsPage({
                         </button>
                         {libraryCanMutate(m) ? (
                           <>
+                            <button
+                              type="button"
+                              className="secondaryBtn"
+                              onClick={() => startAnswerKeyEdit(m)}
+                            >
+                              {worksheetHasAnswerKeyContent(m) ? 'Edit answer key' : 'Answer key'}
+                            </button>
                             <button type="button" className="secondaryBtn" onClick={() => startEdit(m)}>
                               Edit
                             </button>
@@ -2163,6 +2256,16 @@ export default function WorksheetsPage({
                     type="button"
                     className="secondaryBtn"
                     onClick={() => {
+                      startAnswerKeyEdit(viewingWorksheet);
+                      setViewingWorksheet(null);
+                    }}
+                  >
+                    {worksheetHasAnswerKeyContent(viewingWorksheet) ? 'Edit answer key' : 'Answer key'}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondaryBtn"
+                    onClick={() => {
                       startEdit(viewingWorksheet);
                       setViewingWorksheet(null);
                     }}
@@ -2194,8 +2297,25 @@ export default function WorksheetsPage({
           <form className="studyFullscreenShell" onSubmit={submit}>
             <div className="studyFullscreenTopbar studyFullscreenTopbar--editorTools">
               <div className="studyTopInputs">
-                <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Worksheet title (required to publish)" />
-                <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description" />
+                <input
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="Worksheet title (required to publish)"
+                  readOnly={editorMode === 'answerKey'}
+                  style={editorMode === 'answerKey' ? { opacity: 0.85 } : undefined}
+                />
+                <input
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Description"
+                  readOnly={editorMode === 'answerKey'}
+                  style={editorMode === 'answerKey' ? { opacity: 0.85 } : undefined}
+                />
+                {editorMode === 'answerKey' ? (
+                  <span className="studyDraftBadge studyDraftBadgeLarge" title="Answer key uses the same blocks as the worksheet">
+                    Answer key
+                  </span>
+                ) : null}
                 {editorIsDraft ? <span className="studyDraftBadge studyDraftBadgeLarge">Draft</span> : null}
                 {creatingDraft ? (
                   <span className="studyAutosaveHint studyAutosaveHintBusy">Creating draft…</span>
@@ -2249,11 +2369,13 @@ export default function WorksheetsPage({
                   disabled={creatingDraft || !editingId}
                   onClick={() => saveDraft()}
                 >
-                  Save draft &amp; close
+                  {editorMode === 'answerKey' ? 'Save & close' : <>Save draft &amp; close</>}
                 </button>
-                <button type="submit" className="uploadPrimaryBtn" disabled={creatingDraft || !editingId}>
-                  Publish
-                </button>
+                {editorMode === 'worksheet' ? (
+                  <button type="submit" className="uploadPrimaryBtn" disabled={creatingDraft || !editingId}>
+                    Publish
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="dangerBtn"

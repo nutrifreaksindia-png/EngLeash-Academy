@@ -104,8 +104,10 @@ export default function LiveScheduleScreen() {
     load();
   }, [load]);
 
-  const canManageSession = (row: LiveSessionRow) =>
-    user?.role === 'Admin' || (user?.role === 'Trainer' && row.trainer_id === user?.id);
+  const canManageSession = (_row: LiveSessionRow) =>
+    user?.role === 'Admin' || user?.role === 'Trainer';
+
+  const showLegacyComposer = user?.role === 'Admin';
 
   const createBatch = async () => {
     if (!batchName.trim()) {
@@ -236,6 +238,12 @@ export default function LiveScheduleScreen() {
         contentContainerStyle={styles.content}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
       >
+      {user?.role === 'Trainer' ? (
+        <Text style={styles.banner}>
+          Course batches are managed in Web Admin. Live rooms for each class day are created automatically when a batch is
+          started. Below you can start/end sessions and view logs; only admins can create ad-hoc batches here.
+        </Text>
+      ) : null}
       <Text style={styles.heading}>Batches</Text>
       {batches.length === 0 ? (
         <Text style={styles.muted}>No batches yet.</Text>
@@ -250,76 +258,80 @@ export default function LiveScheduleScreen() {
         ))
       )}
 
-      <Text style={styles.heading}>Create batch</Text>
-      <View style={styles.form}>
-        <TextInput style={styles.input} placeholder="Batch name" value={batchName} onChangeText={setBatchName} />
-        <View style={styles.row}>
-          <TouchableOpacity
-            style={[styles.chip, batchType === 'group' && styles.chipOn]}
-            onPress={() => setBatchType('group')}
-          >
-            <Text style={[styles.chipText, batchType === 'group' && styles.chipTextOn]}>Group</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.chip, batchType === 'one_to_one' && styles.chipOn]}
-            onPress={() => setBatchType('one_to_one')}
-          >
-            <Text style={[styles.chipText, batchType === 'one_to_one' && styles.chipTextOn]}>One-to-one</Text>
-          </TouchableOpacity>
-        </View>
-        <TextInput
-          style={styles.input}
-          placeholder="Student user IDs (comma-separated, optional)"
-          value={batchStudentIds}
-          onChangeText={setBatchStudentIds}
-          keyboardType="numbers-and-punctuation"
-        />
-        <TouchableOpacity style={styles.primaryBtn} onPress={createBatch}>
-          <Text style={styles.primaryBtnText}>Create batch</Text>
-        </TouchableOpacity>
-      </View>
+      {showLegacyComposer ? (
+        <>
+          <Text style={styles.heading}>Create batch (legacy / testing)</Text>
+          <View style={styles.form}>
+            <TextInput style={styles.input} placeholder="Batch name" value={batchName} onChangeText={setBatchName} />
+            <View style={styles.row}>
+              <TouchableOpacity
+                style={[styles.chip, batchType === 'group' && styles.chipOn]}
+                onPress={() => setBatchType('group')}
+              >
+                <Text style={[styles.chipText, batchType === 'group' && styles.chipTextOn]}>Group</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.chip, batchType === 'one_to_one' && styles.chipOn]}
+                onPress={() => setBatchType('one_to_one')}
+              >
+                <Text style={[styles.chipText, batchType === 'one_to_one' && styles.chipTextOn]}>One-to-one</Text>
+              </TouchableOpacity>
+            </View>
+            <TextInput
+              style={styles.input}
+              placeholder="Student user IDs (comma-separated, optional)"
+              value={batchStudentIds}
+              onChangeText={setBatchStudentIds}
+              keyboardType="numbers-and-punctuation"
+            />
+            <TouchableOpacity style={styles.primaryBtn} onPress={createBatch}>
+              <Text style={styles.primaryBtnText}>Create batch</Text>
+            </TouchableOpacity>
+          </View>
 
-      <Text style={styles.heading}>Add student to batch</Text>
-      <View style={styles.form}>
-        <TextInput style={styles.input} placeholder="Batch ID" value={memberBatchId} onChangeText={setMemberBatchId} keyboardType="number-pad" />
-        <TextInput style={styles.input} placeholder="Student user ID" value={memberStudentId} onChangeText={setMemberStudentId} keyboardType="number-pad" />
-        <TouchableOpacity style={styles.primaryBtn} onPress={addMember}>
-          <Text style={styles.primaryBtnText}>Add member</Text>
-        </TouchableOpacity>
-      </View>
+          <Text style={styles.heading}>Add student to batch</Text>
+          <View style={styles.form}>
+            <TextInput style={styles.input} placeholder="Batch ID" value={memberBatchId} onChangeText={setMemberBatchId} keyboardType="number-pad" />
+            <TextInput style={styles.input} placeholder="Student user ID" value={memberStudentId} onChangeText={setMemberStudentId} keyboardType="number-pad" />
+            <TouchableOpacity style={styles.primaryBtn} onPress={addMember}>
+              <Text style={styles.primaryBtnText}>Add member</Text>
+            </TouchableOpacity>
+          </View>
 
-      <Text style={styles.heading}>Students (reference)</Text>
-      <Text style={styles.muted}>First few accounts — use ID when adding members.</Text>
-      {students.slice(0, 20).map((item) => (
-        <Text key={item.id} style={styles.listLine}>
-          #{item.id} · {item.name || item.email}
-        </Text>
-      ))}
+          <Text style={styles.heading}>Students (reference)</Text>
+          <Text style={styles.muted}>First few accounts — use ID when adding members.</Text>
+          {students.slice(0, 20).map((item) => (
+            <Text key={item.id} style={styles.listLine}>
+              #{item.id} · {item.name || item.email}
+            </Text>
+          ))}
 
-      <Text style={styles.heading}>Schedule live session</Text>
-      <View style={styles.form}>
-        <TextInput style={styles.input} placeholder="Batch ID" value={sessBatchId} onChangeText={setSessBatchId} keyboardType="number-pad" />
-        <TextInput style={styles.input} placeholder="Session title" value={sessTitle} onChangeText={setSessTitle} />
-        <View style={styles.row}>
-          <TextInput
-            style={[styles.input, styles.inputHalf]}
-            placeholder="Starts in (min)"
-            value={sessStartMin}
-            onChangeText={setSessStartMin}
-            keyboardType="number-pad"
-          />
-          <TextInput
-            style={[styles.input, styles.inputHalf]}
-            placeholder="Duration (min)"
-            value={sessDurationMin}
-            onChangeText={setSessDurationMin}
-            keyboardType="number-pad"
-          />
-        </View>
-        <TouchableOpacity style={styles.primaryBtn} onPress={createSession}>
-          <Text style={styles.primaryBtnText}>Create session</Text>
-        </TouchableOpacity>
-      </View>
+          <Text style={styles.heading}>Schedule ad-hoc live session</Text>
+          <View style={styles.form}>
+            <TextInput style={styles.input} placeholder="Batch ID" value={sessBatchId} onChangeText={setSessBatchId} keyboardType="number-pad" />
+            <TextInput style={styles.input} placeholder="Session title" value={sessTitle} onChangeText={setSessTitle} />
+            <View style={styles.row}>
+              <TextInput
+                style={[styles.input, styles.inputHalf]}
+                placeholder="Starts in (min)"
+                value={sessStartMin}
+                onChangeText={setSessStartMin}
+                keyboardType="number-pad"
+              />
+              <TextInput
+                style={[styles.input, styles.inputHalf]}
+                placeholder="Duration (min)"
+                value={sessDurationMin}
+                onChangeText={setSessDurationMin}
+                keyboardType="number-pad"
+              />
+            </View>
+            <TouchableOpacity style={styles.primaryBtn} onPress={createSession}>
+              <Text style={styles.primaryBtnText}>Create session</Text>
+            </TouchableOpacity>
+          </View>
+        </>
+      ) : null}
 
       <Text style={styles.heading}>Your sessions</Text>
       {sessions.length === 0 ? (
@@ -376,6 +388,15 @@ const styles = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: '#f5f5f5' },
   content: { padding: 16, paddingBottom: 40 },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  banner: {
+    backgroundColor: '#e8eaf6',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 8,
+    color: '#333',
+    fontSize: 14,
+    lineHeight: 20,
+  },
   heading: { fontSize: 18, fontWeight: '700', color: BRAND_BLUE, marginTop: 20, marginBottom: 8 },
   muted: { color: '#666', marginBottom: 8 },
   card: {

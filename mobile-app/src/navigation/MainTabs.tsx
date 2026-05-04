@@ -18,6 +18,7 @@ import QuizScreen from '../screens/QuizScreen';
 import WorksheetScreen from '../screens/WorksheetScreen';
 import WorksheetLibraryScreen from '../screens/WorksheetLibraryScreen';
 import StudyMaterialScreen from '../screens/StudyMaterialScreen';
+import AssignmentLibraryDetailScreen from '../screens/AssignmentLibraryDetailScreen';
 import AdminCourseManagerScreen from '../screens/AdminCourseManagerScreen';
 import LiveSessionsScreen from '../screens/LiveSessionsScreen';
 import LiveClassroomScreen from '../screens/LiveClassroomScreen';
@@ -72,6 +73,11 @@ function CoursesStackNavigator() {
       <CoursesStack.Screen name="Worksheet" component={WorksheetScreen} options={{ title: 'Worksheet (PDF)' }} />
       <CoursesStack.Screen name="WorksheetLibrary" component={WorksheetLibraryScreen} options={{ title: 'Worksheet' }} />
       <CoursesStack.Screen name="StudyMaterial" component={StudyMaterialScreen} options={{ title: 'Study Material' }} />
+      <CoursesStack.Screen
+        name="AssignmentLibraryDetail"
+        component={AssignmentLibraryDetailScreen}
+        options={{ title: 'Assignment' }}
+      />
       <CoursesStack.Screen name="AdminCourseManager" component={AdminCourseManagerScreen} options={{ title: 'Manage courses' }} />
     </CoursesStack.Navigator>
   );

@@ -2,6 +2,7 @@ const express = require('express');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
 const upload = require('../upload');
+const { syncCourseLessonSlots } = require('../lib/syncCourseLessonSlots');
 
 const router = express.Router();
 
@@ -128,6 +129,7 @@ router.post('/', auth, requireRole('Admin'), (req, res) => {
     enrollmentType || 'free'
   );
   const row = db.prepare('SELECT * FROM courses WHERE id = last_insert_rowid()').get();
+  syncCourseLessonSlots(row.id);
   res.status(201).json(row);
 });
 
@@ -175,6 +177,7 @@ router.put('/:id', auth, requireRole('Admin'), (req, res) => {
   );
   const c = db.prepare('SELECT * FROM courses WHERE id = ?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Course not found' });
+  syncCourseLessonSlots(Number(req.params.id));
   res.json(c);
 });
 

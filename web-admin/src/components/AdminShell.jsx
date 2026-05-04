@@ -2,16 +2,18 @@ import React from 'react';
 
 const NAV_SECTIONS = [
   {
-    collapseKey: 'usersBatches',
-    title: 'Users & Batches',
+    collapseKey: 'studentsBatches',
+    title: 'Students & Batches',
     items: [
       { id: 'students', label: 'Students' },
-      { id: 'trainers', label: 'Trainers' },
-      { id: 'admins', label: 'Admins' },
-      { id: 'creators', label: 'Creators' },
-      { id: 'approvals', label: 'Pending Approvals' },
       { id: 'batches', label: 'Batches' },
+      { id: 'approvals', label: 'Pending Approvals' },
     ],
+  },
+  {
+    collapseKey: 'otherUsers',
+    title: 'Other Users',
+    items: [{ id: 'other-users', label: 'Directory' }],
   },
   {
     collapseKey: 'lessonsCourses',
@@ -35,18 +37,28 @@ const NAV_SECTIONS = [
 ];
 
 export default function AdminShell({ currentPage, onNavigate, onRefresh, onLogout, children, creatorMode = false }) {
-  const navSections = creatorMode ? NAV_SECTIONS.filter((s) => s.collapseKey === 'library') : NAV_SECTIONS;
+  const navSections = creatorMode
+    ? NAV_SECTIONS.filter((s) => s.collapseKey === 'library' || s.collapseKey === 'lessonsCourses')
+    : NAV_SECTIONS;
   const [collapsed, setCollapsed] = React.useState({
-    usersBatches: true,
+    studentsBatches: true,
+    otherUsers: true,
     lessonsCourses: true,
-    library: creatorMode ? false : true,
+    library: true,
   });
+
+  React.useEffect(() => {
+    if (creatorMode) {
+      setCollapsed({ studentsBatches: true, otherUsers: true, lessonsCourses: false, library: false });
+    }
+  }, [creatorMode]);
 
   function toggle(sectionKey) {
     setCollapsed((prev) => {
       const nextOpen = !prev[sectionKey];
       return {
-        usersBatches: sectionKey === 'usersBatches' ? nextOpen : true,
+        studentsBatches: sectionKey === 'studentsBatches' ? nextOpen : true,
+        otherUsers: sectionKey === 'otherUsers' ? nextOpen : true,
         lessonsCourses: sectionKey === 'lessonsCourses' ? nextOpen : true,
         library: sectionKey === 'library' ? nextOpen : true,
       };

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import SectionCard from '../components/SectionCard';
 import Modal from '../components/Modal';
 import ActionMenu from '../components/ActionMenu';
@@ -22,19 +22,59 @@ const emptyEdit = {
   occupation: '',
 };
 
+/** @typedef {'students' | 'other-users'} UsersPageVariant */
+
 export default function UsersPage({
   onCreateUser,
   onUpdateUser,
   onGetUserDetails,
   users,
+  variant = 'other-users',
   title = 'Users',
   subtitle = 'Recently created users',
-  createTitle = 'Create User',
-  createSubtitle = 'Create Admin, Trainer, Student, Lab, or Creator users',
+  createTitle,
+  createSubtitle,
   defaultRole = 'Trainer',
 }) {
+  const resolvedCreateTitle =
+    createTitle ?? (variant === 'students' ? 'Add student' : 'Add user');
+  const resolvedCreateSubtitle =
+    createSubtitle ??
+    (variant === 'students'
+      ? 'Creates a Student login (role is fixed).'
+      : 'Pick role: Trainer, Admin, Creator, or Lab (TV).');
   const [open, setOpen] = useState(false);
   const [editForm, setEditForm] = useState(emptyEdit);
+  const [listQuery, setListQuery] = useState('');
+  const createFormRef = useRef(null);
+
+  const listRows = useMemo(() => {
+    const q = listQuery.trim().toLowerCase();
+    const base = [...(users || [])].sort((a, b) => Number(b.id) - Number(a.id));
+    if (!q) return base;
+    return base.filter(
+      (u) =>
+        String(u.name || '')
+          .toLowerCase()
+          .includes(q) ||
+        String(u.email || '')
+          .toLowerCase()
+          .includes(q) ||
+        String(u.role || '')
+          .toLowerCase()
+          .includes(q) ||
+        String(u.status || '')
+          .toLowerCase()
+          .includes(q)
+    );
+  }, [users, listQuery]);
+
+  async function handleCreateSubmit(e) {
+    e.preventDefault();
+    const formEl = createFormRef.current;
+    if (!formEl || !onCreateUser) return;
+    await onCreateUser(formEl);
+  }
 
   async function openEdit(u) {
     const details = onGetUserDetails ? await onGetUserDetails(u.id) : u;
@@ -68,39 +108,71 @@ export default function UsersPage({
 
   return (
     <div className="stack">
-      <SectionCard title={createTitle} subtitle={createSubtitle}>
-        <form onSubmit={onCreateUser} className="formGrid">
-          <input name="name" placeholder="Name" required />
-          <input name="email" placeholder="Email" required />
-          <input name="password" placeholder="Password" required />
-          <select name="role" defaultValue={defaultRole}>
-            <option>Admin</option>
-            <option>Trainer</option>
-            <option>Student</option>
-            <option>Lab</option>
-            <option>Creator</option>
-          </select>
+      <SectionCard title={resolvedCreateTitle} subtitle={resolvedCreateSubtitle}>
+        <form ref={createFormRef} onSubmit={handleCreateSubmit} className="formGrid" autoComplete="off">
+          <input name="name" placeholder="Name" required autoComplete="name" />
+          <input name="email" placeholder="Email" type="email" required autoComplete="off" />
+          <input name="password" placeholder="Password" type="password" required autoComplete="new-password" />
+          {variant === 'students' ? (
+            <input type="hidden" name="role" value="Student" />
+          ) : (
+            <select name="role" defaultValue={defaultRole} aria-label="Account type">
+              <option value="Trainer">Trainer</option>
+              <option value="Admin">Admin</option>
+              <option value="Creator">Creator</option>
+              <option value="Lab">Lab (TV app)</option>
+            </select>
+          )}
           <input name="mobileNumber" placeholder="Mobile number" />
           <input name="profilePhotoUrl" placeholder="Profile photo URL" />
-          <button type="submit">Create User</button>
+          <button type="submit">{variant === 'students' ? 'Create student' : 'Create user'}</button>
         </form>
       </SectionCard>
-      <SectionCard title={title} subtitle={subtitle}>
+      <SectionCard
+        title={title}
+        subtitle={
+          listQuery.trim()
+            ? `${listRows.length} match(es) · ${subtitle}`
+            : `${(users || []).length} account(s) · Newest first · ${subtitle}`
+        }
+      >
+        <label className="usersListSearch">
+          <span className="muted">Filter list</span>
+          <input
+            type="search"
+            value={listQuery}
+            onChange={(e) => setListQuery(e.target.value)}
+            placeholder={variant === 'students' ? 'Name, email, or status' : 'Name, email, role, or status'}
+            className="usersListSearchInput"
+          />
+        </label>
         <div className="tableWrap">
           <table>
             <thead>
-              <tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Actions</th></tr>
+              <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Email</th>
+                {variant === 'other-users' ? <th>Role</th> : null}
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
             </thead>
             <tbody>
-              {users.slice(0, 50).map((u) => (
+              {listRows.map((u) => (
                 <tr key={u.id}>
+                  <td className="muted">{u.id}</td>
                   <td>{u.name}</td>
                   <td>{u.email}</td>
-                  <td>{u.role}</td>
-                  <td><span className={`badge ${u.status || 'approved'}`}>{u.status || 'approved'}</span></td>
+                  {variant === 'other-users' ? <td>{u.role}</td> : null}
+                  <td>
+                    <span className={`badge ${u.status || 'approved'}`}>{u.status || 'approved'}</span>
+                  </td>
                   <td>
                     <ActionMenu>
-                      <button className="secondaryBtn" onClick={() => openEdit(u)}>Edit profile</button>
+                      <button className="secondaryBtn" onClick={() => openEdit(u)}>
+                        Edit profile
+                      </button>
                     </ActionMenu>
                   </td>
                 </tr>
@@ -108,6 +180,11 @@ export default function UsersPage({
             </tbody>
           </table>
         </div>
+        {listRows.length === 0 ? (
+          <p className="muted">
+            {(users || []).length === 0 ? 'No accounts in this view yet.' : 'No users match this filter.'}
+          </p>
+        ) : null}
       </SectionCard>
       <Modal open={open} title="Edit User Profile" onClose={() => setOpen(false)} variant="drawer">
         <form onSubmit={submitEdit} className="formGrid">

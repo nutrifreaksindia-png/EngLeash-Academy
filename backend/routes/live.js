@@ -13,8 +13,19 @@ try {
 
 const router = express.Router();
 
-function isTrainerForBatch(userId, batchId) {
-  const row = db.prepare('SELECT 1 FROM batches WHERE id = ? AND trainer_id = ?').get(batchId, userId);
+/** Primary trainer or co-trainer (batch_trainers). */
+function isStaffForBatch(userId, batchId) {
+  const row = db
+    .prepare(
+      `
+    SELECT 1 FROM batches b
+    WHERE b.id = ?
+      AND (b.trainer_id = ? OR EXISTS (
+        SELECT 1 FROM batch_trainers bt WHERE bt.batch_id = b.id AND bt.trainer_id = ?
+      ))
+  `
+    )
+    .get(batchId, userId, userId);
   return !!row;
 }
 
@@ -26,8 +37,34 @@ function isStudentInBatch(userId, batchId) {
 function isUserAllowedForSession(session, user) {
   if (!session) return false;
   if (user.role === 'Admin') return true;
-  if (session.trainer_id === user.id) return true;
-  return isStudentInBatch(user.id, session.batch_id);
+  if (user.role === 'Trainer') return isStaffForBatch(user.id, session.batch_id);
+  if (user.role === 'Student' || user.role === 'Lab') return isStudentInBatch(user.id, session.batch_id);
+  return false;
+}
+
+function assertTrainerStaffCanManageLive(req, session) {
+  if (req.user.role === 'Admin') return;
+  if (req.user.role === 'Trainer' && isStaffForBatch(req.user.id, session.batch_id)) return;
+  const e = new Error('Forbidden');
+  e.statusCode = 403;
+  throw e;
+}
+
+/** Scheduled: only within [starts_at − early, ends_at]. Live: allowed until ended. */
+function joinTimeAllows(session) {
+  if (session.status === 'live') return { ok: true };
+  if (session.status === 'ended' || session.status === 'cancelled') {
+    return { ok: false, code: 'bad_status' };
+  }
+  const now = Date.now();
+  const start = new Date(session.starts_at).getTime();
+  const end = new Date(session.ends_at).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end)) return { ok: true };
+  const earlyMs = Number(process.env.LIVE_JOIN_EARLY_MS || 30 * 60 * 1000);
+  if (now < start - earlyMs || now > end) {
+    return { ok: false, code: 'outside_window' };
+  }
+  return { ok: true };
 }
 
 function isPromotedSpeaker(sessionId, userId) {
@@ -47,7 +84,7 @@ function logSessionEvent(sessionId, userId, eventType, detail) {
 
 /** Agora publisher = broadcaster (camera/mic); subscriber = audience-only. */
 function roleForAgora(user, session, sessionId) {
-  if (user.role === 'Admin' || session.trainer_id === user.id) return 'publisher';
+  if (user.role === 'Admin' || isStaffForBatch(user.id, session.batch_id)) return 'publisher';
   if (session.session_type === 'one_to_one' && isStudentInBatch(user.id, session.batch_id)) return 'publisher';
   if (session.session_type === 'group' && isPromotedSpeaker(sessionId, user.id)) return 'publisher';
   return 'subscriber';
@@ -82,7 +119,7 @@ router.get('/sessions', auth, (req, res) => {
   let rows = [];
   if (role === 'Admin') {
     rows = db.prepare(`
-      SELECT ls.id, ls.batch_id, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
+      SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
              b.name AS batch_name, b.session_type, b.trainer_id, u.name AS trainer_name
       FROM live_sessions ls
       JOIN batches b ON b.id = ls.batch_id
@@ -92,18 +129,20 @@ router.get('/sessions', auth, (req, res) => {
     `).all();
   } else if (role === 'Trainer') {
     rows = db.prepare(`
-      SELECT ls.id, ls.batch_id, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
+      SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
              b.name AS batch_name, b.session_type, b.trainer_id, u.name AS trainer_name
       FROM live_sessions ls
       JOIN batches b ON b.id = ls.batch_id
       JOIN users u ON u.id = b.trainer_id
-      WHERE b.trainer_id = ?
+      WHERE b.trainer_id = ? OR EXISTS (
+        SELECT 1 FROM batch_trainers bt WHERE bt.batch_id = b.id AND bt.trainer_id = ?
+      )
       ORDER BY ls.starts_at ASC
       LIMIT 100
-    `).all(userId);
+    `).all(userId, userId);
   } else {
     rows = db.prepare(`
-      SELECT ls.id, ls.batch_id, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
+      SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
              b.name AS batch_name, b.session_type, b.trainer_id, u.name AS trainer_name
       FROM live_sessions ls
       JOIN batches b ON b.id = ls.batch_id
@@ -193,13 +232,13 @@ router.get('/sessions/:id/state', auth, (req, res) => {
 router.get('/sessions/:id/logs', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const sessionId = Number(req.params.id);
   const session = db.prepare(`
-    SELECT ls.id, b.trainer_id
+    SELECT ls.id, ls.batch_id, b.trainer_id
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
   `).get(sessionId);
   if (!session) return res.status(404).json({ error: 'Live session not found' });
-  if (req.user.role === 'Trainer' && session.trainer_id !== req.user.id) {
+  if (req.user.role === 'Trainer' && !isStaffForBatch(req.user.id, session.batch_id)) {
     return res.status(403).json({ error: 'You can only view logs for your own sessions' });
   }
   const rows = db.prepare(`
@@ -225,13 +264,13 @@ router.post('/sessions/:id/promote', auth, requireRole('Admin', 'Trainer'), (req
     WHERE ls.id = ?
   `).get(sessionId);
   if (!session) return res.status(404).json({ error: 'Live session not found' });
-  if (req.user.role === 'Trainer' && session.trainer_id !== req.user.id) {
+  if (req.user.role === 'Trainer' && !isStaffForBatch(req.user.id, session.batch_id)) {
     return res.status(403).json({ error: 'You can only manage your own session' });
   }
   if (session.session_type !== 'group') {
     return res.status(400).json({ error: 'Promote is only for group sessions' });
   }
-  if (studentId === session.trainer_id) {
+  if (isStaffForBatch(studentId, session.batch_id)) {
     return res.status(400).json({ error: 'Cannot change host role' });
   }
   if (!isStudentInBatch(studentId, session.batch_id)) {
@@ -254,13 +293,13 @@ router.post('/sessions/:id/demote', auth, requireRole('Admin', 'Trainer'), (req,
   if (!studentId) return res.status(400).json({ error: 'studentId is required' });
 
   const session = db.prepare(`
-    SELECT ls.id, b.trainer_id
+    SELECT ls.id, ls.batch_id, b.trainer_id
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
   `).get(sessionId);
   if (!session) return res.status(404).json({ error: 'Live session not found' });
-  if (req.user.role === 'Trainer' && session.trainer_id !== req.user.id) {
+  if (req.user.role === 'Trainer' && !isStaffForBatch(req.user.id, session.batch_id)) {
     return res.status(403).json({ error: 'You can only manage your own session' });
   }
 
@@ -367,7 +406,7 @@ router.post('/sessions', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   }
   const batch = db.prepare('SELECT id, trainer_id FROM batches WHERE id = ?').get(batchId);
   if (!batch) return res.status(404).json({ error: 'Batch not found' });
-  if (req.user.role === 'Trainer' && batch.trainer_id !== req.user.id) {
+  if (req.user.role === 'Trainer' && !isStaffForBatch(req.user.id, batchId)) {
     return res.status(403).json({ error: 'You can only create sessions for your own batch' });
   }
 
@@ -384,13 +423,13 @@ router.post('/sessions', auth, requireRole('Admin', 'Trainer'), (req, res) => {
 router.post('/sessions/:id/start', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const sessionId = Number(req.params.id);
   const session = db.prepare(`
-    SELECT ls.id, ls.status, b.trainer_id
+    SELECT ls.id, ls.status, ls.batch_id, b.trainer_id
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
   `).get(sessionId);
   if (!session) return res.status(404).json({ error: 'Live session not found' });
-  if (req.user.role === 'Trainer' && session.trainer_id !== req.user.id) {
+  if (req.user.role === 'Trainer' && !isStaffForBatch(req.user.id, session.batch_id)) {
     return res.status(403).json({ error: 'You can only start your own session' });
   }
   db.prepare("UPDATE live_sessions SET status = 'live' WHERE id = ?").run(sessionId);
@@ -400,13 +439,13 @@ router.post('/sessions/:id/start', auth, requireRole('Admin', 'Trainer'), (req, 
 router.post('/sessions/:id/end', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const sessionId = Number(req.params.id);
   const session = db.prepare(`
-    SELECT ls.id, ls.status, b.trainer_id
+    SELECT ls.id, ls.status, ls.batch_id, b.trainer_id
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
   `).get(sessionId);
   if (!session) return res.status(404).json({ error: 'Live session not found' });
-  if (req.user.role === 'Trainer' && session.trainer_id !== req.user.id) {
+  if (req.user.role === 'Trainer' && !isStaffForBatch(req.user.id, session.batch_id)) {
     return res.status(403).json({ error: 'You can only end your own session' });
   }
   db.prepare("UPDATE live_sessions SET status = 'ended' WHERE id = ?").run(sessionId);
@@ -420,7 +459,7 @@ router.post('/sessions/:id/end', auth, requireRole('Admin', 'Trainer'), (req, re
 router.post('/sessions/:id/join', auth, (req, res) => {
   const sessionId = Number(req.params.id);
   const session = db.prepare(`
-    SELECT ls.id, ls.batch_id, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status, b.trainer_id, b.session_type
+    SELECT ls.id, ls.batch_id, ls.batch_session_id, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status, b.trainer_id, b.session_type
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
@@ -431,6 +470,20 @@ router.post('/sessions/:id/join', auth, (req, res) => {
   }
   if (session.status === 'ended' || session.status === 'cancelled') {
     return res.status(409).json({ error: `Session is ${session.status}` });
+  }
+
+  const bypassTimeWindow =
+    req.user.role === 'Admin' ||
+    (req.user.role === 'Trainer' && isStaffForBatch(req.user.id, session.batch_id));
+  const timeOk = bypassTimeWindow ? { ok: true } : joinTimeAllows(session);
+  if (!timeOk.ok) {
+    logSessionEvent(sessionId, req.user.id, 'join_denied', timeOk.code || 'time');
+    return res.status(403).json({
+      error:
+        timeOk.code === 'outside_window'
+          ? 'Join is only available shortly before and during the scheduled time.'
+          : 'Cannot join this session right now.',
+    });
   }
 
   const agoraRole = roleForAgora(req.user, session, sessionId);
@@ -454,6 +507,7 @@ router.post('/sessions/:id/join', auth, (req, res) => {
 
   res.json({
     liveSessionId: session.id,
+    batchSessionId: session.batch_session_id || null,
     title: session.title,
     channelName: session.agora_channel,
     uid: req.user.id,
@@ -472,7 +526,7 @@ router.post('/sessions/:id/join', auth, (req, res) => {
 router.post('/sessions/:id/token', auth, (req, res) => {
   const sessionId = Number(req.params.id);
   const session = db.prepare(`
-    SELECT ls.id, ls.batch_id, ls.agora_channel, b.trainer_id, b.session_type
+    SELECT ls.id, ls.batch_id, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status, b.trainer_id, b.session_type
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
@@ -480,6 +534,21 @@ router.post('/sessions/:id/token', auth, (req, res) => {
   if (!session) return res.status(404).json({ error: 'Live session not found' });
   if (!isUserAllowedForSession(session, req.user)) {
     return res.status(403).json({ error: 'You are not part of this live session' });
+  }
+  if (session.status === 'ended' || session.status === 'cancelled') {
+    return res.status(409).json({ error: `Session is ${session.status}` });
+  }
+  const bypassTimeWindow =
+    req.user.role === 'Admin' ||
+    (req.user.role === 'Trainer' && isStaffForBatch(req.user.id, session.batch_id));
+  const timeOk = bypassTimeWindow ? { ok: true } : joinTimeAllows(session);
+  if (!timeOk.ok) {
+    return res.status(403).json({
+      error:
+        timeOk.code === 'outside_window'
+          ? 'Join is only available shortly before and during the scheduled time.'
+          : 'Cannot refresh token for this session right now.',
+    });
   }
 
   const agoraRole = roleForAgora(req.user, session, sessionId);
@@ -506,6 +575,32 @@ router.post('/sessions/:id/leave', auth, (req, res) => {
   `).run(sessionId, req.user.id);
   logSessionEvent(sessionId, req.user.id, 'leave', null);
   res.json({ ok: true });
+});
+
+/** Users currently in the room (joined, not left). Same access rules as joining the session. */
+router.get('/sessions/:id/participants', auth, (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = db.prepare(`
+    SELECT ls.id, ls.batch_id, ls.status
+    FROM live_sessions ls
+    WHERE ls.id = ?
+  `).get(sessionId);
+  if (!session) return res.status(404).json({ error: 'Live session not found' });
+  if (!isUserAllowedForSession(session, req.user)) {
+    return res.status(403).json({ error: 'You are not part of this live session' });
+  }
+  const rows = db
+    .prepare(
+      `
+    SELECT u.id, u.name, u.email, u.role, p.joined_at AS joinedAt
+    FROM live_session_participants p
+    JOIN users u ON u.id = p.user_id
+    WHERE p.live_session_id = ? AND p.left_at IS NULL
+    ORDER BY p.joined_at ASC, u.id ASC
+  `
+    )
+    .all(sessionId);
+  res.json(rows);
 });
 
 module.exports = router;

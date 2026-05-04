@@ -1,8 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import SectionCard from '../components/SectionCard';
 import Modal from '../components/Modal';
 import RichTextField from '../components/RichTextField';
-import ActionMenu from '../components/ActionMenu';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
 const MODE_OPTIONS = ['Regular', 'Online', 'Self-paced'];
@@ -130,25 +129,44 @@ async function optimizeCoverImage(file) {
   }
 }
 
-export default function CoursesPage({ onCreateCourse, onUpdateCourse, onDeleteCourse, courses }) {
+export default function CoursesPage({
+  onCreateCourse,
+  onUpdateCourse,
+  onDeleteCourse,
+  courses,
+  library = [],
+  fetchCourseSchedule,
+  updateCourseScheduleSlot,
+  pushToast = () => {},
+}) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [q, setQ] = useState('');
-  const [page, setPage] = useState(1);
-  const pageSize = 25;
+
+  const [viewOpen, setViewOpen] = useState(false);
+  const [viewCourse, setViewCourse] = useState(null);
+
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [scheduleCourse, setScheduleCourse] = useState(null);
+  const [scheduleRows, setScheduleRows] = useState([]);
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [scheduleSavingMapId, setScheduleSavingMapId] = useState(null);
+
+  const libraryLessons = useMemo(
+    () => (library || []).filter((l) => l.source !== 'legacy_lessons' && Number.isFinite(Number(l.id))),
+    [library]
+  );
+
+  const viewHighlightLines = useMemo(() => {
+    if (!viewCourse) return [];
+    return parseHighlightPoints(viewCourse.highlights)
+      .map((x) => String(x).trim())
+      .filter(Boolean);
+  }, [viewCourse]);
   const filtered = useMemo(
     () => (courses || []).filter((c) => c.name?.toLowerCase().includes(q.toLowerCase())),
     [courses, q]
   );
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const paged = useMemo(
-    () => filtered.slice((page - 1) * pageSize, page * pageSize),
-    [filtered, page]
-  );
-  useEffect(() => {
-    if (page > totalPages) setPage(totalPages);
-  }, [page, totalPages]);
-
   function editCourse(c) {
     setForm({
       id: c.id,
@@ -243,11 +261,71 @@ export default function CoursesPage({ onCreateCourse, onUpdateCourse, onDeleteCo
     setForm((prev) => ({ ...prev, coverBlob: blob, coverPreviewUrl: previewUrl }));
   }
 
+  async function reloadScheduleForCourse(courseId) {
+    if (!courseId || !fetchCourseSchedule) return;
+    try {
+      const rows = await fetchCourseSchedule(courseId);
+      setScheduleRows(Array.isArray(rows) ? rows : []);
+    } catch (e) {
+      pushToast(e.message || 'Could not load schedule', 'error');
+    }
+  }
+
+  async function openLessonSchedule(c) {
+    setScheduleCourse(c);
+    setScheduleOpen(true);
+    setScheduleLoading(true);
+    try {
+      await reloadScheduleForCourse(c.id);
+    } finally {
+      setScheduleLoading(false);
+    }
+  }
+
+  function handleViewEdit() {
+    if (!viewCourse) return;
+    const c = viewCourse;
+    setViewOpen(false);
+    editCourse(c);
+  }
+
+  async function handleViewDuplicate() {
+    if (!viewCourse) return;
+    await duplicateCourse(viewCourse);
+    setViewOpen(false);
+    setViewCourse(null);
+  }
+
+  async function handleViewDelete() {
+    if (!viewCourse) return;
+    if (!window.confirm('Delete this course? This cannot be undone.')) return;
+    await onDeleteCourse(viewCourse.id);
+    setViewOpen(false);
+    setViewCourse(null);
+  }
+
+  async function onScheduleLessonChange(row, event) {
+    if (!scheduleCourse) return;
+    const raw = event.target.value;
+    const lessonId = raw === '' ? null : Number(raw);
+    if (lessonId !== null && (!Number.isFinite(lessonId) || lessonId < 1)) return;
+    setScheduleSavingMapId(row.mapId);
+    try {
+      await updateCourseScheduleSlot(row.mapId, { lessonId });
+      await reloadScheduleForCourse(scheduleCourse.id);
+    } catch (err) {
+      pushToast(err.message || 'Could not save lesson', 'error');
+      await reloadScheduleForCourse(scheduleCourse.id);
+    } finally {
+      setScheduleSavingMapId(null);
+    }
+  }
+
   return (
     <div className="stack">
       <SectionCard
         title="Courses"
-        subtitle="Create/edit courses and rich content"
+        subtitle="Lesson schedule has one slot per day from the course duration; assign a lesson template per day."
         actions={
           <>
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search courses" />
@@ -268,7 +346,7 @@ export default function CoursesPage({ onCreateCourse, onUpdateCourse, onDeleteCo
               </tr>
             </thead>
             <tbody>
-              {paged.map((c) => (
+              {filtered.map((c) => (
                 <tr key={c.id}>
                   <td>{c.name}</td>
                   <td>
@@ -279,41 +357,181 @@ export default function CoursesPage({ onCreateCourse, onUpdateCourse, onDeleteCo
                   <td>{enrollmentLabel(c.enrollment_type)}</td>
                   <td>{c.duration_days || 1} days</td>
                   <td>INR {c.fee_inr || 0}</td>
-                  <td>
-                    <ActionMenu>
-                      <button className="secondaryBtn" type="button" onClick={() => editCourse(c)}>
-                        Edit
+                  <td className="courseActionsCell">
+                    <div className="courseActionsRow">
+                      <button
+                        className="secondaryBtn courseQuickAction"
+                        type="button"
+                        onClick={() => {
+                          setViewCourse(c);
+                          setViewOpen(true);
+                        }}
+                      >
+                        View
                       </button>
-                      <button className="secondaryBtn" type="button" onClick={() => duplicateCourse(c)}>
-                        Duplicate
+                      <button className="secondaryBtn courseQuickAction" type="button" onClick={() => openLessonSchedule(c)}>
+                        Lesson schedule
                       </button>
-                      <button className="dangerBtn" type="button" onClick={() => onDeleteCourse(c.id)}>
-                        Delete
-                      </button>
-                    </ActionMenu>
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <div className="row">
-          <button className="secondaryBtn" type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>
-            Prev
-          </button>
-          <span className="muted">
-            Page {page} of {totalPages}
-          </span>
-          <button
-            className="secondaryBtn"
-            type="button"
-            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-            disabled={page >= totalPages}
-          >
-            Next
-          </button>
-        </div>
       </SectionCard>
+
+      <Modal
+        open={viewOpen}
+        title={viewCourse?.name || 'Course details'}
+        onClose={() => {
+          setViewOpen(false);
+          setViewCourse(null);
+        }}
+        variant="modal"
+      >
+        {viewCourse ? (
+          <div className="courseViewReadonly">
+            <header className="courseViewHeader">
+              <div className="courseViewActions">
+                <button className="secondaryBtn" type="button" onClick={handleViewEdit}>
+                  Edit
+                </button>
+                <button className="secondaryBtn" type="button" onClick={() => void handleViewDuplicate()}>
+                  Duplicate
+                </button>
+                <button className="dangerBtn" type="button" onClick={() => void handleViewDelete()}>
+                  Delete
+                </button>
+              </div>
+            </header>
+
+            <section className="courseViewBlock">
+              <h3 className="courseViewLabel">Description</h3>
+              <p className="courseViewText">{viewCourse.description?.trim() || 'No description provided.'}</p>
+            </section>
+
+            <section className="courseViewBlock">
+              <h3 className="courseViewLabel">Highlights</h3>
+              <ul className="courseViewList">
+                {viewHighlightLines.length ? (
+                  viewHighlightLines.map((line, i) => <li key={i}>{line}</li>)
+                ) : (
+                  <li className="courseViewEmpty muted">None listed.</li>
+                )}
+              </ul>
+            </section>
+
+            {viewCourse.specifications_html ? (
+              <section className="courseViewBlock">
+                <h3 className="courseViewLabel">Specifications</h3>
+                <div
+                  className="courseViewSpecs richPreview"
+                  dangerouslySetInnerHTML={{ __html: viewCourse.specifications_html }}
+                />
+              </section>
+            ) : null}
+
+            <section className="courseViewBlock courseViewBlockMeta">
+              <h3 className="courseViewLabel">Course details</h3>
+              <dl className="courseViewMetaGrid">
+                <dt>Duration</dt>
+                <dd>{viewCourse.duration_days || 1} days</dd>
+                <dt>Fee</dt>
+                <dd>INR {viewCourse.fee_inr ?? 0}</dd>
+                <dt>Discount</dt>
+                <dd>INR {viewCourse.discount_inr ?? 0}</dd>
+                <dt>Enrollment</dt>
+                <dd>{enrollmentLabel(viewCourse.enrollment_type)}</dd>
+                <dt>Status</dt>
+                <dd>{viewCourse.course_status || 'Active'}</dd>
+                <dt>Visibility</dt>
+                <dd>{viewCourse.is_published !== 0 && viewCourse.is_published !== false ? 'Published on home' : 'Hidden from home'}</dd>
+              </dl>
+            </section>
+          </div>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={scheduleOpen}
+        title={scheduleCourse ? `Lesson schedule — ${scheduleCourse.name || ''}` : 'Lesson schedule'}
+        onClose={() => {
+          setScheduleOpen(false);
+          setScheduleCourse(null);
+          setScheduleRows([]);
+        }}
+        variant="modal"
+      >
+        <div className="lessonSchedulePanel">
+          <p className="lessonScheduleHint muted">
+            Slots match <strong>Duration (days)</strong> on the course ({scheduleCourse?.duration_days || 1} days). Change
+            duration in course edit to add or remove days.
+          </p>
+          {!libraryLessons.length ? (
+            <p className="muted">Create lesson templates under Lessons to assign them here.</p>
+          ) : null}
+          {scheduleLoading ? (
+            <p className="muted">Loading…</p>
+          ) : (
+            <div className="tableWrap lessonScheduleTableWrap">
+              <table className="lessonScheduleTable">
+                <thead>
+                  <tr>
+                    <th className="lessonScheduleDayCol">Day no.</th>
+                    <th className="lessonScheduleLessonCol">Lesson</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scheduleRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={2} className="muted">
+                        No slots yet. Save the course with a duration, then reopen this schedule.
+                      </td>
+                    </tr>
+                  ) : (
+                    scheduleRows.map((row) => {
+                      const selectValue =
+                        row.lessonId != null && row.lessonId !== '' ? String(row.lessonId) : '';
+                      const busy = scheduleSavingMapId === row.mapId;
+                      const lid = row.lessonId != null ? Number(row.lessonId) : null;
+                      const rowLessonOptions =
+                        lid != null && !libraryLessons.some((l) => Number(l.id) === lid)
+                          ? [...libraryLessons, { id: lid, title: row.lessonTitle || `Lesson #${lid}` }]
+                          : libraryLessons;
+                      return (
+                        <tr key={row.mapId}>
+                          <td className="lessonScheduleDayCol">{row.dayNumber}</td>
+                          <td className="lessonScheduleLessonCol">
+                            {!rowLessonOptions.length ? (
+                              <span className="muted">{row.lessonTitle || 'Not assigned — add lessons under Lessons first.'}</span>
+                            ) : (
+                              <select
+                                className="courseSelect lessonScheduleInlineSelect"
+                                aria-label={`Lesson for day ${row.dayNumber}`}
+                                value={selectValue}
+                                disabled={busy}
+                                onChange={(e) => onScheduleLessonChange(row, e)}
+                              >
+                                <option value="">— Not assigned —</option>
+                                {rowLessonOptions.map((l) => (
+                                  <option key={l.id} value={l.id}>
+                                    {l.title}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </Modal>
 
       <Modal open={open} title={form.id ? 'Edit course' : 'Create course'} onClose={() => setOpen(false)} variant="drawer">
         <form onSubmit={submit} className="courseForm">

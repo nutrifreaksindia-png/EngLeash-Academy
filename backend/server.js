@@ -94,6 +94,7 @@ const batchManagerRoutes = require('./routes/batchManager');
 const videoRoutes = require('./routes/videos');
 const studyMaterialRoutes = require('./routes/studyMaterials');
 const worksheetRoutes = require('./routes/worksheets');
+const assignmentRoutes = require('./routes/assignments');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -117,6 +118,7 @@ app.use('/api/batch-manager', batchManagerRoutes);
 app.use('/api/videos', videoRoutes);
 app.use('/api/study-materials', studyMaterialRoutes);
 app.use('/api/worksheets', worksheetRoutes);
+app.use('/api/assignments', assignmentRoutes);
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 app.get('/api/health/details', (req, res) => {

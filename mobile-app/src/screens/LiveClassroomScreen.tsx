@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -10,9 +10,15 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
   View,
+  type StyleProp,
+  type ViewStyle,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import { StatusBar } from 'expo-status-bar';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
@@ -22,10 +28,15 @@ import {
   ClientRoleType,
   createAgoraRtcEngine,
   RtcSurfaceView,
+  RtcTextureView,
+  VideoSourceType,
 } from 'react-native-agora';
 
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
+
+/** react-native-agora uses `if (canvas.uid)` : uid 0 is falsy and wrongly selects remote setup — use sourceType for local. */
+const LOCAL_VIDEO_CANVAS = { sourceType: VideoSourceType.VideoSourceCamera };
 
 type JoinPayload = {
   liveSessionId: number;
@@ -51,6 +62,13 @@ type RoomState = {
 export default function LiveClassroomScreen({ route, navigation }: any) {
   const { liveSessionId, title } = route.params as { liveSessionId: number; title: string };
   const { user } = useAuth();
+
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const isLandscape = windowWidth > windowHeight;
+  useLayoutEffect(() => {
+    navigation.setOptions({ headerShown: !isLandscape });
+  }, [isLandscape, navigation]);
+
   const [loading, setLoading] = useState(true);
   const [payload, setPayload] = useState<JoinPayload | null>(null);
   const [joined, setJoined] = useState(false);
@@ -61,6 +79,8 @@ export default function LiveClassroomScreen({ route, navigation }: any) {
   const [rtcIsPublisher, setRtcIsPublisher] = useState(false);
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
+
+  const insets = useSafeAreaInsets();
 
   const engineRef = useRef<any>(null);
   const payloadRef = useRef<JoinPayload | null>(null);
@@ -80,8 +100,6 @@ export default function LiveClassroomScreen({ route, navigation }: any) {
       };
     }, [])
   );
-
-  const isHost = useMemo(() => rtcIsPublisher, [rtcIsPublisher]);
 
   const join = useCallback(async () => {
     setLoading(true);
@@ -129,7 +147,7 @@ export default function LiveClassroomScreen({ route, navigation }: any) {
     async (joinPayload: JoinPayload) => {
       if (!joinPayload.agoraReady || !joinPayload.appId || !joinPayload.token) return;
       try {
-        if (Platform.OS === 'android' && joinPayload.role === 'publisher') {
+        if (Platform.OS === 'android') {
           await PermissionsAndroid.requestMultiple([
             PermissionsAndroid.PERMISSIONS.CAMERA,
             PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
@@ -145,9 +163,8 @@ export default function LiveClassroomScreen({ route, navigation }: any) {
             ? ClientRoleType.ClientRoleBroadcaster
             : ClientRoleType.ClientRoleAudience
         );
-        if (joinPayload.role === 'publisher') {
-          engine.startPreview();
-        }
+        // Local preview for everyone: publishers transmit; audience sees self-view only until promoted.
+        engine.startPreview();
 
         engine.addListener('onJoinChannelSuccess', () => {
           setJoined(true);
@@ -263,6 +280,8 @@ export default function LiveClassroomScreen({ route, navigation }: any) {
           autoSubscribeAudio: true,
           autoSubscribeVideo: true,
         });
+        engine.muteLocalVideoStream(false);
+        engine.muteLocalAudioStream(false);
         engine.startPreview();
         setRtcIsPublisher(true);
         setPayload((prev) =>
@@ -292,7 +311,7 @@ export default function LiveClassroomScreen({ route, navigation }: any) {
           autoSubscribeAudio: true,
           autoSubscribeVideo: true,
         });
-        engine.stopPreview();
+        engine.startPreview();
         setRtcIsPublisher(false);
         setMuted(false);
         setCameraOff(false);
@@ -421,8 +440,192 @@ export default function LiveClassroomScreen({ route, navigation }: any) {
     !rtcIsPublisher &&
     (user?.role === 'Student' || user?.role === 'Lab');
 
+  /** Portrait stage heights; landscape uses computed height so video + controls fit on screen. */
+  const portraitPublisherH = 220;
+  const portraitAudienceH = 240;
+  const landscapeChromeH =
+    56 + insets.top + insets.bottom + (showStudentHand ? 52 : 0) + 128;
+  const landscapeStageHeight = Math.max(200, windowHeight - landscapeChromeH);
+
+  const publisherVideoHeight = isLandscape ? landscapeStageHeight : portraitPublisherH;
+  const audienceMainHeight = isLandscape ? landscapeStageHeight : portraitAudienceH;
+
+  /** Android: PiP over remote must use TextureView — stacked SurfaceViews hide the local preview when remote video starts. iOS: draw above remote SurfaceView. */
+  const LocalPreview = ({ style: s }: { style: StyleProp<ViewStyle> }) =>
+    Platform.OS === 'android' ? (
+      <RtcTextureView style={s} canvas={LOCAL_VIDEO_CANVAS} />
+    ) : (
+      <RtcSurfaceView style={s} canvas={LOCAL_VIDEO_CANVAS} zOrderMediaOverlay />
+    );
+
+  const toggleMute = () => {
+    if (!engineRef.current) return;
+    const next = !muted;
+    setMuted(next);
+    engineRef.current.muteLocalAudioStream(next);
+  };
+
+  const toggleCamera = () => {
+    if (!engineRef.current) return;
+    const next = !cameraOff;
+    setCameraOff(next);
+    engineRef.current.muteLocalVideoStream(next);
+  };
+
+  const renderMediaControls = () => (
+    <View style={styles.controlsRow}>
+      <TouchableOpacity
+        style={[styles.ctrlBtn, muted && styles.ctrlBtnWarn]}
+        onPress={toggleMute}
+        accessibilityRole="button"
+        accessibilityLabel={muted ? 'Unmute microphone' : 'Mute microphone'}
+      >
+        <Ionicons name={muted ? 'mic-off' : 'mic'} size={22} color="#fff" />
+        <Text style={styles.ctrlBtnText}>{muted ? 'Unmute' : 'Mute'}</Text>
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={[styles.ctrlBtn, cameraOff && styles.ctrlBtnWarn]}
+        onPress={toggleCamera}
+        accessibilityRole="button"
+        accessibilityLabel={cameraOff ? 'Turn camera on' : 'Turn camera off'}
+      >
+        <Ionicons name={cameraOff ? 'videocam-off' : 'videocam'} size={22} color="#fff" />
+        <Text style={styles.ctrlBtnText}>{cameraOff ? 'Cam on' : 'Cam off'}</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
+  const videoSection =
+    payload.agoraReady && agoraAvailable ? (
+      <View style={[styles.videoContainer, isLandscape && styles.videoContainerLandscape]}>
+        {rtcIsPublisher ? (
+          <>
+            <RtcSurfaceView
+              style={[styles.localVideo, { height: publisherVideoHeight }]}
+              canvas={LOCAL_VIDEO_CANVAS}
+            />
+            <ScrollView horizontal contentContainerStyle={styles.remoteStrip}>
+              {remoteUids.length === 0 ? (
+                <View style={styles.remoteEmpty}>
+                  <Text style={styles.remoteEmptyText}>Waiting for other participants...</Text>
+                </View>
+              ) : (
+                remoteUids.map((uid) => {
+                  const raised = roomState?.handRaisedUserIds?.includes(uid);
+                  return (
+                    <TouchableOpacity
+                      key={uid}
+                      activeOpacity={0.85}
+                      onPress={() => (canTrainerManageStage ? onRemotePress(uid) : undefined)}
+                      style={styles.remoteWrap}
+                    >
+                      <RtcSurfaceView style={styles.remoteVideo} canvas={{ uid }} />
+                      {raised ? (
+                        <View style={styles.handBadge}>
+                          <Text style={styles.handBadgeText}>✋</Text>
+                        </View>
+                      ) : null}
+                    </TouchableOpacity>
+                  );
+                })
+              )}
+            </ScrollView>
+            {joined ? renderMediaControls() : null}
+          </>
+        ) : (
+          <>
+            <View style={[styles.audienceStage, { minHeight: audienceMainHeight }]}>
+              {remoteUids.length > 0 ? (
+                <TouchableOpacity
+                  style={styles.mainRemoteTouchable}
+                  activeOpacity={canTrainerManageStage ? 0.88 : 1}
+                  onPress={() =>
+                    canTrainerManageStage && remoteUids[0] != null ? onRemotePress(remoteUids[0]) : undefined
+                  }
+                >
+                  <RtcSurfaceView
+                    style={[styles.mainRemoteVideo, { height: audienceMainHeight }]}
+                    canvas={{ uid: remoteUids[0] }}
+                  />
+                  {canTrainerManageStage ? (
+                    <View style={styles.trainerTapHint} pointerEvents="none">
+                      <Text style={styles.trainerTapHintText}>Tap for stage controls</Text>
+                    </View>
+                  ) : null}
+                </TouchableOpacity>
+              ) : (
+                <View style={[styles.waitingHost, { minHeight: audienceMainHeight }]}>
+                  <Text style={styles.waitingHostText}>Waiting for host to join…</Text>
+                </View>
+              )}
+              <View style={styles.localPip}>
+                <LocalPreview style={styles.localPipVideo} />
+                <Text style={styles.pipLabel}>You</Text>
+              </View>
+            </View>
+            {remoteUids.length > 1 ? (
+              <ScrollView horizontal contentContainerStyle={styles.remoteStrip}>
+                {remoteUids.slice(1).map((uid) => {
+                  const raised = roomState?.handRaisedUserIds?.includes(uid);
+                  return (
+                    <TouchableOpacity
+                      key={uid}
+                      activeOpacity={0.85}
+                      onPress={() => (canTrainerManageStage ? onRemotePress(uid) : undefined)}
+                      style={styles.remoteWrap}
+                    >
+                      <RtcSurfaceView style={styles.remoteVideo} canvas={{ uid }} />
+                      {raised ? (
+                        <View style={styles.handBadge}>
+                          <Text style={styles.handBadgeText}>✋</Text>
+                        </View>
+                      ) : null}
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            ) : null}
+            {joined ? renderMediaControls() : null}
+          </>
+        )}
+      </View>
+    ) : null;
+
+  if (isLandscape && payload.agoraReady && agoraAvailable) {
+    return (
+      <View style={styles.landscapeRoot}>
+        <StatusBar hidden />
+        <View style={[styles.landscapeHeader, { paddingTop: insets.top + 6 }]}>
+          <View style={styles.landscapeHeaderLeft}>
+            <Text numberOfLines={1} style={styles.landscapeHeaderTitle}>
+              {title}
+            </Text>
+            <Text style={styles.landscapeHeaderSub}>
+              {reconnecting ? 'Refreshing…' : joined ? 'Connected' : 'Connecting…'}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={leave} style={styles.landscapeLeaveChip} accessibilityRole="button">
+            <Text style={styles.landscapeLeaveText}>Leave</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={styles.landscapeVideoWrap}>{videoSection}</View>
+        {showStudentHand ? (
+          <View style={[styles.handRow, styles.handRowLandscape]}>
+            <TouchableOpacity style={styles.handBtn} onPress={raiseHand}>
+              <Text style={styles.handBtnText}>Raise hand</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.handBtn, styles.handBtnOutline]} onPress={lowerHand}>
+              <Text style={[styles.handBtnText, styles.handBtnTextOutline]}>Lower hand</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+      </View>
+    );
+  }
+
   return (
     <View style={styles.pageRoot}>
+      <StatusBar style="dark" />
       <ScreenPageTitle title="Live classroom" />
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.sessionName}>{title}</Text>
@@ -459,7 +662,9 @@ export default function LiveClassroomScreen({ route, navigation }: any) {
           <Text style={styles.infoText}>
             {payload.sessionType === 'group' && canTrainerManageStage
               ? 'Tap a remote video to let a student speak or revoke the mic.'
-              : 'Live RTC is active. Token refreshes when the app returns to the foreground.'}
+              : rtcIsPublisher
+                ? 'Live RTC is active. Rotate your device to landscape for a full-screen class view.'
+                : 'Your camera preview is in the corner. Rotate to landscape for full screen. Others see your video only when promoted or in 1:1.'}
           </Text>
         ) : (
           <Text style={styles.infoText}>
@@ -484,98 +689,7 @@ export default function LiveClassroomScreen({ route, navigation }: any) {
         </View>
       ) : null}
 
-      {payload.agoraReady && agoraAvailable ? (
-        <View style={styles.videoContainer}>
-          {isHost ? (
-            <RtcSurfaceView style={styles.localVideo} canvas={{ uid: 0 }} />
-          ) : (
-            <View style={[styles.audienceBox, rtcIsPublisher && styles.audienceBoxTall]}>
-              {rtcIsPublisher ? (
-                <RtcSurfaceView style={styles.localVideo} canvas={{ uid: 0 }} />
-              ) : (
-                <Text style={styles.audienceText}>You joined as audience.</Text>
-              )}
-            </View>
-          )}
-          <ScrollView horizontal contentContainerStyle={styles.remoteStrip}>
-            {remoteUids.length === 0 ? (
-              <View style={styles.remoteEmpty}>
-                <Text style={styles.remoteEmptyText}>Waiting for other participants...</Text>
-              </View>
-            ) : (
-              remoteUids.map((uid) => {
-                const raised = roomState?.handRaisedUserIds?.includes(uid);
-                return (
-                  <TouchableOpacity
-                    key={uid}
-                    activeOpacity={0.85}
-                    onPress={() => (canTrainerManageStage ? onRemotePress(uid) : undefined)}
-                    style={styles.remoteWrap}
-                  >
-                    <RtcSurfaceView style={styles.remoteVideo} canvas={{ uid }} />
-                    {raised ? (
-                      <View style={styles.handBadge}>
-                        <Text style={styles.handBadgeText}>✋</Text>
-                      </View>
-                    ) : null}
-                  </TouchableOpacity>
-                );
-              })
-            )}
-          </ScrollView>
-          {isHost ? (
-            <View style={styles.controlsRow}>
-              <TouchableOpacity
-                style={[styles.ctrlBtn, muted && styles.ctrlBtnWarn]}
-                onPress={() => {
-                  if (!engineRef.current) return;
-                  const next = !muted;
-                  setMuted(next);
-                  engineRef.current.muteLocalAudioStream(next);
-                }}
-              >
-                <Text style={styles.ctrlBtnText}>{muted ? 'Unmute' : 'Mute'}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.ctrlBtn, cameraOff && styles.ctrlBtnWarn]}
-                onPress={() => {
-                  if (!engineRef.current) return;
-                  const next = !cameraOff;
-                  setCameraOff(next);
-                  engineRef.current.muteLocalVideoStream(next);
-                }}
-              >
-                <Text style={styles.ctrlBtnText}>{cameraOff ? 'Camera On' : 'Camera Off'}</Text>
-              </TouchableOpacity>
-            </View>
-          ) : rtcIsPublisher ? (
-            <View style={styles.controlsRow}>
-              <TouchableOpacity
-                style={[styles.ctrlBtn, muted && styles.ctrlBtnWarn]}
-                onPress={() => {
-                  if (!engineRef.current) return;
-                  const next = !muted;
-                  setMuted(next);
-                  engineRef.current.muteLocalAudioStream(next);
-                }}
-              >
-                <Text style={styles.ctrlBtnText}>{muted ? 'Unmute' : 'Mute'}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.ctrlBtn, cameraOff && styles.ctrlBtnWarn]}
-                onPress={() => {
-                  if (!engineRef.current) return;
-                  const next = !cameraOff;
-                  setCameraOff(next);
-                  engineRef.current.muteLocalVideoStream(next);
-                }}
-              >
-                <Text style={styles.ctrlBtnText}>{cameraOff ? 'Camera On' : 'Camera Off'}</Text>
-              </TouchableOpacity>
-            </View>
-          ) : null}
-        </View>
-      ) : null}
+      {videoSection}
 
       <TouchableOpacity style={styles.leaveBtn} onPress={leave}>
         <Text style={styles.leaveBtnText}>Leave class</Text>
@@ -590,6 +704,32 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f5f5f5' },
   content: { padding: 20, paddingBottom: 32 },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 },
+  landscapeRoot: { flex: 1, backgroundColor: '#000' },
+  landscapeHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+    backgroundColor: '#0f172a',
+  },
+  landscapeHeaderLeft: { flex: 1, marginRight: 12 },
+  landscapeHeaderTitle: { color: '#fff', fontSize: 15, fontWeight: '800' },
+  landscapeHeaderSub: { color: '#94a3b8', fontSize: 12, marginTop: 2 },
+  landscapeLeaveChip: {
+    backgroundColor: BRAND_RED,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  landscapeLeaveText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  landscapeVideoWrap: { flex: 1, minHeight: 0 },
+  handRowLandscape: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#111',
+    justifyContent: 'center',
+  },
   sessionName: { fontSize: 18, color: '#222', fontWeight: '700' },
   subtitle: { marginTop: 6, fontSize: 14, color: BRAND_BLUE, marginBottom: 16 },
   card: {
@@ -611,22 +751,89 @@ const styles = StyleSheet.create({
     backgroundColor: '#111',
     overflow: 'hidden',
   },
+  videoContainerLandscape: {
+    flex: 1,
+    marginTop: 0,
+    borderRadius: 0,
+  },
   localVideo: {
     width: '100%',
-    height: 220,
     backgroundColor: '#000',
   },
-  audienceBox: {
+  audienceStage: {
     width: '100%',
-    height: 150,
+    position: 'relative',
+    backgroundColor: '#000',
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  mainRemoteTouchable: {
+    width: '100%',
+    backgroundColor: '#000',
+  },
+  mainRemoteVideo: {
+    width: '100%',
+    backgroundColor: '#000',
+  },
+  waitingHost: {
+    width: '100%',
     justifyContent: 'center',
     alignItems: 'center',
+    backgroundColor: '#181818',
+  },
+  waitingHostText: {
+    color: '#aaa',
+    fontSize: 15,
+    paddingHorizontal: 16,
+    textAlign: 'center',
+  },
+  localPip: {
+    position: 'absolute',
+    right: 10,
+    bottom: 10,
+    width: 112,
+    height: 148,
+    borderRadius: 10,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#fff',
     backgroundColor: '#000',
+    zIndex: 2,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
   },
-  audienceBoxTall: {
-    height: 220,
+  localPipVideo: {
+    width: '100%',
+    height: '100%',
   },
-  audienceText: { color: '#fff' },
+  pipLabel: {
+    position: 'absolute',
+    bottom: 6,
+    left: 8,
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '800',
+    textShadowColor: 'rgba(0,0,0,0.75)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  trainerTapHint: {
+    position: 'absolute',
+    bottom: 10,
+    left: 10,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  trainerTapHintText: {
+    color: '#eee',
+    fontSize: 11,
+    fontWeight: '600',
+  },
   remoteStrip: {
     paddingHorizontal: 10,
     paddingVertical: 10,
@@ -665,14 +872,21 @@ const styles = StyleSheet.create({
   controlsRow: {
     flexDirection: 'row',
     justifyContent: 'center',
-    paddingBottom: 12,
-    gap: 10,
+    flexWrap: 'wrap',
+    paddingVertical: 12,
+    paddingHorizontal: 6,
+    gap: 8,
   },
   ctrlBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     backgroundColor: BRAND_BLUE,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    minWidth: 100,
+    justifyContent: 'center',
   },
   ctrlBtnWarn: {
     backgroundColor: '#455a64',
@@ -680,6 +894,7 @@ const styles = StyleSheet.create({
   ctrlBtnText: {
     color: '#fff',
     fontWeight: '700',
+    fontSize: 13,
   },
   handRow: {
     flexDirection: 'row',

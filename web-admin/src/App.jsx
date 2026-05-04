@@ -1,4 +1,6 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import LiveClassroomPage from './pages/LiveClassroomPage';
 import LoginCard from './components/LoginCard';
 import StatusBanner from './components/StatusBanner';
 import AdminShell from './components/AdminShell';
@@ -14,12 +16,31 @@ import VideosPage from './pages/VideosPage';
 import SettingsPage from './pages/SettingsPage';
 import StudyMaterialsPage from './pages/StudyMaterialsPage';
 import WorksheetsPage from './pages/WorksheetsPage';
-import SectionCard from './components/SectionCard';
+import AssignmentsPage from './pages/AssignmentsPage';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
 
-const WEB_ADMIN_ROLES = ['Admin', 'Creator'];
-const CREATOR_ALLOWED_PAGES = new Set(['videos', 'study-materials', 'worksheets', 'quizzes', 'assignments']);
+const WEB_ADMIN_ROLES = ['Admin', 'Creator', 'Trainer'];
+
+const WEB_ADMIN_TOKEN_KEY = 'engleash_web_admin_token';
+
+function persistWebAdminToken(t) {
+  try {
+    if (t) localStorage.setItem(WEB_ADMIN_TOKEN_KEY, t);
+    else localStorage.removeItem(WEB_ADMIN_TOKEN_KEY);
+  } catch {
+    /* ignore private mode / quota */
+  }
+}
+const CREATOR_ALLOWED_PAGES = new Set([
+  'videos',
+  'study-materials',
+  'worksheets',
+  'quizzes',
+  'assignments',
+  'courses',
+  'lessons',
+]);
 
 async function apiFetch(path, token, options = {}) {
   const res = await fetch(`${API_BASE}/api${path}`, {
@@ -49,6 +70,14 @@ function serializeHighlightPoints(points) {
   if (!points || !Array.isArray(points)) return '[]';
   const cleaned = points.map((s) => String(s).trim()).filter(Boolean);
   return JSON.stringify(cleaned);
+}
+
+function SaveLiveIntentRedirect() {
+  const loc = useLocation();
+  React.useLayoutEffect(() => {
+    sessionStorage.setItem('postLoginLive', loc.pathname);
+  }, [loc.pathname]);
+  return <Navigate to="/" replace />;
 }
 
 async function uploadCourseCover(courseId, token, coverBlob) {
@@ -101,6 +130,7 @@ async function uploadVideoLibraryAsset(token, payload, onProgress) {
 }
 
 export default function App() {
+  const navigate = useNavigate();
   const [token, setToken] = useState('');
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [busyLogin, setBusyLogin] = useState(false);
@@ -117,6 +147,7 @@ export default function App() {
   const [videoCategories, setVideoCategories] = useState([]);
   const [studyMaterials, setStudyMaterials] = useState([]);
   const [worksheets, setWorksheets] = useState([]);
+  const [assignments, setAssignments] = useState([]);
   const [selectedBatchId, setSelectedBatchId] = useState('');
   const [batchSessions, setBatchSessions] = useState([]);
   const [cancelAuditRows, setCancelAuditRows] = useState([]);
@@ -128,6 +159,7 @@ export default function App() {
   const [loadErrors, setLoadErrors] = useState([]);
   const [currentUser, setCurrentUser] = useState(null);
   const [health, setHealth] = useState(null);
+  const [authBootstrapping, setAuthBootstrapping] = useState(true);
 
   const authReady = useMemo(() => Boolean(token), [token]);
 
@@ -153,10 +185,12 @@ export default function App() {
           body: JSON.stringify({ email, password, client: 'mobile' }),
         });
         setToken(replaced.token);
+        persistWebAdminToken(replaced.token);
         const me = await apiFetch('/users/me', replaced.token);
         setCurrentUser(me);
         if (!WEB_ADMIN_ROLES.includes(me?.role)) {
           setToken('');
+          persistWebAdminToken('');
           throw new Error(`Web admin access is not available for this account. Logged in as ${me?.role || 'Unknown'}`);
         }
         if (me?.role === 'Creator') setCurrentPage('study-materials');
@@ -164,7 +198,13 @@ export default function App() {
         setHealth(hd);
         setMessage('Logged in (previous session replaced)');
         setTimeout(() => {
-          loadAllWithToken(replaced.token);
+          void loadAllWithToken(replaced.token).then(() => {
+            const pend = sessionStorage.getItem('postLoginLive');
+            if (pend?.startsWith('/live/')) {
+              sessionStorage.removeItem('postLoginLive');
+              navigate(pend, { replace: true });
+            }
+          });
         }, 0);
         return;
       }
@@ -172,10 +212,12 @@ export default function App() {
         throw new Error('Login did not return a token');
       }
       setToken(data.token);
+      persistWebAdminToken(data.token);
       const me = await apiFetch('/users/me', data.token);
       setCurrentUser(me);
       if (!WEB_ADMIN_ROLES.includes(me?.role)) {
         setToken('');
+        persistWebAdminToken('');
         throw new Error(`Web admin access is not available for this account. Logged in as ${me?.role || 'Unknown'}`);
       }
       if (me?.role === 'Creator') setCurrentPage('study-materials');
@@ -183,7 +225,13 @@ export default function App() {
       setHealth(hd);
       setMessage('Logged in');
       setTimeout(() => {
-        loadAllWithToken(data.token);
+        void loadAllWithToken(data.token).then(() => {
+          const pend = sessionStorage.getItem('postLoginLive');
+          if (pend?.startsWith('/live/')) {
+            sessionStorage.removeItem('postLoginLive');
+            navigate(pend, { replace: true });
+          }
+        });
       }, 0);
     } catch (e) {
       setError(e.message);
@@ -200,7 +248,7 @@ export default function App() {
       setCurrentUser(me);
 
       if (me.role === 'Creator') {
-        const [c, l, q, v, vc, sm, ws] = await Promise.all([
+        const [c, l, q, v, vc, sm, ws, asg] = await Promise.all([
           apiFetchSafe('/courses', nextToken),
           apiFetchSafe('/lessons/admin/all', nextToken),
           apiFetchSafe('/quizzes/v2', nextToken),
@@ -208,6 +256,7 @@ export default function App() {
           apiFetchSafe('/videos/categories', nextToken),
           apiFetchSafe('/study-materials', nextToken),
           apiFetchSafe('/worksheets', nextToken),
+          apiFetchSafe('/assignments', nextToken),
         ]);
         setUsers([]);
         setPendingUsers([]);
@@ -227,6 +276,8 @@ export default function App() {
         else setStudyMaterials([]);
         if (ws.ok) setWorksheets(Array.isArray(ws.data) ? ws.data : []);
         else setWorksheets([]);
+        if (asg.ok) setAssignments(Array.isArray(asg.data) ? asg.data : []);
+        else setAssignments([]);
         setHealth(null);
         setLoadErrors([
           !c.ok ? `/courses: ${c.error}` : null,
@@ -236,11 +287,12 @@ export default function App() {
           !vc.ok ? `/videos/categories: ${vc.error}` : null,
           !sm.ok ? `/study-materials: ${sm.error}` : null,
           !ws.ok ? `/worksheets: ${ws.error}` : null,
+          !asg.ok ? `/assignments: ${asg.error}` : null,
         ].filter(Boolean));
         return;
       }
 
-      const [u, pu, c, l, b, h, q, v, vc, sm, ws] = await Promise.all([
+      const [u, pu, c, l, b, h, q, v, vc, sm, ws, asg] = await Promise.all([
         apiFetchSafe('/users', nextToken),
         apiFetchSafe('/users/pending', nextToken),
         apiFetchSafe('/courses', nextToken),
@@ -252,6 +304,7 @@ export default function App() {
         apiFetchSafe('/videos/categories', nextToken),
         apiFetchSafe('/study-materials', nextToken),
         apiFetchSafe('/worksheets', nextToken),
+        apiFetchSafe('/assignments', nextToken),
       ]);
 
       if (u.ok) setUsers(Array.isArray(u.data) ? u.data : []);
@@ -265,6 +318,7 @@ export default function App() {
       if (vc.ok) setVideoCategories(Array.isArray(vc.data) ? vc.data : []);
       if (sm.ok) setStudyMaterials(Array.isArray(sm.data) ? sm.data : []);
       if (ws.ok) setWorksheets(Array.isArray(ws.data) ? ws.data : []);
+      if (asg.ok) setAssignments(Array.isArray(asg.data) ? asg.data : []);
 
       const errs = [
         !u.ok ? `/users: ${u.error}` : null,
@@ -278,6 +332,7 @@ export default function App() {
         !vc.ok ? `/videos/categories: ${vc.error}` : null,
         !sm.ok ? `/study-materials: ${sm.error}` : null,
         !ws.ok ? `/worksheets: ${ws.error}` : null,
+        !asg.ok ? `/assignments: ${asg.error}` : null,
       ].filter(Boolean);
       setLoadErrors(errs);
     } catch (e) {
@@ -289,8 +344,40 @@ export default function App() {
     await loadAllWithToken(token);
   }
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const stored = localStorage.getItem(WEB_ADMIN_TOKEN_KEY);
+        if (!stored) return;
+        const me = await apiFetch('/users/me', stored);
+        if (cancelled) return;
+        if (!WEB_ADMIN_ROLES.includes(me?.role)) {
+          persistWebAdminToken('');
+          return;
+        }
+        setToken(stored);
+        setCurrentUser(me);
+        if (me?.role === 'Creator') setCurrentPage('study-materials');
+        const hd = me?.role === 'Admin' ? await apiFetch('/health/details', stored).catch(() => null) : null;
+        if (!cancelled) setHealth(hd);
+        await loadAllWithToken(stored);
+      } catch {
+        persistWebAdminToken('');
+      } finally {
+        if (!cancelled) setAuthBootstrapping(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- restore session once on mount
+  }, []);
+
   function logout() {
+    persistWebAdminToken('');
     setToken('');
+    navigate('/');
     setCurrentPage('dashboard');
     setUsers([]);
     setPendingUsers([]);
@@ -303,6 +390,7 @@ export default function App() {
     setVideoCategories([]);
     setStudyMaterials([]);
     setWorksheets([]);
+    setAssignments([]);
     setBatchSessions([]);
     setCancelAuditRows([]);
     setBatchMembers([]);
@@ -312,26 +400,40 @@ export default function App() {
     setMessage('Logged out');
   }
 
-  async function createUser(e) {
-    e.preventDefault();
-    const form = new FormData(e.currentTarget);
+  /** @param {HTMLFormElement|React.SyntheticEvent} formOrEvent — prefer form node from ref (stable after await). */
+  async function createUser(formOrEvent) {
+    const isEvent = formOrEvent && typeof formOrEvent.preventDefault === 'function';
+    if (isEvent) formOrEvent.preventDefault();
+    const formEl = isEvent ? formOrEvent.currentTarget : formOrEvent;
+    if (!formEl || formEl.nodeName !== 'FORM') return;
+    const form = new FormData(formEl);
     try {
-      await apiFetch('/users', token, {
+      const created = await apiFetch('/users', token, {
         method: 'POST',
         body: JSON.stringify({
           name: form.get('name'),
           email: form.get('email'),
           password: form.get('password'),
-          role: form.get('role'),
+          role: String(form.get('role') || '').trim(),
           mobileNumber: form.get('mobileNumber'),
           profilePhotoUrl: form.get('profilePhotoUrl'),
         }),
       });
-      e.currentTarget.reset();
+      formEl.reset();
+      if (created && created.id != null) {
+        setUsers((prev) => {
+          const list = Array.isArray(prev) ? prev : [];
+          const next = list.filter((u) => Number(u.id) !== Number(created.id));
+          next.unshift(created);
+          return next;
+        });
+      }
       await loadAll();
       setMessage('User created');
+      pushToast('User created', 'success');
     } catch (err) {
       setError(err.message);
+      pushToast(err.message, 'error');
     }
   }
 
@@ -419,47 +521,42 @@ export default function App() {
   }
 
   async function createLessonLibrary(payload) {
-    try {
-      const created = await apiFetch('/lessons/library', token, {
-        method: 'POST',
-        body: JSON.stringify({
-          title: payload.title,
-          description: payload.description,
-          studyMaterialHtml: payload.studyMaterialHtml,
-          worksheetHtml: payload.worksheetHtml,
-          worksheetAnswerKeyHtml: payload.worksheetAnswerKeyHtml,
-          assignmentTitle: payload.assignmentTitle,
-        }),
-      });
-      await loadAll();
-      setMessage('Lesson template created');
-      pushToast('Lesson template created', 'success');
-    } catch (err) {
-      setError(err.message);
-      pushToast(err.message, 'error');
-    }
+    const created = await apiFetch('/lessons/library', token, {
+      method: 'POST',
+      body: JSON.stringify({
+        title: payload.title,
+        description: payload.description ?? '',
+      }),
+    });
+    await loadAll();
+    setMessage('Lesson created');
+    pushToast('Lesson created', 'success');
+    return created;
   }
 
   async function updateLessonLibrary(payload) {
-    try {
-      await apiFetch(`/lessons/library/${payload.id}`, token, {
-        method: 'PUT',
-        body: JSON.stringify({
-          title: payload.title,
-          description: payload.description,
-          studyMaterialHtml: payload.studyMaterialHtml,
-          worksheetHtml: payload.worksheetHtml,
-          worksheetAnswerKeyHtml: payload.worksheetAnswerKeyHtml,
-          assignmentTitle: payload.assignmentTitle,
-        }),
-      });
-      await loadAll();
-      setMessage('Lesson template updated');
-      pushToast('Lesson template updated', 'success');
-    } catch (err) {
-      setError(err.message);
-      pushToast(err.message, 'error');
-    }
+    await apiFetch(`/lessons/library/${payload.id}`, token, {
+      method: 'PUT',
+      body: JSON.stringify({
+        title: payload.title,
+        description: payload.description ?? '',
+      }),
+    });
+    await loadAll();
+    setMessage('Lesson updated');
+    pushToast('Lesson updated', 'success');
+  }
+
+  async function saveLessonComposition(lessonId, items) {
+    await apiFetch(`/lessons/library/${lessonId}/composition`, token, {
+      method: 'PUT',
+      body: JSON.stringify({ items }),
+    });
+    await loadAll();
+  }
+
+  async function loadLessonComposition(lessonId) {
+    return apiFetch(`/lessons/library/${lessonId}/composition`, token);
   }
 
   async function deleteCourse(id) {
@@ -472,6 +569,19 @@ export default function App() {
       setError(err.message);
       pushToast(err.message, 'error');
     }
+  }
+
+  async function fetchCourseSchedule(courseId) {
+    return apiFetch(`/lessons/course/${courseId}/schedule`, token);
+  }
+
+  async function updateCourseScheduleSlot(mapId, payload) {
+    await apiFetch(`/lessons/schedule/${mapId}`, token, {
+      method: 'PUT',
+      body: JSON.stringify({
+        lessonId: payload.lessonId,
+      }),
+    });
   }
 
   async function deleteLessonLibrary(id) {
@@ -488,34 +598,98 @@ export default function App() {
 
   async function createBatch(e) {
     e.preventDefault();
-    const form = new FormData(e.currentTarget);
+    const formEl = e.currentTarget;
+    const form = new FormData(formEl);
     try {
+      const trainerRaw = form.get('trainerId');
+      const trainers =
+        trainerRaw && String(trainerRaw).trim() !== '' ? [Number(trainerRaw)] : undefined;
       await apiFetch('/batch-manager', token, {
         method: 'POST',
         body: JSON.stringify({
           title: form.get('title'),
           batchType: form.get('batchType'),
-          courseId: Number(form.get('courseId')),
-          plannedStartDate: form.get('plannedStartDate'),
-          notes: form.get('notes'),
-          trainingSchedule: {
-            startTime: form.get('startTime'),
-            endTime: form.get('endTime'),
-            daysOfWeek: String(form.get('daysOfWeek') || '').split(',').map((s) => s.trim()).filter(Boolean),
-          },
+          batchNumber: Number(form.get('batchNumber')),
+          courseId: form.get('courseId') ? Number(form.get('courseId')) : undefined,
+          plannedStartDate: form.get('plannedStartDate') || undefined,
+          durationDays: form.get('durationDays') ? Number(form.get('durationDays')) : undefined,
+          notes: form.get('notes') || undefined,
+          trainers,
         }),
       });
-      e.currentTarget.reset();
+      formEl.reset();
       await loadAll();
       setMessage('Batch created');
+      pushToast('Batch created', 'success');
+      return true;
     } catch (err) {
       setError(err.message);
+      pushToast(err.message, 'error');
+      return false;
     }
+  }
+
+  async function updateBatch(batchId, payload) {
+    try {
+      const updated = await apiFetch(`/batch-manager/${batchId}`, token, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+      await loadAll();
+      pushToast('Batch updated', 'success');
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      pushToast(err.message, 'error');
+      return null;
+    }
+  }
+
+  async function deleteBatch(batchId) {
+    try {
+      await apiFetch(`/batch-manager/${batchId}`, token, { method: 'DELETE' });
+      await loadAll();
+      pushToast('Batch deleted', 'success');
+      return true;
+    } catch (err) {
+      setError(err.message);
+      pushToast(err.message, 'error');
+      return false;
+    }
+  }
+
+  async function fetchBatchAssignments(batchId) {
+    return apiFetch(`/batch-manager/${batchId}/assignments`, token);
+  }
+
+  async function createBatchAssignment(batchId, payload) {
+    await apiFetch(`/batch-manager/${batchId}/assignments`, token, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    await loadAll();
+    pushToast('Assignment created', 'success');
+  }
+
+  async function fetchAssignmentSubmissions(batchId, assignmentId) {
+    return apiFetch(`/batch-manager/${batchId}/assignments/${assignmentId}/submissions`, token);
+  }
+
+  async function fetchBatchAttendance(batchId) {
+    return apiFetch(`/batch-manager/${batchId}/attendance`, token);
+  }
+
+  async function saveSessionAttendance(batchId, sessionId, entries) {
+    await apiFetch(`/batch-manager/${batchId}/sessions/${sessionId}/attendance`, token, {
+      method: 'PUT',
+      body: JSON.stringify({ entries }),
+    });
   }
 
   async function addHoliday(e) {
     e.preventDefault();
-    const form = new FormData(e.currentTarget);
+    const formEl = e.currentTarget;
+    const form = new FormData(formEl);
     try {
       await apiFetch('/batch-manager/holidays', token, {
         method: 'POST',
@@ -524,7 +698,7 @@ export default function App() {
           reason: form.get('reason'),
         }),
       });
-      e.currentTarget.reset();
+      formEl.reset();
       await loadAll();
       setMessage('Holiday added');
     } catch (err) {
@@ -541,50 +715,90 @@ export default function App() {
     }
   }
 
-  async function startBatch() {
-    if (!selectedBatchId) return;
+  async function startBatch(batchId, startDate) {
+    const id = batchId ?? selectedBatchId;
+    if (!id) return;
+    const date =
+      startDate != null && String(startDate).trim()
+        ? String(startDate).trim()
+        : new Date().toISOString().slice(0, 10);
     try {
-      await apiFetch(`/batch-manager/${selectedBatchId}/start`, token, {
+      await apiFetch(`/batch-manager/${id}/start`, token, {
         method: 'POST',
-        body: JSON.stringify({ startDate: new Date().toISOString().slice(0, 10) }),
+        body: JSON.stringify({ startDate: date }),
       });
-      const sessions = await apiFetch(`/batch-manager/${selectedBatchId}/sessions`, token);
+      const sessions = await apiFetch(`/batch-manager/${id}/sessions`, token);
+      setSelectedBatchId(String(id));
       setBatchSessions(sessions);
       setMessage('Batch started and sessions generated');
+      pushToast('Batch started and sessions generated', 'success');
       await loadAll();
     } catch (err) {
       setError(err.message);
+      pushToast(err.message, 'error');
+      throw err;
     }
   }
 
-  async function loadSessions() {
-    if (!selectedBatchId) return;
+  /** Members + trainers only — used after roster changes so one failing sessions/audit fetch cannot leave tables empty. */
+  async function reloadBatchRoster(forBatchId) {
+    const id = forBatchId ?? selectedBatchId;
+    if (!id) return;
     try {
-      const [sessions, audit, members, trainers] = await Promise.all([
-        apiFetch(`/batch-manager/${selectedBatchId}/sessions`, token),
-        apiFetch(`/batch-manager/${selectedBatchId}/sessions/audit`, token),
-        apiFetch(`/batch-manager/${selectedBatchId}/members`, token),
-        apiFetch(`/batch-manager/${selectedBatchId}/trainers`, token),
+      setSelectedBatchId(String(id));
+      const [members, trainers] = await Promise.all([
+        apiFetch(`/batch-manager/${id}/members`, token),
+        apiFetch(`/batch-manager/${id}/trainers`, token),
       ]);
-      setBatchSessions(sessions);
-      setCancelAuditRows(Array.isArray(audit) ? audit : []);
       setBatchMembers(Array.isArray(members) ? members : []);
       setBatchTrainers(Array.isArray(trainers) ? trainers : []);
-      pushToast('Sessions loaded', 'info');
     } catch (err) {
       setError(err.message);
       pushToast(err.message, 'error');
     }
   }
 
-  async function cancelSession(sessionId, reason) {
-    if (!selectedBatchId) return;
+  async function loadSessions(forBatchId) {
+    const id = forBatchId ?? selectedBatchId;
+    if (!id) return;
     try {
-      await apiFetch(`/batch-manager/${selectedBatchId}/sessions/${sessionId}/cancel`, token, {
+      setSelectedBatchId(String(id));
+      const labels = ['sessions', 'sessions audit', 'members', 'trainers'];
+      const settled = await Promise.allSettled([
+        apiFetch(`/batch-manager/${id}/sessions`, token),
+        apiFetch(`/batch-manager/${id}/sessions/audit`, token),
+        apiFetch(`/batch-manager/${id}/members`, token),
+        apiFetch(`/batch-manager/${id}/trainers`, token),
+      ]);
+      const sessions = settled[0].status === 'fulfilled' ? settled[0].value : [];
+      const audit = settled[1].status === 'fulfilled' ? settled[1].value : [];
+      const members = settled[2].status === 'fulfilled' ? settled[2].value : [];
+      const trainers = settled[3].status === 'fulfilled' ? settled[3].value : [];
+      setBatchSessions(Array.isArray(sessions) ? sessions : []);
+      setCancelAuditRows(Array.isArray(audit) ? audit : []);
+      setBatchMembers(Array.isArray(members) ? members : []);
+      setBatchTrainers(Array.isArray(trainers) ? trainers : []);
+      settled.forEach((r, i) => {
+        if (r.status === 'rejected') {
+          const msg = r.reason?.message || 'Request failed';
+          pushToast(`Batch ${labels[i]}: ${msg}`, 'error');
+        }
+      });
+    } catch (err) {
+      setError(err.message);
+      pushToast(err.message, 'error');
+    }
+  }
+
+  async function cancelSession(sessionId, reason, batchId) {
+    const id = batchId ?? selectedBatchId;
+    if (!id) return;
+    try {
+      await apiFetch(`/batch-manager/${id}/sessions/${sessionId}/cancel`, token, {
         method: 'POST',
         body: JSON.stringify({ reason }),
       });
-      await loadSessions();
+      await loadSessions(id);
       setMessage('Session cancelled and schedule adjusted');
       pushToast('Session cancelled', 'success');
     } catch (err) {
@@ -594,23 +808,16 @@ export default function App() {
   }
 
   React.useEffect(() => {
-    if (selectedBatchId) {
-      loadSessions();
-    } else {
-      setBatchSessions([]);
-      setCancelAuditRows([]);
-      setBatchMembers([]);
-      setBatchTrainers([]);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedBatchId]);
-
-  React.useEffect(() => {
     if (!token || !currentUser || currentUser.role !== 'Creator') return;
     if (!CREATOR_ALLOWED_PAGES.has(currentPage)) {
       setCurrentPage('study-materials');
     }
   }, [token, currentUser, currentPage]);
+
+  React.useEffect(() => {
+    if (currentPage === 'users') setCurrentPage('students');
+    else if (['trainers', 'admins', 'creators'].includes(currentPage)) setCurrentPage('other-users');
+  }, [currentPage]);
 
   const libraryCanMutate = useMemo(
     () => (row) => {
@@ -623,14 +830,15 @@ export default function App() {
     [currentUser],
   );
 
-  async function addBatchMember(studentId) {
-    if (!selectedBatchId || !studentId) return;
+  async function addBatchMember(studentId, batchId) {
+    const bid = batchId ?? selectedBatchId;
+    if (!bid || !studentId) return;
     try {
-      await apiFetch(`/batch-manager/${selectedBatchId}/members`, token, {
+      await apiFetch(`/batch-manager/${bid}/members`, token, {
         method: 'POST',
         body: JSON.stringify({ studentId: Number(studentId) }),
       });
-      await loadSessions();
+      await reloadBatchRoster(bid);
       pushToast('Student added to batch', 'success');
     } catch (err) {
       setError(err.message);
@@ -638,11 +846,12 @@ export default function App() {
     }
   }
 
-  async function removeBatchMember(studentId) {
-    if (!selectedBatchId || !studentId) return;
+  async function removeBatchMember(studentId, batchId) {
+    const bid = batchId ?? selectedBatchId;
+    if (!bid || !studentId) return;
     try {
-      await apiFetch(`/batch-manager/${selectedBatchId}/members/${studentId}`, token, { method: 'DELETE' });
-      await loadSessions();
+      await apiFetch(`/batch-manager/${bid}/members/${studentId}`, token, { method: 'DELETE' });
+      await reloadBatchRoster(bid);
       pushToast('Student removed from batch', 'success');
     } catch (err) {
       setError(err.message);
@@ -650,14 +859,15 @@ export default function App() {
     }
   }
 
-  async function addBatchTrainer(trainerId) {
-    if (!selectedBatchId || !trainerId) return;
+  async function addBatchTrainer(trainerId, batchId) {
+    const bid = batchId ?? selectedBatchId;
+    if (!bid || !trainerId) return;
     try {
-      await apiFetch(`/batch-manager/${selectedBatchId}/trainers`, token, {
+      await apiFetch(`/batch-manager/${bid}/trainers`, token, {
         method: 'POST',
         body: JSON.stringify({ trainerId: Number(trainerId) }),
       });
-      await loadSessions();
+      await reloadBatchRoster(bid);
       pushToast('Trainer assigned to batch', 'success');
     } catch (err) {
       setError(err.message);
@@ -665,11 +875,12 @@ export default function App() {
     }
   }
 
-  async function removeBatchTrainer(trainerId) {
-    if (!selectedBatchId || !trainerId) return;
+  async function removeBatchTrainer(trainerId, batchId) {
+    const bid = batchId ?? selectedBatchId;
+    if (!bid || !trainerId) return;
     try {
-      await apiFetch(`/batch-manager/${selectedBatchId}/trainers/${trainerId}`, token, { method: 'DELETE' });
-      await loadSessions();
+      await apiFetch(`/batch-manager/${bid}/trainers/${trainerId}`, token, { method: 'DELETE' });
+      await reloadBatchRoster(bid);
       pushToast('Trainer removed from batch', 'success');
     } catch (err) {
       setError(err.message);
@@ -842,73 +1053,62 @@ export default function App() {
     await loadAll();
   }
 
-  if (!authReady) {
-    return (
-      <div className="loginAppRoot">
-        <LoginCard
-          email={email}
-          password={password}
-          setEmail={setEmail}
-          setPassword={setPassword}
-          onLogin={doLogin}
-          busy={busyLogin}
-          error={error}
-        />
-      </div>
-    );
+  async function loadAssignment(id) {
+    return apiFetch(`/assignments/${id}`, token);
+  }
+
+  async function createAssignment(payload) {
+    await apiFetch('/assignments', token, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    await loadAll();
+  }
+
+  async function updateAssignment(id, payload) {
+    await apiFetch(`/assignments/${id}`, token, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+    await loadAll();
+  }
+
+  async function deleteAssignment(id) {
+    await apiFetch(`/assignments/${id}`, token, { method: 'DELETE' });
+    await loadAll();
   }
 
   let page = null;
-  const students = users.filter((u) => u.role === 'Student' || u.role === 'Lab');
-  const trainers = users.filter((u) => u.role === 'Trainer');
-  const admins = users.filter((u) => u.role === 'Admin');
-  const creators = users.filter((u) => u.role === 'Creator');
+  /** Classroom learners only — excludes trainers/admins mistakenly grouped here. */
+  const studentAccounts = users.filter((u) => u.role === 'Student');
+  /** Trainers, admins, creators, Lab — everything that is not a classroom Student row. */
+  const otherUserAccounts = users.filter((u) =>
+    ['Trainer', 'Admin', 'Creator', 'Lab'].includes(u.role)
+  );
   const showCreatedBy = currentUser?.role === 'Admin';
 
   if (currentPage === 'dashboard') {
     page = <DashboardPage users={users} pendingUsers={pendingUsers} courses={courses} batches={batches} holidays={holidays} />;
-  } else if (currentPage === 'users' || currentPage === 'students') {
+  } else if (currentPage === 'students') {
     page = (
       <UsersPage
-        users={students}
+        variant="students"
+        users={studentAccounts}
         title="Students"
-        subtitle="Students and lab users"
+        subtitle="Classroom student accounts (role Student)"
         onCreateUser={createUser}
         onUpdateUser={updateUser}
         onGetUserDetails={getUserDetails}
       />
     );
-  } else if (currentPage === 'trainers') {
+  } else if (currentPage === 'other-users') {
     page = (
       <UsersPage
-        users={trainers}
-        title="Trainers"
-        subtitle="Trainer accounts"
-        onCreateUser={createUser}
-        onUpdateUser={updateUser}
-        onGetUserDetails={getUserDetails}
-      />
-    );
-  } else if (currentPage === 'admins') {
-    page = (
-      <UsersPage
-        users={admins}
-        title="Admins"
-        subtitle="Administrator accounts"
-        onCreateUser={createUser}
-        onUpdateUser={updateUser}
-        onGetUserDetails={getUserDetails}
-      />
-    );
-  } else if (currentPage === 'creators') {
-    page = (
-      <UsersPage
-        users={creators}
-        title="Creators"
-        subtitle="Library-only authors — add name, email, mobile, password, and profile photo"
-        createTitle="Add creator"
-        createSubtitle="Name, email, password, mobile number, profile photo URL"
-        defaultRole="Creator"
+        variant="other-users"
+        users={otherUserAccounts}
+        title="Other users"
+        subtitle="Trainers, admins, creators, and Lab (TV) — newest first"
+        defaultRole="Trainer"
         onCreateUser={createUser}
         onUpdateUser={updateUser}
         onGetUserDetails={getUserDetails}
@@ -917,13 +1117,40 @@ export default function App() {
   } else if (currentPage === 'approvals') {
     page = <ApprovalsPage pendingUsers={pendingUsers} onApproveUser={approveUser} />;
   } else if (currentPage === 'courses') {
-    page = <CoursesPage courses={courses} onCreateCourse={createCourse} onUpdateCourse={updateCourse} onDeleteCourse={deleteCourse} />;
+    page = (
+      <CoursesPage
+        courses={courses}
+        library={library}
+        onCreateCourse={createCourse}
+        onUpdateCourse={updateCourse}
+        onDeleteCourse={deleteCourse}
+        fetchCourseSchedule={fetchCourseSchedule}
+        updateCourseScheduleSlot={updateCourseScheduleSlot}
+        pushToast={pushToast}
+      />
+    );
   } else if (currentPage === 'lessons') {
-    page = <LessonsPage library={library} onCreateLessonLibrary={createLessonLibrary} onUpdateLessonLibrary={updateLessonLibrary} onDeleteLessonLibrary={deleteLessonLibrary} />;
+    page = (
+      <LessonsPage
+        library={library}
+        videos={videos}
+        studyMaterials={studyMaterials}
+        worksheets={worksheets}
+        quizBank={quizBank}
+        assignments={assignments}
+        onCreateLessonLibrary={createLessonLibrary}
+        onUpdateLessonLibrary={updateLessonLibrary}
+        onDeleteLessonLibrary={deleteLessonLibrary}
+        saveLessonComposition={saveLessonComposition}
+        loadLessonComposition={loadLessonComposition}
+      />
+    );
   } else if (currentPage === 'batches') {
     page = (
       <BatchesPage
         onCreateBatch={createBatch}
+        onUpdateBatch={updateBatch}
+        courses={courses}
         batches={batches}
         selectedBatchId={selectedBatchId}
         setSelectedBatchId={setSelectedBatchId}
@@ -939,6 +1166,13 @@ export default function App() {
         onAddBatchTrainer={addBatchTrainer}
         onRemoveBatchTrainer={removeBatchTrainer}
         batchSessions={batchSessions}
+        fetchBatchAssignments={fetchBatchAssignments}
+        createBatchAssignment={createBatchAssignment}
+        fetchAssignmentSubmissions={fetchAssignmentSubmissions}
+        fetchBatchAttendance={fetchBatchAttendance}
+        saveSessionAttendance={saveSessionAttendance}
+        onRefreshUsers={loadAll}
+        onDeleteBatch={deleteBatch}
       />
     );
   } else if (currentPage === 'quizzes') {
@@ -1008,27 +1242,68 @@ export default function App() {
     );
   } else if (currentPage === 'assignments') {
     page = (
-      <SectionCard title="Assignments" subtitle="Homework and learner submissions">
-        <p className="muted" style={{ margin: 0 }}>
-          This area will be available in a future release.
+      <AssignmentsPage
+        assignments={assignments}
+        showCreatedBy={showCreatedBy}
+        libraryCanMutate={libraryCanMutate}
+        loadAssignment={loadAssignment}
+        createAssignment={createAssignment}
+        updateAssignment={updateAssignment}
+        deleteAssignment={deleteAssignment}
+      />
+    );
+  }
+
+  if (authBootstrapping) {
+    return (
+      <div className="loginAppRoot" style={{ alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
+        <p className="muted" style={{ fontSize: '1rem' }}>
+          Loading…
         </p>
-      </SectionCard>
+      </div>
     );
   }
 
   return (
-    <div className="app">
-      <ToastStack toasts={toasts} />
-      <StatusBanner error={error} message={message} />
-      <AdminShell
-        currentPage={currentPage}
-        onNavigate={setCurrentPage}
-        onRefresh={loadAll}
-        onLogout={logout}
-        creatorMode={currentUser?.role === 'Creator'}
-      >
-        {page}
-      </AdminShell>
-    </div>
+    <Routes>
+      <Route
+        path="/live/:liveSessionId"
+        element={
+          authReady ? <LiveClassroomPage token={token} /> : <SaveLiveIntentRedirect />
+        }
+      />
+      <Route
+        path="*"
+        element={
+          !authReady ? (
+            <div className="loginAppRoot">
+              <LoginCard
+                email={email}
+                password={password}
+                setEmail={setEmail}
+                setPassword={setPassword}
+                onLogin={doLogin}
+                busy={busyLogin}
+                error={error}
+              />
+            </div>
+          ) : (
+            <div className="app">
+              <ToastStack toasts={toasts} />
+              <StatusBanner error={error} message={message} />
+              <AdminShell
+                currentPage={currentPage}
+                onNavigate={setCurrentPage}
+                onRefresh={loadAll}
+                onLogout={logout}
+                creatorMode={currentUser?.role === 'Creator'}
+              >
+                {page}
+              </AdminShell>
+            </div>
+          )
+        }
+      />
+    </Routes>
   );
 }
