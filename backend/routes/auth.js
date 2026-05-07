@@ -24,9 +24,9 @@ router.post('/login', (req, res) => {
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
-  if (user.status && user.status !== 'approved') {
+  if (user.status === 'rejected') {
     return res.status(403).json({
-      error: user.status === 'pending' ? 'Account pending admin approval' : `Account is ${user.status}`,
+      error: `Account is ${user.status}`,
       status: user.status,
     });
   }
@@ -68,9 +68,9 @@ router.post('/replace-session', (req, res) => {
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
-  if (user.status && user.status !== 'approved') {
+  if (user.status === 'rejected') {
     return res.status(403).json({
-      error: user.status === 'pending' ? 'Account pending admin approval' : `Account is ${user.status}`,
+      error: `Account is ${user.status}`,
       status: user.status,
     });
   }
@@ -109,7 +109,9 @@ router.post('/signup', (req, res) => {
     countryCode,
     occupation,
     policiesAgreed,
+    deviceName: rawDevice,
   } = req.body;
+  const deviceName = typeof rawDevice === 'string' && rawDevice.trim() ? rawDevice.trim() : 'Unknown device';
   if (!name || !email || !password) {
     return res.status(400).json({ error: 'name, email and password are required' });
   }
@@ -129,7 +131,7 @@ router.post('/signup', (req, res) => {
     .prepare(
       'INSERT INTO users (email, password_hash, name, role, status, mobile_number) VALUES (?, ?, ?, ?, ?, ?)'
     )
-    .run(emailNorm, hash, nameNorm, 'Student', 'pending', mobileNumber || null);
+    .run(emailNorm, hash, nameNorm, 'Student', 'approved', mobileNumber || null);
   const userId = inserted.lastInsertRowid;
 
   db.prepare(`
@@ -155,10 +157,19 @@ router.post('/signup', (req, res) => {
     1
   );
 
+  const jti = crypto.randomUUID();
+  const token = jwt.sign(
+    { userId, role: 'Student', jti },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+  upsertSession(userId, jti, deviceName);
+
   res.status(201).json({
     ok: true,
-    message: 'Signup submitted. Awaiting admin approval.',
-    user: { id: userId, email: emailNorm, name: nameNorm, role: 'Student', status: 'pending' },
+    message: 'Signup successful.',
+    token,
+    user: { id: userId, email: emailNorm, name: nameNorm, role: 'Student', status: 'approved' },
   });
 });
 

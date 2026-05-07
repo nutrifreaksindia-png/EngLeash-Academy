@@ -1,7 +1,8 @@
 import Constants from 'expo-constants';
-import { NativeModules, Platform } from 'react-native';
+import { NativeModules } from 'react-native';
 
-const PROD_API_BASE = 'https://api.engleashacademy.in';
+// Canonical hosted backend for production and optional remote-dev mode.
+const PROD_API_BASE = 'https://api.engleashacademy.com';
 
 /**
  * Prefer EXPO_PUBLIC_API_BASE for explicit control in both dev and prod builds.
@@ -11,6 +12,9 @@ const EXPLICIT_API_BASE = process.env.EXPO_PUBLIC_API_BASE?.trim();
 /** Optional override; do not default to a random LAN IP — wrong IP causes silent timeouts. */
 const DEV_API_HOST_OVERRIDE = process.env.EXPO_PUBLIC_DEV_API_HOST?.trim();
 const DEV_API_PORT = Number(process.env.EXPO_PUBLIC_DEV_API_PORT || 3001);
+const USE_REMOTE_API_IN_DEV = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.EXPO_PUBLIC_USE_REMOTE_API || '').toLowerCase()
+);
 
 function hostFromExpoDev(): string | null {
   const raw = Constants.expoConfig?.hostUri?.trim();
@@ -43,7 +47,7 @@ function resolveDevApiHost(): string {
 
 const devBase = `http://${resolveDevApiHost()}:${DEV_API_PORT}`;
 
-export const API_BASE = EXPLICIT_API_BASE || (__DEV__ ? devBase : PROD_API_BASE);
+export const API_BASE = EXPLICIT_API_BASE || (__DEV__ ? (USE_REMOTE_API_IN_DEV ? PROD_API_BASE : devBase) : PROD_API_BASE);
 
 export const ROLES = ['Admin', 'Trainer', 'Student'] as const;
 export type Role = (typeof ROLES)[number];

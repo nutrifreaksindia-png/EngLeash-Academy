@@ -65,7 +65,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signup = useCallback(async (payload: Record<string, any>) => {
-    await api.signup(payload);
+    const data = await api.signup(payload);
+    if (data?.token) {
+      await setToken(data.token);
+      try {
+        const user = await api.get('/users/me');
+        setState({ user, loading: false });
+      } catch {
+        setState({ user: data.user || null, loading: false });
+      }
+    }
   }, []);
 
   const logout = useCallback(async () => {

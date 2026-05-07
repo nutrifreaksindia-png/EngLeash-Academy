@@ -98,8 +98,8 @@ export default function SignupScreen({ navigation }: any) {
     setLoading(true);
     try {
       await signup(payload);
-      Alert.alert('Signup submitted', 'Your registration is pending admin approval.', [
-        { text: 'OK', onPress: () => navigation.goBack() },
+      Alert.alert('Welcome', 'Your account was created successfully.', [
+        { text: 'OK', onPress: () => navigation.navigate('LandingHome') },
       ]);
     } catch (e: any) {
       Alert.alert('Signup failed', e?.message || 'Could not sign up');
@@ -373,7 +373,7 @@ export default function SignupScreen({ navigation }: any) {
       </TouchableOpacity>
 
       <TouchableOpacity style={styles.submitBtn} onPress={submit} disabled={loading}>
-        {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitText}>Submit for Approval</Text>}
+        {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitText}>Create account</Text>}
       </TouchableOpacity>
 
       <Modal visible={showCodeModal} animationType="slide" transparent onRequestClose={() => setShowCodeModal(false)}>
