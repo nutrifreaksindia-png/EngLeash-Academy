@@ -51,6 +51,139 @@ router.post('/enroll', auth, requireRole('Trainer', 'Student', 'Lab'), (req, res
   res.status(201).json(row);
 });
 
+router.get('/courses/:courseId/open-batches', auth, requireRole('Student', 'Lab', 'Trainer', 'Admin'), (req, res) => {
+  const courseId = Number(req.params.courseId);
+  if (!Number.isFinite(courseId)) return res.status(400).json({ error: 'Invalid courseId' });
+  const rows = db.prepare(`
+    SELECT
+      b.id,
+      b.batch_number,
+      b.title,
+      b.name,
+      b.session_type,
+      b.duration_days,
+      b.training_schedule_json,
+      b.batch_status,
+      b.planned_start_date,
+      b.actual_start_date,
+      (
+        SELECT COUNT(*)
+        FROM batch_sessions bs
+        WHERE bs.batch_id = b.id
+          AND bs.status != 'cancelled'
+          AND date(bs.session_date) <= date('now')
+      ) AS sessions_passed
+    FROM batches b
+    WHERE b.course_id = ?
+      AND COALESCE(b.enrollment_open_status, 'closed') = 'open'
+    ORDER BY COALESCE(b.batch_number, 999999), b.id
+  `).all(courseId);
+  res.json({ batches: rows });
+});
+
+router.post('/apply-batch', auth, requireRole('Student', 'Lab'), (req, res) => {
+  const courseId = Number(req.body?.course_id);
+  const batchId = Number(req.body?.batch_id);
+  if (!Number.isFinite(courseId) || !Number.isFinite(batchId)) {
+    return res.status(400).json({ error: 'course_id and batch_id are required' });
+  }
+  const batch = db.prepare(`
+    SELECT id, course_id, enrollment_open_status
+    FROM batches
+    WHERE id = ?
+  `).get(batchId);
+  if (!batch || Number(batch.course_id) !== courseId) {
+    return res.status(404).json({ error: 'Batch not found for course' });
+  }
+  if ((batch.enrollment_open_status || 'closed') !== 'open') {
+    return res.status(409).json({ error: 'Batch is currently closed for applications' });
+  }
+  const existing = db.prepare(`
+    SELECT id, status FROM course_enrollments
+    WHERE user_id = ? AND course_id = ?
+  `).get(req.user.id, courseId);
+  if (!existing) {
+    db.prepare(`
+      INSERT INTO course_enrollments (user_id, course_id, enrollment_type, status, batch_id)
+      VALUES (?, ?, 'apply', 'pending', ?)
+    `).run(req.user.id, courseId, batchId);
+  } else if (existing.status === 'approved') {
+    return res.status(409).json({ error: 'Application already approved for this course' });
+  } else {
+    db.prepare(`
+      UPDATE course_enrollments
+      SET enrollment_type = 'apply', status = 'pending', batch_id = ?, approved_at = NULL, approved_by = NULL, notes = NULL
+      WHERE id = ?
+    `).run(batchId, existing.id);
+  }
+  const row = db.prepare(`
+    SELECT * FROM course_enrollments
+    WHERE user_id = ? AND course_id = ?
+  `).get(req.user.id, courseId);
+  res.status(201).json(row);
+});
+
+router.get('/pending-applications', auth, requireRole('Admin'), (req, res) => {
+  const rows = db.prepare(`
+    SELECT
+      ce.id,
+      ce.user_id,
+      ce.course_id,
+      ce.batch_id,
+      ce.enrollment_type,
+      ce.status,
+      ce.requested_at,
+      u.name AS user_name,
+      u.email AS user_email,
+      c.name AS course_name,
+      b.title AS requested_batch_title,
+      b.batch_number AS requested_batch_number
+    FROM course_enrollments ce
+    JOIN users u ON u.id = ce.user_id
+    JOIN courses c ON c.id = ce.course_id
+    LEFT JOIN batches b ON b.id = ce.batch_id
+    WHERE ce.status = 'pending' AND ce.enrollment_type = 'apply'
+    ORDER BY ce.requested_at ASC
+  `).all();
+  res.json(rows);
+});
+
+router.post('/applications/:id/approve', auth, requireRole('Admin'), (req, res) => {
+  const id = Number(req.params.id);
+  const selectedBatchId = req.body?.batchId == null || req.body.batchId === '' ? null : Number(req.body.batchId);
+  const row = db.prepare('SELECT * FROM course_enrollments WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Application not found' });
+  if (row.enrollment_type !== 'apply') return res.status(409).json({ error: 'Only apply applications can be approved here' });
+  const targetBatchId = Number.isFinite(selectedBatchId) ? selectedBatchId : row.batch_id;
+  if (!Number.isFinite(targetBatchId)) return res.status(400).json({ error: 'Batch is required for approval' });
+  const targetBatch = db.prepare('SELECT id, course_id FROM batches WHERE id = ?').get(targetBatchId);
+  if (!targetBatch || Number(targetBatch.course_id) !== Number(row.course_id)) {
+    return res.status(400).json({ error: 'Selected batch does not belong to this course' });
+  }
+  db.prepare(`
+    UPDATE course_enrollments
+    SET status = 'approved', batch_id = ?, approved_at = ?, approved_by = ?
+    WHERE id = ?
+  `).run(targetBatchId, new Date().toISOString(), req.user.id, id);
+  db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(row.user_id, row.course_id);
+  db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(targetBatchId, row.user_id);
+  const latest = db.prepare('SELECT * FROM course_enrollments WHERE id = ?').get(id);
+  res.json(latest);
+});
+
+router.post('/applications/:id/disapprove', auth, requireRole('Admin'), (req, res) => {
+  const id = Number(req.params.id);
+  const row = db.prepare('SELECT * FROM course_enrollments WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Application not found' });
+  db.prepare(`
+    UPDATE course_enrollments
+    SET status = 'rejected', approved_at = ?, approved_by = ?, notes = ?
+    WHERE id = ?
+  `).run(new Date().toISOString(), req.user.id, req.body?.notes || null, id);
+  const latest = db.prepare('SELECT * FROM course_enrollments WHERE id = ?').get(id);
+  res.json(latest);
+});
+
 router.post('/:id/approve', auth, requireRole('Admin'), (req, res) => {
   const id = Number(req.params.id);
   const row = db.prepare('SELECT * FROM course_enrollments WHERE id = ?').get(id);

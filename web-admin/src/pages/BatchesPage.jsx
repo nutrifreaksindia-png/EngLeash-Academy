@@ -31,6 +31,10 @@ function isBatchStarted(b) {
   return (b?.batch_status || 'draft') === 'started';
 }
 
+function isBatchOpenForApply(b) {
+  return (b?.enrollment_open_status || 'closed') === 'open';
+}
+
 /** Batch session row includes live_session_id / live_status when backend joins live_sessions. */
 function canJoinLiveSession(s) {
   if (!s?.live_session_id) return false;
@@ -541,6 +545,18 @@ export default function BatchesPage({
                               Start batch
                             </button>
                           ) : null}
+                          <button
+                            type="button"
+                            className={`secondaryBtn ${isBatchOpenForApply(b) ? 'toggleBtnOn' : ''}`}
+                            title="Allow students to apply for this batch from mobile app"
+                            onClick={async () => {
+                              await onUpdateBatch(b.id, {
+                                enrollmentOpenStatus: isBatchOpenForApply(b) ? 'closed' : 'open',
+                              });
+                            }}
+                          >
+                            {isBatchOpenForApply(b) ? 'Applications: Open' : 'Applications: Closed'}
+                          </button>
                           {isBatchStarted(b) ? (
                             <>
                               <button type="button" className="secondaryBtn" onClick={() => openModal('attendance', b)}>

@@ -7,7 +7,7 @@ const NAV_SECTIONS = [
     items: [
       { id: 'students', label: 'Students' },
       { id: 'batches', label: 'Batches' },
-      { id: 'approvals', label: 'Pending Approvals' },
+      { id: 'approvals', label: 'Pending Applications' },
     ],
   },
   {

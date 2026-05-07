@@ -207,6 +207,7 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     notes,
     batchNumber,
     meetingId,
+    enrollmentOpenStatus,
   } = req.body;
 
   let nextTitle = batch.title;
@@ -259,12 +260,16 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
 
   const nextNotes = notes !== undefined ? notes || null : batch.notes;
   const nextMeeting = meetingId !== undefined ? meetingId || null : batch.meeting_id;
+  const nextEnrollmentOpenStatus =
+    enrollmentOpenStatus === 'open' || enrollmentOpenStatus === 'closed'
+      ? enrollmentOpenStatus
+      : batch.enrollment_open_status || 'closed';
 
   db.prepare(
     `
     UPDATE batches SET
       name = ?, title = ?, course_id = ?, planned_start_date = ?, duration_days = ?,
-      training_schedule_json = ?, notes = ?, meeting_id = ?, batch_number = ?
+      training_schedule_json = ?, notes = ?, meeting_id = ?, batch_number = ?, enrollment_open_status = ?
     WHERE id = ?
   `
   ).run(
@@ -277,6 +282,7 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     nextNotes,
     nextMeeting,
     nextBatchNumber,
+    nextEnrollmentOpenStatus,
     batchId
   );
 
@@ -317,6 +323,7 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     notes,
     batchNumber,
     durationDays,
+    enrollmentOpenStatus,
   } = req.body;
   if (!title || !batchType || batchNumber == null || batchNumber === '') {
     return res.status(400).json({ error: 'title, batchType and batchNumber are required' });
@@ -344,8 +351,8 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
 
   const row = db.prepare(`
     INSERT INTO batches (
-      name, title, session_type, trainer_id, created_by, course_id, training_schedule_json, meeting_id, planned_start_date, notes, batch_status, batch_number, duration_days
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+      name, title, session_type, trainer_id, created_by, course_id, training_schedule_json, meeting_id, planned_start_date, notes, batch_status, batch_number, duration_days, enrollment_open_status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
   `).run(
     title.trim(),
     title.trim(),
@@ -358,7 +365,8 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     plannedStartDate || null,
     notes || null,
     bn,
-    Number.isFinite(durationDaysNum) && durationDaysNum > 0 ? durationDaysNum : null
+    Number.isFinite(durationDaysNum) && durationDaysNum > 0 ? durationDaysNum : null,
+    enrollmentOpenStatus === 'open' ? 'open' : 'closed'
   );
   const batchId = row.lastInsertRowid;
 

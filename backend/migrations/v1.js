@@ -394,8 +394,10 @@ function ensureV1Tables(db) {
   safeAlter(db, "ALTER TABLE batches ADD COLUMN actual_start_date TEXT");
   safeAlter(db, "ALTER TABLE batches ADD COLUMN notes TEXT");
   safeAlter(db, "ALTER TABLE batches ADD COLUMN batch_status TEXT DEFAULT 'draft'");
+  safeAlter(db, "ALTER TABLE batches ADD COLUMN enrollment_open_status TEXT DEFAULT 'closed'");
   safeAlter(db, 'ALTER TABLE batches ADD COLUMN batch_number INTEGER');
   safeAlter(db, 'ALTER TABLE batches ADD COLUMN duration_days INTEGER');
+  safeAlter(db, 'ALTER TABLE course_enrollments ADD COLUMN batch_id INTEGER REFERENCES batches(id)');
   safeAlter(db, "ALTER TABLE video_library ADD COLUMN category_id INTEGER REFERENCES video_categories(id)");
   safeAlter(db, "ALTER TABLE study_material_library ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0");
   safeAlter(db, "ALTER TABLE worksheet_library ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0");
@@ -475,6 +477,11 @@ function ensureV1Tables(db) {
 
   db.prepare('INSERT OR IGNORE INTO video_categories (name, slug) VALUES (?, ?)').run('English Grammar', 'english-grammar');
   db.prepare('INSERT OR IGNORE INTO video_categories (name, slug) VALUES (?, ?)').run('English Vocabulary', 'english-vocabulary');
+  try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_course_enrollments_batch ON course_enrollments(batch_id)');
+  } catch (_) {
+    /* ignore */
+  }
 
   migrateBatchesBatchNumber(db);
   migrateCourseLessonsSchema(db);

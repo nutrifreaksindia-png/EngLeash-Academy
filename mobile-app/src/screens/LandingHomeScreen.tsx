@@ -4,7 +4,9 @@ import {
   Alert,
   FlatList,
   Image,
+  Modal,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -32,6 +34,20 @@ export type PublicCourse = {
   fee_inr?: number;
   discount_inr?: number;
   enrollment_type?: string;
+};
+
+type OpenBatch = {
+  id: number;
+  batch_number?: number;
+  title?: string;
+  name?: string;
+  session_type: 'group' | 'one_to_one';
+  duration_days?: number | null;
+  training_schedule_json?: string | null;
+  batch_status?: string;
+  planned_start_date?: string | null;
+  actual_start_date?: string | null;
+  sessions_passed?: number;
 };
 
 const SERVICES = [
@@ -67,6 +83,9 @@ export default function LandingHomeScreen({ navigation }: any) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [enrollingId, setEnrollingId] = useState<number | null>(null);
+  const [applyCourse, setApplyCourse] = useState<PublicCourse | null>(null);
+  const [openBatches, setOpenBatches] = useState<OpenBatch[]>([]);
+  const [openBatchesLoading, setOpenBatchesLoading] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -118,8 +137,34 @@ export default function LandingHomeScreen({ navigation }: any) {
   };
 
   const onApply = (course: PublicCourse) => {
-    enroll(course, course.enrollment_type || 'application');
+    if (!user) {
+      Alert.alert('Sign in required', 'Please sign in from the Account tab to continue.', [
+        { text: 'OK', onPress: goAccount },
+      ]);
+      return;
+    }
+    setApplyCourse(course);
+    setOpenBatches([]);
+    setOpenBatchesLoading(true);
+    api
+      .get(`/enrollments/courses/${course.id}/open-batches`)
+      .then((data) => setOpenBatches(Array.isArray(data?.batches) ? data.batches : []))
+      .catch((e: any) => Alert.alert('Apply', e?.message || 'Could not load open batches'))
+      .finally(() => setOpenBatchesLoading(false));
   };
+
+  async function applyToBatch(batchId: number) {
+    if (!applyCourse) return;
+    try {
+      await api.post('/enrollments/apply-batch', { course_id: applyCourse.id, batch_id: batchId });
+      Alert.alert('Application sent', 'Your batch application was submitted.');
+      setApplyCourse(null);
+      setOpenBatches([]);
+      refreshUser();
+    } catch (e: any) {
+      Alert.alert('Apply', e?.message || 'Could not submit application');
+    }
+  }
 
   const onPurchase = () => {
     Alert.alert('Purchase', 'Online purchase will be available soon. Use Apply or Join Free where applicable, or contact us.');
@@ -229,6 +274,53 @@ export default function LandingHomeScreen({ navigation }: any) {
           );
         }}
       />
+      <Modal visible={!!applyCourse} animationType="slide" transparent onRequestClose={() => setApplyCourse(null)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Apply - {applyCourse?.name}</Text>
+            {openBatchesLoading ? <ActivityIndicator color={BRAND_RED} /> : null}
+            {!openBatchesLoading && openBatches.length === 0 ? (
+              <Text style={styles.hint}>No open batches currently available for this course.</Text>
+            ) : (
+              <ScrollView style={styles.batchListScroll}>
+                {openBatches.map((b) => {
+                  let sched = {};
+                  try {
+                    sched = b.training_schedule_json ? JSON.parse(b.training_schedule_json) : {};
+                  } catch {
+                    sched = {};
+                  }
+                  const days = Array.isArray((sched as any).daysOfWeek) ? (sched as any).daysOfWeek.join(', ') : '—';
+                  const timing = (sched as any).startTime && (sched as any).endTime ? `${(sched as any).startTime}-${(sched as any).endTime}` : '—';
+                  return (
+                    <TouchableOpacity key={b.id} style={styles.batchCard} onPress={() => void applyToBatch(b.id)}>
+                      <Text style={styles.batchCardTitle}>
+                        Batch {b.batch_number || b.id} - {b.title || b.name}
+                      </Text>
+                      <Text style={styles.batchMeta}>Type: {b.session_type === 'one_to_one' ? '1:1' : 'Group'}</Text>
+                      <Text style={styles.batchMeta}>Duration: {b.duration_days || '—'} days</Text>
+                      <Text style={styles.batchMeta}>Days: {days}</Text>
+                      <Text style={styles.batchMeta}>Live timing: {timing}</Text>
+                      <Text style={styles.batchMeta}>Status: {b.batch_status === 'started' ? 'Started' : 'Not started'}</Text>
+                      {b.batch_status === 'started' ? (
+                        <>
+                          <Text style={styles.batchMeta}>Date started: {b.actual_start_date || '—'}</Text>
+                          <Text style={styles.batchMeta}>Sessions passed: {b.sessions_passed || 0}</Text>
+                        </>
+                      ) : (
+                        <Text style={styles.batchMeta}>Expected start: {b.planned_start_date || '—'}</Text>
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            )}
+            <TouchableOpacity style={styles.btnOutline} onPress={() => setApplyCourse(null)}>
+              <Text style={styles.btnOutlineText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -285,4 +377,28 @@ const styles = StyleSheet.create({
   btnPrimary: { backgroundColor: BRAND_RED, borderRadius: 8, paddingVertical: 8, paddingHorizontal: 10 },
   btnMuted: { opacity: 0.45 },
   btnPrimaryText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15,23,42,0.45)',
+    justifyContent: 'center',
+    padding: 16,
+  },
+  modalCard: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 14,
+    maxHeight: '84%',
+  },
+  modalTitle: { fontSize: 16, fontWeight: '700', color: BRAND_BLUE, marginBottom: 10 },
+  batchListScroll: { marginBottom: 12 },
+  batchCard: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 10,
+    backgroundColor: '#f8fafc',
+  },
+  batchCardTitle: { fontSize: 14, fontWeight: '700', color: '#111827' },
+  batchMeta: { fontSize: 12, color: '#334155', marginTop: 2 },
 });
