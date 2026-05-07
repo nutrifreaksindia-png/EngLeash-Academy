@@ -136,7 +136,7 @@ router.get('/pending-applications', auth, requireRole('Admin'), (req, res) => {
       u.name AS user_name,
       u.email AS user_email,
       c.name AS course_name,
-      b.title AS requested_batch_title,
+      COALESCE(b.title, b.name) AS requested_batch_title,
       b.batch_number AS requested_batch_number
     FROM course_enrollments ce
     JOIN users u ON u.id = ce.user_id

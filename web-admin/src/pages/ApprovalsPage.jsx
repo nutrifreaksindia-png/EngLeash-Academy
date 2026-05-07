@@ -52,7 +52,7 @@ export default function ApprovalsPage({
               <tr key={app.id}>
                 <td>{app.user_name || app.user_email}</td>
                 <td>{app.course_name}</td>
-                <td>{app.requested_batch_number ? `Batch ${app.requested_batch_number}` : (app.requested_batch_title || '—')}</td>
+                <td>{app.requested_batch_number ? `Batch ${app.requested_batch_number}` : (app.requested_batch_title || (app.batch_id ? `Batch ${app.batch_id}` : '—'))}</td>
                 <td>{app.requested_at || '—'}</td>
                 <td>
                   <select
