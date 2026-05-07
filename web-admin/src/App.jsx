@@ -679,6 +679,10 @@ export default function App() {
     return apiFetch(`/batch-manager/${batchId}/attendance`, token);
   }
 
+  async function fetchBatchLiveRecordings(batchId) {
+    return apiFetch(`/live/batches/${batchId}/recordings`, token);
+  }
+
   async function saveSessionAttendance(batchId, sessionId, entries) {
     await apiFetch(`/batch-manager/${batchId}/sessions/${sessionId}/attendance`, token, {
       method: 'PUT',
@@ -1170,6 +1174,7 @@ export default function App() {
         createBatchAssignment={createBatchAssignment}
         fetchAssignmentSubmissions={fetchAssignmentSubmissions}
         fetchBatchAttendance={fetchBatchAttendance}
+        fetchBatchLiveRecordings={fetchBatchLiveRecordings}
         saveSessionAttendance={saveSessionAttendance}
         onRefreshUsers={loadAll}
         onDeleteBatch={deleteBatch}

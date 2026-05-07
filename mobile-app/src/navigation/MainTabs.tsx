@@ -88,6 +88,11 @@ function SessionsStackNavigator() {
     <SessionsStack.Navigator screenOptions={stackOpts} initialRouteName="LiveSessions">
       <SessionsStack.Screen name="LiveSessions" component={LiveSessionsScreen} options={{ title: 'My Sessions' }} />
       <SessionsStack.Screen name="LiveClassroom" component={LiveClassroomScreen} options={{ title: 'Live classroom' }} />
+      <SessionsStack.Screen
+        name="SessionRecordingPlayer"
+        component={VideoPlayerScreen}
+        options={{ title: 'Recording', headerShown: false }}
+      />
       <SessionsStack.Screen name="LiveSchedule" component={LiveScheduleScreen} options={{ title: 'Schedule live' }} />
     </SessionsStack.Navigator>
   );

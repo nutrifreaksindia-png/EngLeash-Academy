@@ -158,6 +158,46 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_live_session_logs_session ON live_session_logs(live_session_id);
 
+  CREATE TABLE IF NOT EXISTS live_chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    body TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_live_chat_session_id ON live_chat_messages(live_session_id, id);
+
+  CREATE TABLE IF NOT EXISTS live_reactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_live_reactions_session_id ON live_reactions(live_session_id, id);
+
+  CREATE TABLE IF NOT EXISTS live_session_recordings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+    batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+    agora_resource_id TEXT,
+    agora_sid TEXT,
+    recording_uid TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'starting' CHECK(status IN ('starting', 'recording', 'stopping', 'stopped', 'failed', 'expired')),
+    storage_prefix TEXT,
+    cdn_urls_json TEXT,
+    file_list_json TEXT,
+    started_at TEXT,
+    stopped_at TEXT,
+    expires_at TEXT,
+    error_text TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_live_recording_session_status ON live_session_recordings(live_session_id, status);
+  CREATE INDEX IF NOT EXISTS idx_live_recording_batch ON live_session_recordings(batch_id, started_at);
+  CREATE INDEX IF NOT EXISTS idx_live_recording_expires ON live_session_recordings(expires_at);
+
   CREATE INDEX IF NOT EXISTS idx_lessons_course ON lessons(course_id);
   CREATE INDEX IF NOT EXISTS idx_enrollments_user ON enrollments(user_id);
   CREATE INDEX IF NOT EXISTS idx_enrollments_course ON enrollments(course_id);

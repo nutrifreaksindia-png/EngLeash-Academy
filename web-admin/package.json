@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "agora-rtc-sdk-ng": "^4.24.3",
+    "hls.js": "^1.6.16",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-easy-crop": "^5.5.7",

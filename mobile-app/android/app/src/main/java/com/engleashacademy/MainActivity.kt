@@ -1,9 +1,13 @@
 package com.engleashacademy
 
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 
 import com.facebook.react.ReactActivity
+import com.facebook.react.ReactApplication
+import com.facebook.react.bridge.Arguments
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
 import com.facebook.react.defaults.DefaultReactActivityDelegate
@@ -54,5 +58,25 @@ class MainActivity : ReactActivity() {
       return
     }
     super.invokeDefaultOnBackPressed()
+  }
+
+  override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+    super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+    val app = application as? ReactApplication ?: return
+    val reactContext = app.reactNativeHost.reactInstanceManager.currentReactContext ?: return
+    val emitter = reactContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+    val payload = Arguments.createMap().apply { putBoolean("active", isInPictureInPictureMode) }
+    emitter.emit("EngleashPipMode", payload)
+  }
+
+  override fun onDestroy() {
+    if (isFinishing) {
+      val app = application as? ReactApplication
+      val reactContext = app?.reactNativeHost?.reactInstanceManager?.currentReactContext
+      reactContext
+        ?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+        ?.emit("EngleashPipClosed", Arguments.createMap())
+    }
+    super.onDestroy()
   }
 }

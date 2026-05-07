@@ -4,6 +4,7 @@ const { auth, requireRole } = require('../middleware/auth');
 const uploadMemory = require('../uploadMemory');
 const { isSpacesConfigured, uploadToSpaces } = require('../services/spaces');
 const { ensureLiveSessionsForBatch } = require('../services/ensureLiveSessionsForBatch');
+const liveRecording = require('../services/liveRecording');
 
 const router = express.Router();
 
@@ -98,8 +99,8 @@ function generateSessionsForBatch(batchId, startDate, actorId) {
     if (daysOfWeek.includes(wd) && !isHoliday(dateText)) {
       const mapped = lessonByDay.get(day);
       db.prepare(`
-        INSERT INTO batch_sessions (batch_id, session_day, lesson_id, lesson_title, session_date, starts_at, ends_at, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled')
+        INSERT INTO batch_sessions (batch_id, session_day, lesson_id, lesson_title, session_date, starts_at, ends_at, status, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', datetime('now'))
       `).run(batchId, day, mapped?.lesson_id || null, mapped?.title || `Day ${String(day).padStart(2, '0')}`, dateText, startTime, endTime);
       day += 1;
     }
@@ -647,11 +648,13 @@ router.post('/:id/sessions/:sessionId/cancel', auth, requireRole('Admin', 'Train
   if (!session) return res.status(404).json({ error: 'Session not found' });
   db.prepare(`
     UPDATE batch_sessions
-    SET status = 'cancelled', cancellation_reason = ?, cancelled_by = ?
+    SET status = 'cancelled', cancellation_reason = ?, cancelled_by = ?, updated_at = datetime('now')
     WHERE id = ?
   `).run(reason, req.user.id, sessionId);
 
   db.prepare(`UPDATE live_sessions SET status = 'cancelled' WHERE batch_session_id = ?`).run(sessionId);
+
+  liveRecording.forceStopForBatchSessionLink(sessionId);
 
   const tail = db.prepare(`
     SELECT * FROM batch_sessions
@@ -659,7 +662,10 @@ router.post('/:id/sessions/:sessionId/cancel', auth, requireRole('Admin', 'Train
     ORDER BY session_day
   `).all(batchId, session.session_day);
   tail.forEach((row) => {
-    db.prepare('UPDATE batch_sessions SET session_day = ? WHERE id = ?').run(row.session_day - 1, row.id);
+    db.prepare('UPDATE batch_sessions SET session_day = ?, updated_at = datetime(\'now\') WHERE id = ?').run(
+      row.session_day - 1,
+      row.id
+    );
   });
 
   res.json({ ok: true });

@@ -81,6 +81,12 @@ async function main() {
   const run = (sql, params = []) => db.prepare(sql).run(...params);
 
   const tx = db.transaction(() => {
+    try {
+      run('DELETE FROM live_chat_messages');
+    } catch (_) {}
+    try {
+      run('DELETE FROM live_reactions');
+    } catch (_) {}
     run('DELETE FROM live_session_logs');
     run('DELETE FROM live_session_hands');
     run('DELETE FROM live_session_speakers');

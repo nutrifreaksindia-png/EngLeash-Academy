@@ -18,6 +18,8 @@ type LiveSession = {
   batch_name: string;
   session_type: 'group' | 'one_to_one';
   trainer_name: string;
+  /** Present when session ended and a recording is available (API enrich). */
+  recordingPlaybackUrl?: string | null;
 };
 
 function formatTime(value: string) {
@@ -87,31 +89,57 @@ export default function LiveSessionsScreen({ navigation }: any) {
             !canJoin &&
             (user?.role === 'Student' || user?.role === 'Lab') &&
             item.status === 'scheduled';
+          const playUrl =
+            typeof item.recordingPlaybackUrl === 'string' && item.recordingPlaybackUrl.length > 0
+              ? item.recordingPlaybackUrl
+              : null;
+          const showPlayRecording = Boolean(playUrl && item.status === 'ended');
           return (
-            <TouchableOpacity
-              style={styles.card}
-              disabled={!canJoin}
-              onPress={() => navigation.navigate('LiveClassroom', { liveSessionId: item.id, title: item.title })}
-            >
-              <View style={styles.row}>
-                <Text style={styles.title}>{item.title}</Text>
-                <Text style={[styles.badge, item.status === 'live' ? styles.badgeLive : styles.badgeScheduled]}>
-                  {item.status.toUpperCase()}
-                </Text>
-              </View>
-              <Text style={styles.meta}>{item.batch_name} ({item.session_type === 'group' ? 'Group' : '1:1'})</Text>
-              <Text style={styles.meta}>Trainer: {item.trainer_name}</Text>
-              <Text style={styles.meta}>Starts: {formatTime(item.starts_at)}</Text>
-              <Text style={styles.meta}>Ends: {formatTime(item.ends_at)}</Text>
-              {showWaitHint ? (
-                <Text style={styles.hint}>{joinOpensAtLabel(item.starts_at)}</Text>
-              ) : null}
-              <View style={[styles.joinBtn, !canJoin && styles.joinBtnDisabled]}>
-                <Text style={styles.joinBtnText}>
-                  {canJoin ? 'Join class' : item.status === 'ended' || item.status === 'cancelled' ? 'Ended' : 'Not yet'}
-                </Text>
-              </View>
-            </TouchableOpacity>
+            <View style={styles.card}>
+              <TouchableOpacity
+                activeOpacity={canJoin ? 0.85 : 1}
+                disabled={!canJoin}
+                onPress={() =>
+                  canJoin ? navigation.navigate('LiveClassroom', { liveSessionId: item.id, title: item.title }) : undefined
+                }
+              >
+                <View style={styles.row}>
+                  <Text style={styles.title}>{item.title}</Text>
+                  <Text style={[styles.badge, item.status === 'live' ? styles.badgeLive : styles.badgeScheduled]}>
+                    {item.status.toUpperCase()}
+                  </Text>
+                </View>
+                <Text style={styles.meta}>{item.batch_name} ({item.session_type === 'group' ? 'Group' : '1:1'})</Text>
+                <Text style={styles.meta}>Trainer: {item.trainer_name}</Text>
+                <Text style={styles.meta}>Starts: {formatTime(item.starts_at)}</Text>
+                <Text style={styles.meta}>Ends: {formatTime(item.ends_at)}</Text>
+                {showWaitHint ? (
+                  <Text style={styles.hint}>{joinOpensAtLabel(item.starts_at)}</Text>
+                ) : null}
+              </TouchableOpacity>
+              {showPlayRecording ? (
+                <TouchableOpacity
+                  style={styles.playBtn}
+                  onPress={() =>
+                    navigation.navigate('SessionRecordingPlayer', {
+                      videoUrl: playUrl,
+                      title: item.title,
+                      allowDownload: false,
+                    })
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel="Play recording"
+                >
+                  <Text style={styles.playBtnText}>Play recording</Text>
+                </TouchableOpacity>
+              ) : (
+                <View style={[styles.joinBtn, !canJoin && styles.joinBtnDisabled]}>
+                  <Text style={styles.joinBtnText}>
+                    {canJoin ? 'Join class' : item.status === 'ended' || item.status === 'cancelled' ? 'Ended' : 'Not yet'}
+                  </Text>
+                </View>
+              )}
+            </View>
           );
         }}
       />
@@ -150,5 +178,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#9e9e9e',
   },
   joinBtnText: { color: '#fff', fontWeight: '700' },
+  playBtn: {
+    marginTop: 12,
+    backgroundColor: '#2e7d32',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  playBtnText: { color: '#fff', fontWeight: '700' },
   hint: { fontSize: 12, color: '#666', marginTop: 6, fontStyle: 'italic' },
 });

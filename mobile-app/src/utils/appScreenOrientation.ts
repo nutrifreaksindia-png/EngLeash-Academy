@@ -17,3 +17,16 @@ export async function allowLandscapeForMedia(): Promise<void> {
     // ignore
   }
 }
+
+/** Lock landscape for live classroom (preview + call). */
+export async function lockLandscapeForLive(): Promise<void> {
+  try {
+    await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE_RIGHT);
+  } catch {
+    try {
+      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+    } catch {
+      await allowLandscapeForMedia();
+    }
+  }
+}

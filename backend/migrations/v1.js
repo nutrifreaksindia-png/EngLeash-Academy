@@ -120,6 +120,7 @@ function ensureV1Tables(db) {
       cancellation_reason TEXT,
       cancelled_by INTEGER REFERENCES users(id),
       created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
       UNIQUE(batch_id, session_day)
     );
 
@@ -404,6 +405,15 @@ function ensureV1Tables(db) {
     db,
     'ALTER TABLE live_sessions ADD COLUMN batch_session_id INTEGER REFERENCES batch_sessions(id) ON DELETE CASCADE'
   );
+  /* SQLite ALTER ADD COLUMN does not allow non-constant DEFAULT(datetime('now')); add nullable column then backfill. */
+  safeAlter(db, 'ALTER TABLE batch_sessions ADD COLUMN updated_at TEXT');
+  try {
+    db.prepare(
+      `UPDATE batch_sessions SET updated_at = COALESCE(created_at, datetime('now')) WHERE updated_at IS NULL`
+    ).run();
+  } catch (_) {
+    /* ignore if column missing in odd states */
+  }
   try {
     db.exec(
       'CREATE UNIQUE INDEX IF NOT EXISTS idx_live_sessions_batch_session_id ON live_sessions(batch_session_id) WHERE batch_session_id IS NOT NULL'
@@ -413,6 +423,48 @@ function ensureV1Tables(db) {
   }
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS live_chat_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      body TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_live_chat_session_id ON live_chat_messages(live_session_id, id);
+
+    CREATE TABLE IF NOT EXISTS live_reactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_live_reactions_session_id ON live_reactions(live_session_id, id);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS live_session_recordings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+      batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+      agora_resource_id TEXT,
+      agora_sid TEXT,
+      recording_uid TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'starting' CHECK(status IN ('starting', 'recording', 'stopping', 'stopped', 'failed', 'expired')),
+      storage_prefix TEXT,
+      cdn_urls_json TEXT,
+      file_list_json TEXT,
+      started_at TEXT,
+      stopped_at TEXT,
+      expires_at TEXT,
+      error_text TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_live_recording_session_status ON live_session_recordings(live_session_id, status);
+    CREATE INDEX IF NOT EXISTS idx_live_recording_batch ON live_session_recordings(batch_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_live_recording_expires ON live_session_recordings(expires_at);
+
     CREATE TABLE IF NOT EXISTS video_categories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,

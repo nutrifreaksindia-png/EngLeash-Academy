@@ -61,6 +61,7 @@ export default function BatchesPage({
   createBatchAssignment,
   fetchAssignmentSubmissions,
   fetchBatchAttendance,
+  fetchBatchLiveRecordings,
   saveSessionAttendance,
   onRefreshUsers,
   onDeleteBatch,
@@ -100,6 +101,11 @@ export default function BatchesPage({
   const [submissionCache, setSubmissionCache] = React.useState({});
   const [attendanceData, setAttendanceData] = React.useState(null);
   const [attendanceLoading, setAttendanceLoading] = React.useState(false);
+  const [batchRecordings, setBatchRecordings] = React.useState([]);
+  const [batchRecordingsLoading, setBatchRecordingsLoading] = React.useState(false);
+  const [recordingPreview, setRecordingPreview] = React.useState(null);
+  const [recordingPreviewError, setRecordingPreviewError] = React.useState('');
+  const recordingVideoRef = React.useRef(null);
   React.useEffect(() => {
     if (onRefreshUsers) onRefreshUsers();
     // Intentionally once per visit to Batches; directory must stay in sync with Students/Trainers pages.
@@ -184,6 +190,17 @@ export default function BatchesPage({
         setAttendanceLoading(false);
       }
     }
+    if (kind === 'recordings' && fetchBatchLiveRecordings) {
+      setBatchRecordingsLoading(true);
+      try {
+        const data = await fetchBatchLiveRecordings(batch.id);
+        setBatchRecordings(Array.isArray(data?.recordings) ? data.recordings : []);
+      } catch {
+        setBatchRecordings([]);
+      } finally {
+        setBatchRecordingsLoading(false);
+      }
+    }
   }
 
   function closeModal() {
@@ -192,7 +209,66 @@ export default function BatchesPage({
     setAssignments([]);
     setSubmissionCache({});
     setAttendanceData(null);
+    setBatchRecordings([]);
+    setBatchRecordingsLoading(false);
+    setRecordingPreview(null);
+    setRecordingPreviewError('');
   }
+
+  React.useEffect(() => {
+    const video = recordingVideoRef.current;
+    if (!video || !recordingPreview?.url) return undefined;
+
+    let hls = null;
+    let cancelled = false;
+    setRecordingPreviewError('');
+
+    const url = String(recordingPreview.url);
+    const isHls = /\.m3u8(\?|$)/i.test(url);
+
+    if (isHls && !video.canPlayType('application/vnd.apple.mpegurl')) {
+      void import('hls.js')
+        .then(({ default: Hls }) => {
+          if (cancelled) return;
+          if (!Hls.isSupported()) {
+            setRecordingPreviewError('This browser cannot play HLS stream directly.');
+            return;
+          }
+          hls = new Hls();
+          hls.loadSource(url);
+          hls.attachMedia(video);
+          hls.on(Hls.Events.ERROR, (_evt, data) => {
+            if (data?.fatal) {
+              setRecordingPreviewError('Could not load this recording stream.');
+            }
+          });
+        })
+        .catch(() => {
+          if (!cancelled) setRecordingPreviewError('Could not initialize stream player.');
+        });
+    } else {
+      video.src = url;
+    }
+
+    return () => {
+      cancelled = true;
+      if (hls) {
+        try {
+          hls.destroy();
+        } catch {
+          /* ignore */
+        }
+      }
+      if (video) {
+        video.removeAttribute('src');
+        try {
+          video.load();
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+  }, [recordingPreview?.url]);
 
   async function handleCreateSubmit(e) {
     const ok = await onCreateBatch(e);
@@ -1061,9 +1137,84 @@ export default function BatchesPage({
       </Modal>
 
       <Modal open={!!modal && modal === 'recordings'} title={modalTitle} onClose={closeModal} variant="modal">
-        <p className="muted batchModalBody">
-          Session recording library and trainer session reports will be added here (storage + metadata).
-        </p>
+        <div className="batchModalBody">
+          {recordingPreview?.url ? (
+            <div className="batchRecordingPreviewCard">
+              <div className="row">
+                <strong>{recordingPreview.title || 'Session recording'}</strong>
+                <button type="button" className="secondaryBtn" onClick={() => setRecordingPreview(null)}>
+                  Close player
+                </button>
+              </div>
+              {recordingPreviewError ? <p className="muted">{recordingPreviewError}</p> : null}
+              <video
+                ref={recordingVideoRef}
+                className="batchRecordingPlayer"
+                controls
+                preload="metadata"
+                playsInline
+              />
+              <div className="row">
+                <a href={recordingPreview.url} target="_blank" rel="noopener noreferrer">
+                  Open source URL
+                </a>
+              </div>
+            </div>
+          ) : null}
+          {batchRecordingsLoading ? (
+            <p className="muted">Loading recordings…</p>
+          ) : batchRecordings.length === 0 ? (
+            <p className="muted">No completed recordings for this batch yet.</p>
+          ) : (
+            <div className="batchRecordingsScroll">
+              <table className="dataTable">
+                <thead>
+                  <tr>
+                    <th>Live session</th>
+                    <th>Scheduled</th>
+                    <th>Stopped</th>
+                    <th>Expires</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {batchRecordings.map((r) => {
+                    const urls = Array.isArray(r.cdnUrls) ? r.cdnUrls.filter(Boolean) : [];
+                    const mp4 = urls.find((u) => /\.mp4(\?|$)/i.test(String(u)));
+                    const hls = urls.find((u) => /\.m3u8(\?|$)/i.test(String(u)));
+                    const playUrl = mp4 || hls || urls[0] || null;
+                    return (
+                      <tr key={r.id}>
+                        <td>{r.liveTitle || `Session ${r.liveSessionId}`}</td>
+                        <td>{r.startsAt ? new Date(r.startsAt).toLocaleString() : '—'}</td>
+                        <td>{r.stoppedAt ? new Date(r.stoppedAt).toLocaleString() : '—'}</td>
+                        <td>{r.expiresAt ? new Date(r.expiresAt).toLocaleDateString() : '—'}</td>
+                        <td>
+                          {playUrl ? (
+                            <button
+                              type="button"
+                              className="secondaryBtn"
+                              onClick={() =>
+                                setRecordingPreview({
+                                  title: r.liveTitle || `Session ${r.liveSessionId}`,
+                                  url: playUrl,
+                                })
+                              }
+                            >
+                              Play
+                            </button>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </Modal>
 
       <Modal open={!!modal && modal === 'progress'} title={modalTitle} onClose={closeModal} variant="modal">

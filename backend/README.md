@@ -36,3 +36,15 @@ Create `.env` from `.env.example`:
 - `POST /api/uploads/lesson/:lessonId/video` – Admin: upload lesson video.
 
 Videos and PDFs are served under `/uploads/...`.
+
+## Live session recordings
+
+Configure `AGORA_CUSTOMER_ID`, `AGORA_CUSTOMER_SECRET`, and DigitalOcean Spaces (`SPACES_*`, optional `SPACES_CDN_BASE_URL`) so cloud recordings can be acquired, stored, and played via CDN URLs.
+
+**Retention:** run daily (e.g. cron) from `backend/`:
+
+```bash
+node scripts/pruneLiveSessionRecordings.js
+```
+
+This deletes objects under each expired segment’s `storage_prefix` in Spaces and sets `live_session_recordings.status` to `expired`.

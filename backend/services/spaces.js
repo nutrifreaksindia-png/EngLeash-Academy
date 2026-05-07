@@ -1,5 +1,6 @@
 const path = require('path');
-const { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectsCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 function isSpacesConfigured() {
   return Boolean(
@@ -138,11 +139,71 @@ async function uploadToSpaces({ buffer, mimeType, key }) {
   return { key, publicUrl: buildPublicUrl(key) };
 }
 
+/**
+ * Delete all objects under a prefix (for retention job).
+ * @param {string} prefix e.g. live-recordings/Live Session Recordings/batch-1/...
+ * @returns {Promise<number>} deleted count
+ */
+async function deleteObjectsUnderPrefix(prefix) {
+  const client = getSpacesClient();
+  if (!client) {
+    throw new Error('DigitalOcean Spaces is not configured in backend env');
+  }
+  const bucket = process.env.SPACES_BUCKET;
+  const safePrefix = String(prefix || '').replace(/^\//, '');
+  if (!safePrefix) return 0;
+  let deleted = 0;
+  let continuationToken;
+  do {
+    const listed = await client.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: safePrefix,
+        ContinuationToken: continuationToken,
+      })
+    );
+    const keys = (listed.Contents || []).map((c) => c.Key).filter(Boolean);
+    for (let i = 0; i < keys.length; i += 1000) {
+      const chunk = keys.slice(i, i + 1000);
+      if (chunk.length === 0) continue;
+      await client.send(
+        new DeleteObjectsCommand({
+          Bucket: bucket,
+          Delete: { Objects: chunk.map((Key) => ({ Key })), Quiet: true },
+        })
+      );
+      deleted += chunk.length;
+    }
+    continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+  } while (continuationToken);
+  return deleted;
+}
+
+async function getSignedPlaybackUrl(key, expiresInSeconds = Number(process.env.SPACES_SIGNED_URL_TTL_SECONDS || 21600)) {
+  const client = getSpacesClient();
+  if (!client) throw new Error('DigitalOcean Spaces is not configured in backend env');
+  const bucket = process.env.SPACES_BUCKET;
+  const safeKey = String(key || '').replace(/^\/+/, '');
+  if (!safeKey) return null;
+  return getSignedUrl(
+    client,
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: safeKey,
+    }),
+    { expiresIn: Math.max(60, Number(expiresInSeconds) || 21600) }
+  );
+}
+
 module.exports = {
   isSpacesConfigured,
+  getSpacesClient,
+  buildPublicUrl,
   uploadLessonVideoToSpaces,
   uploadLessonTemplateVideoToSpaces,
   uploadToSpaces,
   deleteAllMediaObjectsInSpaces,
+  deleteObjectsUnderPrefix,
+  getSignedPlaybackUrl,
   MEDIA_PREFIXES,
 };

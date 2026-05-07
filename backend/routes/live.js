@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const express = require('express');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
+const liveRecording = require('../services/liveRecording');
+const { buildPublicUrl, getSignedPlaybackUrl, isSpacesConfigured } = require('../services/spaces');
 
 let RtcTokenBuilder = null;
 let RtcRole = null;
@@ -12,6 +14,20 @@ try {
 }
 
 const router = express.Router();
+
+const REACTION_KINDS = new Set(['thumbsup', 'clap', 'heart', 'laugh', 'think']);
+const liveRateBuckets = new Map();
+
+/** Sliding-window rate limit; returns true if the call is allowed. */
+function allowRate(key, max, windowMs) {
+  const now = Date.now();
+  const prev = liveRateBuckets.get(key) || [];
+  const next = prev.filter((t) => now - t < windowMs);
+  if (next.length >= max) return false;
+  next.push(now);
+  liveRateBuckets.set(key, next);
+  return true;
+}
 
 /** Primary trainer or co-trainer (batch_trainers). */
 function isStaffForBatch(userId, batchId) {
@@ -67,11 +83,6 @@ function joinTimeAllows(session) {
   return { ok: true };
 }
 
-function isPromotedSpeaker(sessionId, userId) {
-  if (!sessionId || !userId) return false;
-  return !!db.prepare('SELECT 1 FROM live_session_speakers WHERE live_session_id = ? AND user_id = ?').get(sessionId, userId);
-}
-
 function logSessionEvent(sessionId, userId, eventType, detail) {
   try {
     db.prepare(
@@ -82,12 +93,12 @@ function logSessionEvent(sessionId, userId, eventType, detail) {
   }
 }
 
-/** Agora publisher = broadcaster (camera/mic); subscriber = audience-only. */
-function roleForAgora(user, session, sessionId) {
-  if (user.role === 'Admin' || isStaffForBatch(user.id, session.batch_id)) return 'publisher';
-  if (session.session_type === 'one_to_one' && isStudentInBatch(user.id, session.batch_id)) return 'publisher';
-  if (session.session_type === 'group' && isPromotedSpeaker(sessionId, user.id)) return 'publisher';
-  return 'subscriber';
+/**
+ * Batch live sessions use two-way communication: every allowed participant gets a publisher token
+ * (camera/mic) so web (rtc) and mobile (communication profile) can all send and receive.
+ */
+function roleForAgora() {
+  return 'publisher';
 }
 
 function buildAgoraToken({ channelName, uid, role }) {
@@ -153,7 +164,7 @@ router.get('/sessions', auth, (req, res) => {
       LIMIT 100
     `).all(userId);
   }
-  res.json(rows);
+  res.json(liveRecording.enrichLiveSessionsList(rows));
 });
 
 router.get('/students', auth, requireRole('Admin', 'Trainer'), (req, res) => {
@@ -221,11 +232,180 @@ router.get('/sessions/:id/state', auth, (req, res) => {
   }
   const promoted = db.prepare('SELECT user_id FROM live_session_speakers WHERE live_session_id = ?').all(sessionId);
   const hands = db.prepare('SELECT user_id FROM live_session_hands WHERE live_session_id = ?').all(sessionId);
+  const recordingConfigured = liveRecording.isRecordingApiConfigured();
+  const canSeeRecordingDebug =
+    req.user.role === 'Admin' ||
+    (req.user.role === 'Trainer' && isStaffForBatch(req.user.id, session.batch_id));
+  let recordingFailureHint = null;
+  if (canSeeRecordingDebug && recordingConfigured) {
+    const fr = db
+      .prepare(
+        `SELECT error_text FROM live_session_recordings
+         WHERE live_session_id = ? AND status = 'failed' AND error_text IS NOT NULL AND trim(error_text) != ''
+         ORDER BY id DESC LIMIT 1`
+      )
+      .get(sessionId);
+    if (fr?.error_text) recordingFailureHint = String(fr.error_text).slice(0, 400);
+  }
   res.json({
     status: session.status,
     sessionType: session.session_type,
     promotedUserIds: promoted.map((r) => r.user_id),
     handRaisedUserIds: hands.map((r) => r.user_id),
+    recordingActive: liveRecording.isRecordingActive(sessionId),
+    recordingConfigured,
+    recordingFailureHint,
+  });
+});
+
+/** Pre-join: session title and window without joining the channel (Phase C green room). */
+router.get('/sessions/:id/meta', auth, (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = db.prepare(`
+    SELECT ls.id, ls.batch_id, ls.title, ls.status, ls.starts_at AS startsAt, ls.ends_at AS endsAt, b.session_type AS sessionType
+    FROM live_sessions ls
+    JOIN batches b ON b.id = ls.batch_id
+    WHERE ls.id = ?
+  `).get(sessionId);
+  if (!session) return res.status(404).json({ error: 'Live session not found' });
+  if (!isUserAllowedForSession(session, req.user)) {
+    return res.status(403).json({ error: 'You are not part of this live session' });
+  }
+  const { batch_id: _batchId, ...meta } = session;
+  res.json(meta);
+});
+
+router.get('/sessions/:id/messages', auth, (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = db.prepare(`
+    SELECT ls.id, ls.batch_id, ls.status
+    FROM live_sessions ls
+    JOIN batches b ON b.id = ls.batch_id
+    WHERE ls.id = ?
+  `).get(sessionId);
+  if (!session) return res.status(404).json({ error: 'Live session not found' });
+  if (!isUserAllowedForSession(session, req.user)) {
+    return res.status(403).json({ error: 'You are not part of this live session' });
+  }
+  const rawAfter = req.query.afterId;
+  const afterId = rawAfter == null || rawAfter === '' ? 0 : Number(rawAfter);
+  const safeAfter = Number.isFinite(afterId) && afterId >= 0 ? afterId : 0;
+  const rows = db
+    .prepare(
+      `
+    SELECT m.id, m.user_id AS userId, u.name AS userName, u.email AS userEmail, m.body, m.created_at AS createdAt
+    FROM live_chat_messages m
+    JOIN users u ON u.id = m.user_id
+    WHERE m.live_session_id = ? AND m.id > ?
+    ORDER BY m.id ASC
+    LIMIT 120
+  `
+    )
+    .all(sessionId, safeAfter);
+  res.json({ messages: rows });
+});
+
+router.post('/sessions/:id/messages', auth, (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = db.prepare(`
+    SELECT ls.id, ls.batch_id, ls.status
+    FROM live_sessions ls
+    JOIN batches b ON b.id = ls.batch_id
+    WHERE ls.id = ?
+  `).get(sessionId);
+  if (!session) return res.status(404).json({ error: 'Live session not found' });
+  if (!isUserAllowedForSession(session, req.user)) {
+    return res.status(403).json({ error: 'You are not part of this live session' });
+  }
+  if (session.status === 'ended' || session.status === 'cancelled') {
+    return res.status(409).json({ error: 'Session is not accepting messages' });
+  }
+  const key = `msg:${sessionId}:${req.user.id}`;
+  if (!allowRate(key, 12, 10_000)) {
+    return res.status(429).json({ error: 'Too many messages. Wait a few seconds.' });
+  }
+  let body = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
+  if (!body) return res.status(400).json({ error: 'body is required' });
+  if (body.length > 2000) body = body.slice(0, 2000);
+  const result = db
+    .prepare(
+      'INSERT INTO live_chat_messages (live_session_id, user_id, body) VALUES (?, ?, ?)'
+    )
+    .run(sessionId, req.user.id, body);
+  logSessionEvent(sessionId, req.user.id, 'chat_message', String(result.lastInsertRowid));
+  res.status(201).json({
+    id: result.lastInsertRowid,
+    userId: req.user.id,
+    userName: req.user.name || null,
+    userEmail: req.user.email || null,
+    body,
+    createdAt: new Date().toISOString(),
+  });
+});
+
+router.get('/sessions/:id/reactions', auth, (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = db.prepare(`
+    SELECT ls.id, ls.batch_id, ls.status
+    FROM live_sessions ls
+    JOIN batches b ON b.id = ls.batch_id
+    WHERE ls.id = ?
+  `).get(sessionId);
+  if (!session) return res.status(404).json({ error: 'Live session not found' });
+  if (!isUserAllowedForSession(session, req.user)) {
+    return res.status(403).json({ error: 'You are not part of this live session' });
+  }
+  const rawAfter = req.query.afterId;
+  const afterId = rawAfter == null || rawAfter === '' ? 0 : Number(rawAfter);
+  const safeAfter = Number.isFinite(afterId) && afterId >= 0 ? afterId : 0;
+  const rows = db
+    .prepare(
+      `
+    SELECT r.id, r.user_id AS userId, u.name AS userName, r.kind, r.created_at AS createdAt
+    FROM live_reactions r
+    JOIN users u ON u.id = r.user_id
+    WHERE r.live_session_id = ? AND r.id > ?
+    ORDER BY r.id ASC
+    LIMIT 80
+  `
+    )
+    .all(sessionId, safeAfter);
+  res.json({ reactions: rows });
+});
+
+router.post('/sessions/:id/reactions', auth, (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = db.prepare(`
+    SELECT ls.id, ls.batch_id, ls.status
+    FROM live_sessions ls
+    JOIN batches b ON b.id = ls.batch_id
+    WHERE ls.id = ?
+  `).get(sessionId);
+  if (!session) return res.status(404).json({ error: 'Live session not found' });
+  if (!isUserAllowedForSession(session, req.user)) {
+    return res.status(403).json({ error: 'You are not part of this live session' });
+  }
+  if (session.status === 'ended' || session.status === 'cancelled') {
+    return res.status(409).json({ error: 'Session is not accepting reactions' });
+  }
+  const kind = typeof req.body?.kind === 'string' ? req.body.kind.trim() : '';
+  if (!REACTION_KINDS.has(kind)) {
+    return res.status(400).json({ error: 'Invalid reaction kind', allowed: [...REACTION_KINDS] });
+  }
+  const key = `react:${sessionId}:${req.user.id}`;
+  if (!allowRate(key, 20, 60_000)) {
+    return res.status(429).json({ error: 'Too many reactions. Try again in a minute.' });
+  }
+  const result = db
+    .prepare('INSERT INTO live_reactions (live_session_id, user_id, kind) VALUES (?, ?, ?)')
+    .run(sessionId, req.user.id, kind);
+  logSessionEvent(sessionId, req.user.id, 'reaction', kind);
+  res.status(201).json({
+    id: result.lastInsertRowid,
+    userId: req.user.id,
+    userName: req.user.name || null,
+    kind,
+    createdAt: new Date().toISOString(),
   });
 });
 
@@ -436,7 +616,7 @@ router.post('/sessions/:id/start', auth, requireRole('Admin', 'Trainer'), (req, 
   res.json({ ok: true });
 });
 
-router.post('/sessions/:id/end', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.post('/sessions/:id/end', auth, requireRole('Admin', 'Trainer'), async (req, res) => {
   const sessionId = Number(req.params.id);
   const session = db.prepare(`
     SELECT ls.id, ls.status, ls.batch_id, b.trainer_id
@@ -447,6 +627,11 @@ router.post('/sessions/:id/end', auth, requireRole('Admin', 'Trainer'), (req, re
   if (!session) return res.status(404).json({ error: 'Live session not found' });
   if (req.user.role === 'Trainer' && !isStaffForBatch(req.user.id, session.batch_id)) {
     return res.status(403).json({ error: 'You can only end your own session' });
+  }
+  try {
+    await liveRecording.forceStopRecordingForSession(sessionId);
+  } catch (e) {
+    console.warn('liveRecording.forceStopRecordingForSession', sessionId, e?.message || e);
   }
   db.prepare("UPDATE live_sessions SET status = 'ended' WHERE id = ?").run(sessionId);
   db.prepare('UPDATE live_session_participants SET left_at = datetime(\'now\') WHERE live_session_id = ? AND left_at IS NULL').run(sessionId);
@@ -475,6 +660,9 @@ router.post('/sessions/:id/join', auth, (req, res) => {
   const bypassTimeWindow =
     req.user.role === 'Admin' ||
     (req.user.role === 'Trainer' && isStaffForBatch(req.user.id, session.batch_id));
+  const canEndSession =
+    req.user.role === 'Admin' ||
+    (req.user.role === 'Trainer' && isStaffForBatch(req.user.id, session.batch_id));
   const timeOk = bypassTimeWindow ? { ok: true } : joinTimeAllows(session);
   if (!timeOk.ok) {
     logSessionEvent(sessionId, req.user.id, 'join_denied', timeOk.code || 'time');
@@ -486,7 +674,7 @@ router.post('/sessions/:id/join', auth, (req, res) => {
     });
   }
 
-  const agoraRole = roleForAgora(req.user, session, sessionId);
+  const agoraRole = roleForAgora();
   const { token, expiresAt } = buildAgoraToken({
     channelName: session.agora_channel,
     uid: req.user.id,
@@ -505,6 +693,10 @@ router.post('/sessions/:id/join', auth, (req, res) => {
 
   logSessionEvent(sessionId, req.user.id, 'join', null);
 
+  void liveRecording.maybeStartRecordingAfterJoin(sessionId).catch((e) =>
+    console.warn('maybeStartRecordingAfterJoin', sessionId, e?.message || e)
+  );
+
   res.json({
     liveSessionId: session.id,
     batchSessionId: session.batch_session_id || null,
@@ -513,6 +705,8 @@ router.post('/sessions/:id/join', auth, (req, res) => {
     uid: req.user.id,
     role: agoraRole,
     sessionType: session.session_type,
+    canEndSession,
+    recordingConfigured: liveRecording.isRecordingApiConfigured(),
     appId: process.env.AGORA_APP_ID || null,
     token,
     tokenExpiresAt: expiresAt,
@@ -551,7 +745,7 @@ router.post('/sessions/:id/token', auth, (req, res) => {
     });
   }
 
-  const agoraRole = roleForAgora(req.user, session, sessionId);
+  const agoraRole = roleForAgora();
   const { token, expiresAt } = buildAgoraToken({
     channelName: session.agora_channel,
     uid: req.user.id,
@@ -574,7 +768,98 @@ router.post('/sessions/:id/leave', auth, (req, res) => {
     WHERE live_session_id = ? AND user_id = ? AND left_at IS NULL
   `).run(sessionId, req.user.id);
   logSessionEvent(sessionId, req.user.id, 'leave', null);
+
+  void liveRecording.maybeStopRecordingAfterLeave(sessionId).catch((e) =>
+    console.warn('maybeStopRecordingAfterLeave', sessionId, e?.message || e)
+  );
+
   res.json({ ok: true });
+});
+
+function safeJsonParse(str, fallback) {
+  if (str == null || str === '') return fallback;
+  try {
+    return JSON.parse(str);
+  } catch {
+    return fallback;
+  }
+}
+
+async function derivePlaybackUrls(cdnUrlsJson, fileListJson, storagePrefix) {
+  const list = safeJsonParse(fileListJson, []);
+  const prefix = String(storagePrefix || '').replace(/\/+$/, '');
+  const urls = [];
+  const useSigned = isSpacesConfigured();
+  for (const f of list) {
+    const fn = f?.fileName;
+    if (!fn || /\.ts(\?|$)/i.test(String(fn))) continue;
+    if (String(fn).startsWith('http')) {
+      urls.push(fn);
+      continue;
+    }
+    const key = prefix && String(fn).startsWith(prefix) ? fn : `${prefix}/${String(fn).replace(/^\/+/, '')}`;
+    try {
+      if (useSigned) {
+        const signed = await getSignedPlaybackUrl(key);
+        if (signed) urls.push(signed);
+      } else {
+        urls.push(buildPublicUrl(key));
+      }
+    } catch {
+      /* ignore malformed */
+    }
+  }
+  if (urls.length === 0) {
+    const fallback = safeJsonParse(cdnUrlsJson, []);
+    return Array.isArray(fallback) ? fallback : [];
+  }
+  const mp4 = urls.filter((u) => /\.mp4(\?|$)/i.test(String(u)));
+  if (mp4.length) return mp4;
+  const hls = urls.filter((u) => /\.m3u8(\?|$)/i.test(String(u)));
+  return hls.length ? hls : urls;
+}
+
+router.get('/sessions/:id/recordings', auth, async (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = db.prepare(`
+    SELECT ls.id, ls.batch_id
+    FROM live_sessions ls
+    WHERE ls.id = ?
+  `).get(sessionId);
+  if (!session) return res.status(404).json({ error: 'Live session not found' });
+  if (!isUserAllowedForSession(session, req.user)) {
+    return res.status(403).json({ error: 'You are not part of this live session' });
+  }
+  const rows = await Promise.all(
+    liveRecording.listRecordingsForSession(sessionId).map(async (r) => ({
+      ...r,
+      cdnUrls: await derivePlaybackUrls(r.cdn_urls_json, r.file_list_json, r.storage_prefix),
+      fileList: safeJsonParse(r.file_list_json, []),
+    }))
+  );
+  res.json({ recordings: rows });
+});
+
+router.get('/batches/:batchId/recordings', auth, requireRole('Admin', 'Trainer'), async (req, res) => {
+  const batchId = Number(req.params.batchId);
+  const batch = db.prepare('SELECT id, trainer_id FROM batches WHERE id = ?').get(batchId);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
+  if (req.user.role === 'Trainer' && !isStaffForBatch(req.user.id, batchId)) {
+    return res.status(403).json({ error: 'You can only view recordings for your own batch' });
+  }
+  const rows = await Promise.all(
+    liveRecording.listRecordingsForBatch(batchId).map(async (r) => ({
+      id: r.id,
+      liveSessionId: r.live_session_id,
+      batchId: r.batch_id,
+      liveTitle: r.liveTitle,
+      startsAt: r.startsAt,
+      stoppedAt: r.stopped_at,
+      expiresAt: r.expires_at,
+      cdnUrls: await derivePlaybackUrls(r.cdn_urls_json, r.file_list_json, r.storage_prefix),
+    }))
+  );
+  res.json({ recordings: rows });
 });
 
 /** Users currently in the room (joined, not left). Same access rules as joining the session. */

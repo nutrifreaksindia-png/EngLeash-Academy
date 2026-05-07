@@ -38,6 +38,16 @@ const before = {
 };
 
 const tx = db.transaction(() => {
+  try {
+    run('DELETE FROM live_chat_messages');
+  } catch (_) {
+    /* table may be missing on very old DBs */
+  }
+  try {
+    run('DELETE FROM live_reactions');
+  } catch (_) {
+    /* table may be missing on very old DBs */
+  }
   run('DELETE FROM live_session_logs');
   run('DELETE FROM live_session_hands');
   run('DELETE FROM live_session_speakers');
