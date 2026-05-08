@@ -242,7 +242,7 @@ async function uploadProfilePhotoForUser(userId, file) {
     const ext = path.extname(file.originalname || '').toLowerCase();
     if (ext && ext.length <= 5) safeExt = ext;
   }
-  const key = `${prefix}profile${safeExt}`;
+  const key = `${prefix}${Date.now()}${safeExt}`;
   const uploaded = await uploadToSpaces({
     buffer: file.buffer,
     mimeType: file.mimetype || 'image/jpeg',
