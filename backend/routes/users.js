@@ -4,7 +4,7 @@ const path = require('path');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
 const uploadMemory = require('../uploadMemory');
-const { uploadToSpaces, isSpacesConfigured, getSignedPlaybackUrl } = require('../services/spaces');
+const { uploadToSpaces, isSpacesConfigured, getSignedPlaybackUrl, deleteObjectsUnderPrefix } = require('../services/spaces');
 
 const router = express.Router();
 
@@ -32,14 +32,18 @@ async function resolveProfilePhotoUrl(url) {
 }
 
 router.get('/me', auth, async (req, res) => {
+  const freshUser = db
+    .prepare('SELECT id, email, name, role, status, mobile_number, profile_photo_url, created_at FROM users WHERE id = ?')
+    .get(req.user.id);
+  if (!freshUser) return res.status(404).json({ error: 'User not found' });
   const profile = db.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(req.user.id);
-  const studentProfile = req.user.role === 'Student'
+  const studentProfile = freshUser.role === 'Student'
     ? db.prepare('SELECT * FROM student_profiles WHERE user_id = ?').get(req.user.id)
     : null;
-  const resolvedPhoto = await resolveProfilePhotoUrl(req.user.profile_photo_url || profile?.profile_photo_url || '');
+  const resolvedPhoto = await resolveProfilePhotoUrl(freshUser.profile_photo_url || profile?.profile_photo_url || '');
   res.json({
-    ...req.user,
-    profile_photo_url: resolvedPhoto || req.user.profile_photo_url || null,
+    ...freshUser,
+    profile_photo_url: resolvedPhoto || freshUser.profile_photo_url || null,
     profile: profile ? { ...profile, profile_photo_url: resolvedPhoto || profile.profile_photo_url || null } : null,
     studentProfile: studentProfile || null,
   });
@@ -226,9 +230,19 @@ async function uploadProfilePhotoForUser(userId, file) {
   if (!isSpacesConfigured()) {
     throw new Error('DigitalOcean Spaces is not configured');
   }
-  const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
-  const safeExt = ext.length <= 5 ? ext : '.jpg';
-  const key = `profiles/user-${userId}/${Date.now()}${safeExt}`;
+  const prefix = `profiles/user-${userId}/`;
+  // Keep one active profile photo per user by clearing old files first.
+  await deleteObjectsUnderPrefix(prefix);
+  const extByMime = (file.mimetype || '').toLowerCase();
+  let safeExt = '.jpg';
+  if (extByMime.includes('png')) safeExt = '.png';
+  else if (extByMime.includes('webp')) safeExt = '.webp';
+  else if (extByMime.includes('jpeg') || extByMime.includes('jpg')) safeExt = '.jpg';
+  else {
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (ext && ext.length <= 5) safeExt = ext;
+  }
+  const key = `${prefix}profile${safeExt}`;
   const uploaded = await uploadToSpaces({
     buffer: file.buffer,
     mimeType: file.mimetype || 'image/jpeg',
