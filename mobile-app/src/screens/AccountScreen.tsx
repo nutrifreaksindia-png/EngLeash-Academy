@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker';
 import { Alert, Image, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import LoginForm from '../components/LoginForm';
@@ -69,10 +69,16 @@ export default function AccountScreen({ navigation }: any) {
   }
 
   async function uploadPhoto() {
-    const picked = await DocumentPicker.getDocumentAsync({
-      type: 'image/*',
-      multiple: false,
-      copyToCacheDirectory: true,
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert('Permission needed', 'Please allow photo library access to upload a profile photo.');
+      return;
+    }
+    const picked = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.9,
     });
     if (picked.canceled || !picked.assets?.length) return;
     const file = picked.assets[0];

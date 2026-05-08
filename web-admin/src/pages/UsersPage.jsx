@@ -3,6 +3,7 @@ import SectionCard from '../components/SectionCard';
 import Modal from '../components/Modal';
 import ActionMenu from '../components/ActionMenu';
 import { City, Country, State } from 'country-state-city';
+import Cropper from 'react-easy-crop';
 
 const emptyEdit = {
   id: null,
@@ -55,6 +56,11 @@ export default function UsersPage({
   const createFormRef = useRef(null);
   const [createPhotoPreviewUrl, setCreatePhotoPreviewUrl] = useState('');
   const [createPhotoBlob, setCreatePhotoBlob] = useState(null);
+  const [rawPhotoUrl, setRawPhotoUrl] = useState('');
+  const [cropOpen, setCropOpen] = useState(false);
+  const [crop, setCrop] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [croppedAreaPixels, setCroppedAreaPixels] = useState(null);
   const [createError, setCreateError] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
@@ -230,36 +236,39 @@ export default function UsersPage({
     setCreateOpen(false);
   }
 
-  async function optimizeSquareImage(file) {
-    const src = URL.createObjectURL(file);
-    try {
-      const image = await new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = src;
-      });
-      const size = Math.min(image.naturalWidth, image.naturalHeight);
-      const sx = Math.floor((image.naturalWidth - size) / 2);
-      const sy = Math.floor((image.naturalHeight - size) / 2);
-      const canvas = document.createElement('canvas');
-      canvas.width = 512;
-      canvas.height = 512;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(image, sx, sy, size, size, 0, 0, 512, 512);
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
-      return blob || file;
-    } finally {
-      URL.revokeObjectURL(src);
-    }
-  }
-
   async function onCreatePhotoPicked(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    const optimized = await optimizeSquareImage(file);
-    setCreatePhotoBlob(optimized);
-    setCreatePhotoPreviewUrl(URL.createObjectURL(optimized));
+    if (rawPhotoUrl) URL.revokeObjectURL(rawPhotoUrl);
+    const nextRawUrl = URL.createObjectURL(file);
+    setRawPhotoUrl(nextRawUrl);
+    setCrop({ x: 0, y: 0 });
+    setZoom(1);
+    setCroppedAreaPixels(null);
+    setCropOpen(true);
+  }
+
+  async function applyCrop() {
+    if (!rawPhotoUrl || !croppedAreaPixels) return;
+    const image = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = rawPhotoUrl;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 512;
+    const ctx = canvas.getContext('2d');
+    const px = croppedAreaPixels;
+    ctx.drawImage(image, px.x, px.y, px.width, px.height, 0, 0, 512, 512);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.86));
+    const outBlob = blob || null;
+    if (!outBlob) return;
+    if (createPhotoPreviewUrl) URL.revokeObjectURL(createPhotoPreviewUrl);
+    setCreatePhotoBlob(outBlob);
+    setCreatePhotoPreviewUrl(URL.createObjectURL(outBlob));
+    setCropOpen(false);
   }
 
   function setStudentField(key, value) {
@@ -541,6 +550,40 @@ export default function UsersPage({
           {createPhotoPreviewUrl ? <img src={createPhotoPreviewUrl} alt="Profile preview" style={{ width: 96, height: 96, borderRadius: 999, objectFit: 'cover' }} /> : null}
           <button type="submit">Create student</button>
         </form>
+      </Modal>
+      <Modal open={cropOpen} title="Crop Profile Photo" onClose={() => setCropOpen(false)}>
+        <div className="profileCropWrap">
+          <div className="profileCropViewport">
+            {rawPhotoUrl ? (
+              <Cropper
+                image={rawPhotoUrl}
+                crop={crop}
+                zoom={zoom}
+                aspect={1}
+                cropShape="round"
+                showGrid={false}
+                onCropChange={setCrop}
+                onZoomChange={setZoom}
+                onCropComplete={(_, croppedPixels) => setCroppedAreaPixels(croppedPixels)}
+              />
+            ) : null}
+          </div>
+          <label className="profileCropZoom">
+            <span>Zoom</span>
+            <input
+              type="range"
+              min={1}
+              max={3}
+              step={0.01}
+              value={zoom}
+              onChange={(e) => setZoom(Number(e.target.value))}
+            />
+          </label>
+          <div className="row">
+            <button type="button" className="secondaryBtn" onClick={() => setCropOpen(false)}>Cancel</button>
+            <button type="button" onClick={applyCrop}>Apply crop</button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

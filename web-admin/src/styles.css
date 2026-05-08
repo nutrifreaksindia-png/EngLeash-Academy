@@ -199,6 +199,33 @@ h1 {
   font-size: 12px;
 }
 
+.profileCropWrap {
+  display: grid;
+  gap: 12px;
+}
+
+.profileCropViewport {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  height: min(62vh, 420px);
+  background: #0f172a;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.profileCropZoom {
+  display: grid;
+  gap: 6px;
+  max-width: 560px;
+}
+
+.profileCropZoom span {
+  font-size: 13px;
+  color: #4b5563;
+  font-weight: 600;
+}
+
 .checkboxRow {
   display: flex;
   align-items: flex-start;
