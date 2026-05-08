@@ -157,6 +157,48 @@ h1 {
   width: 100%;
 }
 
+.passwordFieldWrap {
+  position: relative;
+  width: 100%;
+}
+
+.passwordFieldWrap input {
+  width: 100%;
+  box-sizing: border-box;
+  padding-right: 64px;
+}
+
+.passwordToggleInlineBtn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  min-width: 52px;
+  padding: 4px 8px;
+  background: #eef2ff;
+  color: #1a237e;
+  border-color: #c7d2fe;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.passwordRuleList {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 2px;
+  margin-top: -2px;
+}
+
+.passwordRuleOk {
+  color: #15803d;
+  font-size: 12px;
+}
+
+.passwordRuleBad {
+  color: #b91c1c;
+  font-size: 12px;
+}
+
 .checkboxRow {
   display: flex;
   align-items: flex-start;

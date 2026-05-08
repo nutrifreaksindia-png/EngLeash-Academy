@@ -1,7 +1,8 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
 import SectionCard from '../components/SectionCard';
 import Modal from '../components/Modal';
 import ActionMenu from '../components/ActionMenu';
+import { City, Country, State } from 'country-state-city';
 
 const emptyEdit = {
   id: null,
@@ -23,6 +24,10 @@ const emptyEdit = {
 };
 
 /** @typedef {'students' | 'other-users'} UsersPageVariant */
+const ALL_COUNTRIES = Country.getAllCountries().sort((a, b) => a.name.localeCompare(b.name));
+const DEFAULT_COUNTRY_ISO = ALL_COUNTRIES.find((c) => c.isoCode === 'IN')?.isoCode || ALL_COUNTRIES[0]?.isoCode || '';
+const OCCUPATIONS = ['Student', 'Working Professional', 'Homemaker', 'Business', 'Freelancer', 'Other'];
+const GENDERS = ['Male', 'Female', 'Other'];
 
 export default function UsersPage({
   onCreateUser,
@@ -50,6 +55,53 @@ export default function UsersPage({
   const createFormRef = useRef(null);
   const [createPhotoPreviewUrl, setCreatePhotoPreviewUrl] = useState('');
   const [createPhotoBlob, setCreatePhotoBlob] = useState(null);
+  const [createError, setCreateError] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [passwordFocused, setPasswordFocused] = useState(false);
+  const [confirmPasswordFocused, setConfirmPasswordFocused] = useState(false);
+  const [studentCreate, setStudentCreate] = useState({
+    name: '',
+    email: '',
+    password: '',
+    confirmPassword: '',
+    mobileNumber: '',
+    gender: 'Other',
+    birthDate: '',
+    addressLine1: '',
+    addressLine2: '',
+    cityDistrict: '',
+    stateProvince: '',
+    country: '',
+    countryCode: '',
+    countryIso: DEFAULT_COUNTRY_ISO,
+    stateIso: '',
+    occupation: 'Student',
+  });
+
+  const states = useMemo(
+    () => State.getStatesOfCountry(studentCreate.countryIso).sort((a, b) => a.name.localeCompare(b.name)),
+    [studentCreate.countryIso]
+  );
+  const cities = useMemo(() => {
+    if (studentCreate.stateIso) {
+      return City.getCitiesOfState(studentCreate.countryIso, studentCreate.stateIso).sort((a, b) => a.name.localeCompare(b.name));
+    }
+    return City.getCitiesOfCountry(studentCreate.countryIso).sort((a, b) => a.name.localeCompare(b.name));
+  }, [studentCreate.countryIso, studentCreate.stateIso]);
+  const passwordChecks = useMemo(() => {
+    const v = studentCreate.password || '';
+    return {
+      minLength: v.length >= 8,
+      uppercase: /[A-Z]/.test(v),
+      number: /[0-9]/.test(v),
+      symbol: /[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?`~]/.test(v),
+    };
+  }, [studentCreate.password]);
+  const passwordsMatch = useMemo(
+    () => (studentCreate.confirmPassword.length > 0 ? studentCreate.password === studentCreate.confirmPassword : false),
+    [studentCreate.password, studentCreate.confirmPassword]
+  );
 
   const listRows = useMemo(() => {
     const q = listQuery.trim().toLowerCase();
@@ -76,6 +128,83 @@ export default function UsersPage({
     e.preventDefault();
     const formEl = createFormRef.current;
     if (!formEl || !onCreateUser) return;
+    setCreateError('');
+    if (variant === 'students') {
+      const selectedCountry = ALL_COUNTRIES.find((c) => c.isoCode === studentCreate.countryIso);
+      const selectedState = states.find((s) => s.isoCode === studentCreate.stateIso);
+      const payload = {
+        ...studentCreate,
+        name: studentCreate.name.trim(),
+        email: studentCreate.email.trim().toLowerCase(),
+        mobileNumber: studentCreate.mobileNumber.trim(),
+        addressLine1: studentCreate.addressLine1.trim(),
+        addressLine2: studentCreate.addressLine2.trim(),
+        occupation: studentCreate.occupation.trim(),
+        country: selectedCountry?.name || studentCreate.country || '',
+        countryCode: studentCreate.countryCode || `+${selectedCountry?.phonecode || ''}`,
+        stateProvince: selectedState?.name || studentCreate.stateProvince || '',
+      };
+      if (!payload.name || !payload.email || !payload.password || !payload.confirmPassword) {
+        setCreateError('Please fill name, email, password and confirm password.');
+        return;
+      }
+      if (!passwordChecks.minLength || !passwordChecks.uppercase || !passwordChecks.number || !passwordChecks.symbol) {
+        setCreateError('Password does not meet all required rules.');
+        return;
+      }
+      if (payload.password !== payload.confirmPassword) {
+        setCreateError('Password and confirm password must match.');
+        return;
+      }
+      if (!/^\S+@\S+\.\S+$/.test(payload.email)) {
+        setCreateError('Please enter a valid email address.');
+        return;
+      }
+      if (payload.mobileNumber && !/^\d{10}$/.test(payload.mobileNumber.replace(/\D/g, ''))) {
+        setCreateError('Mobile number must be a valid 10 digit number.');
+        return;
+      }
+      await onCreateUser({
+        name: payload.name,
+        email: payload.email,
+        password: payload.password,
+        role: 'Student',
+        mobileNumber: payload.mobileNumber,
+        gender: payload.gender,
+        birthDate: payload.birthDate,
+        addressLine1: payload.addressLine1,
+        addressLine2: payload.addressLine2,
+        cityDistrict: payload.cityDistrict,
+        stateProvince: payload.stateProvince,
+        country: payload.country,
+        countryCode: payload.countryCode,
+        occupation: payload.occupation,
+        profilePhotoBlob: createPhotoBlob,
+        profilePhotoUrl: '',
+      });
+      setStudentCreate({
+        name: '',
+        email: '',
+        password: '',
+        confirmPassword: '',
+        mobileNumber: '',
+        gender: 'Other',
+        birthDate: '',
+        addressLine1: '',
+        addressLine2: '',
+        cityDistrict: '',
+        stateProvince: '',
+        country: '',
+        countryCode: '',
+        countryIso: DEFAULT_COUNTRY_ISO,
+        stateIso: '',
+        occupation: 'Student',
+      });
+      setCreatePhotoBlob(null);
+      setCreatePhotoPreviewUrl('');
+      setCreateOpen(false);
+      return;
+    }
     const form = new FormData(formEl);
     await onCreateUser({
       name: String(form.get('name') || '').trim(),
@@ -92,7 +221,6 @@ export default function UsersPage({
       country: String(form.get('country') || '').trim(),
       countryCode: String(form.get('countryCode') || '').trim(),
       occupation: String(form.get('occupation') || '').trim(),
-      policiesAgreed: form.get('policiesAgreed') === 'on',
       profilePhotoBlob: createPhotoBlob,
       profilePhotoUrl: '',
     });
@@ -133,6 +261,50 @@ export default function UsersPage({
     setCreatePhotoBlob(optimized);
     setCreatePhotoPreviewUrl(URL.createObjectURL(optimized));
   }
+
+  function setStudentField(key, value) {
+    setStudentCreate((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function setCountry(countryIso) {
+    const selectedCountry = ALL_COUNTRIES.find((c) => c.isoCode === countryIso);
+    const nextStates = State.getStatesOfCountry(countryIso);
+    const defaultState = nextStates.find((s) => s.name === 'Tamil Nadu') || nextStates[0] || null;
+    const nextCities = defaultState
+      ? City.getCitiesOfState(countryIso, defaultState.isoCode)
+      : City.getCitiesOfCountry(countryIso);
+    const defaultCity = nextCities.find((c) => c.name === 'Madurai') || nextCities[0] || null;
+    setStudentCreate((prev) => ({
+      ...prev,
+      countryIso,
+      country: selectedCountry?.name || '',
+      countryCode: `+${selectedCountry?.phonecode || ''}`,
+      stateIso: defaultState?.isoCode || '',
+      stateProvince: defaultState?.name || '',
+      cityDistrict: defaultCity?.name || '',
+    }));
+  }
+
+  function setStateIso(stateIso) {
+    const selectedState = states.find((s) => s.isoCode === stateIso);
+    const nextCities = stateIso ? City.getCitiesOfState(studentCreate.countryIso, stateIso) : City.getCitiesOfCountry(studentCreate.countryIso);
+    const defaultCity = nextCities[0] || null;
+    setStudentCreate((prev) => ({
+      ...prev,
+      stateIso,
+      stateProvince: selectedState?.name || '',
+      cityDistrict: defaultCity?.name || '',
+    }));
+  }
+
+  useEffect(() => {
+    if (variant !== 'students') return;
+    if (!studentCreate.countryIso) return;
+    if (!studentCreate.countryCode || !studentCreate.country || !studentCreate.stateProvince || !studentCreate.cityDistrict) {
+      setCountry(studentCreate.countryIso);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [variant, createOpen]);
 
   async function openEdit(u) {
     const details = onGetUserDetails ? await onGetUserDetails(u.id) : u;
@@ -274,29 +446,99 @@ export default function UsersPage({
       </Modal>
       <Modal open={createOpen} title="Create Student" onClose={() => setCreateOpen(false)} variant="drawer">
         <form ref={createFormRef} onSubmit={handleCreateSubmit} className="formGrid" autoComplete="off">
-          <input name="name" placeholder="Name" required autoComplete="name" />
-          <input name="email" placeholder="Email" type="email" required autoComplete="off" />
-          <input name="password" placeholder="Password" type="password" required autoComplete="new-password" />
+          {createError ? <p className="error" style={{ gridColumn: '1 / -1', margin: 0 }}>{createError}</p> : null}
+          <input name="name" placeholder="Name" required autoComplete="name" value={studentCreate.name} onChange={(e) => setStudentField('name', e.target.value)} />
+          <input name="email" placeholder="Email" type="email" required autoComplete="off" value={studentCreate.email} onChange={(e) => setStudentField('email', e.target.value)} />
+          <div className="passwordFieldWrap">
+            <input
+              name="password"
+              placeholder="Password"
+              type={showPassword ? 'text' : 'password'}
+              required
+              autoComplete="new-password"
+              value={studentCreate.password}
+              onFocus={() => setPasswordFocused(true)}
+              onBlur={() => setPasswordFocused(false)}
+              onChange={(e) => setStudentField('password', e.target.value)}
+            />
+            <button type="button" className="passwordToggleInlineBtn" onClick={() => setShowPassword((v) => !v)}>
+              {showPassword ? 'Hide' : 'View'}
+            </button>
+          </div>
+          <div className="passwordFieldWrap">
+            <input
+              name="confirmPassword"
+              placeholder="Confirm password"
+              type={showConfirmPassword ? 'text' : 'password'}
+              required
+              autoComplete="new-password"
+              value={studentCreate.confirmPassword}
+              onFocus={() => setConfirmPasswordFocused(true)}
+              onBlur={() => setConfirmPasswordFocused(false)}
+              onChange={(e) => setStudentField('confirmPassword', e.target.value)}
+            />
+            <button type="button" className="passwordToggleInlineBtn" onClick={() => setShowConfirmPassword((v) => !v)}>
+              {showConfirmPassword ? 'Hide' : 'View'}
+            </button>
+          </div>
+          {passwordFocused ? (
+            <div className="passwordRuleList">
+              <span className={passwordChecks.minLength ? 'passwordRuleOk' : 'passwordRuleBad'}>Minimum 8 characters</span>
+              <span className={passwordChecks.uppercase ? 'passwordRuleOk' : 'passwordRuleBad'}>At least one capital letter (A-Z)</span>
+              <span className={passwordChecks.number ? 'passwordRuleOk' : 'passwordRuleBad'}>At least one number (0-9)</span>
+              <span className={passwordChecks.symbol ? 'passwordRuleOk' : 'passwordRuleBad'}>At least one symbol</span>
+            </div>
+          ) : null}
+          {confirmPasswordFocused && studentCreate.confirmPassword.length > 0 ? (
+            <span className={passwordsMatch ? 'passwordRuleOk' : 'passwordRuleBad'} style={{ gridColumn: '1 / -1' }}>
+              {passwordsMatch ? 'Passwords match' : 'Passwords do not match'}
+            </span>
+          ) : null}
           <input type="hidden" name="role" value="Student" />
-          <input name="mobileNumber" placeholder="Mobile number" />
-          <input name="gender" placeholder="Gender (optional)" />
-          <input name="birthDate" placeholder="Birth date YYYY-MM-DD (optional)" />
-          <input name="addressLine1" placeholder="Address line 1 (optional)" />
-          <input name="addressLine2" placeholder="Address line 2 (optional)" />
-          <input name="cityDistrict" placeholder="City / District (optional)" />
-          <input name="stateProvince" placeholder="State / Province (optional)" />
-          <input name="country" placeholder="Country (optional)" />
-          <input name="countryCode" placeholder="Country code (optional)" />
-          <input name="occupation" placeholder="Occupation (optional)" />
+          <input
+            name="mobileNumber"
+            placeholder="10 digit mobile number"
+            value={studentCreate.mobileNumber}
+            onChange={(e) => setStudentField('mobileNumber', String(e.target.value || '').replace(/[^\d]/g, '').slice(0, 10))}
+          />
+          <select name="countryCode" value={studentCreate.countryIso} onChange={(e) => setCountry(e.target.value)}>
+            {ALL_COUNTRIES.map((country) => (
+              <option key={`code-${country.isoCode}`} value={country.isoCode}>{`+${country.phonecode} - ${country.name}`}</option>
+            ))}
+          </select>
+          <select name="gender" value={studentCreate.gender} onChange={(e) => setStudentField('gender', e.target.value)}>
+            {GENDERS.map((g) => (
+              <option key={g} value={g}>{g}</option>
+            ))}
+          </select>
+          <input name="birthDate" type="date" value={studentCreate.birthDate} onChange={(e) => setStudentField('birthDate', e.target.value)} />
+          <input name="addressLine1" placeholder="Address line 1" value={studentCreate.addressLine1} onChange={(e) => setStudentField('addressLine1', e.target.value)} />
+          <input name="addressLine2" placeholder="Address line 2 (optional)" value={studentCreate.addressLine2} onChange={(e) => setStudentField('addressLine2', e.target.value)} />
+          <select name="country" value={studentCreate.countryIso} onChange={(e) => setCountry(e.target.value)}>
+            {ALL_COUNTRIES.map((country) => (
+              <option key={country.isoCode} value={country.isoCode}>{country.name}</option>
+            ))}
+          </select>
+          <select name="stateProvince" value={studentCreate.stateIso} onChange={(e) => setStateIso(e.target.value)}>
+            {states.length ? states.map((state) => (
+              <option key={state.isoCode} value={state.isoCode}>{state.name}</option>
+            )) : <option value="">No states available</option>}
+          </select>
+          <select name="cityDistrict" value={studentCreate.cityDistrict} onChange={(e) => setStudentField('cityDistrict', e.target.value)}>
+            {cities.length ? cities.map((city) => (
+              <option key={city.name} value={city.name}>{city.name}</option>
+            )) : <option value="">No city data</option>}
+          </select>
+          <select name="occupation" value={studentCreate.occupation} onChange={(e) => setStudentField('occupation', e.target.value)}>
+            {OCCUPATIONS.map((opt) => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
           <label className="fieldLabel">
             <span className="muted">Profile photo (1:1 crop optimized)</span>
             <input type="file" accept="image/*" onChange={onCreatePhotoPicked} />
           </label>
           {createPhotoPreviewUrl ? <img src={createPhotoPreviewUrl} alt="Profile preview" style={{ width: 96, height: 96, borderRadius: 999, objectFit: 'cover' }} /> : null}
-          <label className="checkboxLine">
-            <input type="checkbox" name="policiesAgreed" />
-            <span>Policies agreed (optional)</span>
-          </label>
           <button type="submit">Create student</button>
         </form>
       </Modal>
