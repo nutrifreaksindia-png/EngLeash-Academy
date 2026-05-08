@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   ActivityIndicator,
@@ -29,6 +30,7 @@ export default function AccountScreen({ navigation }: any) {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [localPhotoUrl, setLocalPhotoUrl] = useState('');
+  const [imageLoadFailed, setImageLoadFailed] = useState(false);
   const [form, setForm] = useState({
     name: '',
     mobileNumber: '',
@@ -147,10 +149,13 @@ export default function AccountScreen({ navigation }: any) {
     } as any);
     setBusy(true);
     try {
+      setImageLoadFailed(false);
       if (file.base64) {
         setLocalPhotoUrl(`data:image/jpeg;base64,${file.base64}`);
       } else if (file.uri) {
-        setLocalPhotoUrl(file.uri);
+        // Force reliable local preview regardless of Android content/file URI behavior.
+        const base64FromFile = await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 });
+        setLocalPhotoUrl(`data:image/jpeg;base64,${base64FromFile}`);
       }
       const uploaded = await api.postForm('/users/me/photo', formData);
       const nextUrl = String(uploaded?.photoUrl || '').trim();
@@ -175,7 +180,13 @@ export default function AccountScreen({ navigation }: any) {
           <View style={styles.heroCard}>
             <View style={styles.avatarWrap}>
               {profilePhotoUrl ? (
-                <Image source={{ uri: profilePhotoUrl }} style={styles.avatar} />
+                <Image
+                  source={{ uri: profilePhotoUrl }}
+                  style={styles.avatar}
+                  onError={() => {
+                    setImageLoadFailed(true);
+                  }}
+                />
               ) : (
                 <View style={styles.avatarFallback}>
                   <View style={styles.avatarHumanHead} />
@@ -191,6 +202,7 @@ export default function AccountScreen({ navigation }: any) {
                 </View>
               ) : null}
             </View>
+            {imageLoadFailed ? <Text style={styles.avatarErrorText}>Could not render profile photo</Text> : null}
             {!profilePhotoUrl ? <Text style={styles.avatarHint}>Add profile photo</Text> : null}
             <Text style={styles.heroName}>{userAny.name || 'User'}</Text>
             <View style={styles.heroMetaRow}>
@@ -349,6 +361,11 @@ const styles = StyleSheet.create({
   },
   avatarHint: {
     color: '#c7d2fe',
+    fontSize: 12,
+    marginBottom: 6,
+  },
+  avatarErrorText: {
+    color: '#fecaca',
     fontSize: 12,
     marginBottom: 6,
   },
