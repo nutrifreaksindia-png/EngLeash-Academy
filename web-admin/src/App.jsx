@@ -95,6 +95,22 @@ async function uploadCourseCover(courseId, token, coverBlob) {
   if (!res.ok) throw new Error(data.error || 'Cover upload failed');
 }
 
+async function uploadUserProfilePhoto(userId, token, photoBlob) {
+  if (!photoBlob) return null;
+  const body = new FormData();
+  body.append('file', photoBlob, `user-${userId}-profile.jpg`);
+  const res = await fetch(`${API_BASE}/api/users/${userId}/photo`, {
+    method: 'POST',
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Profile photo upload failed');
+  return data.photoUrl || null;
+}
+
 async function uploadVideoLibraryAsset(token, payload, onProgress) {
   return new Promise((resolve, reject) => {
     const body = new FormData();
@@ -405,26 +421,32 @@ export default function App() {
     setMessage('Logged out');
   }
 
-  /** @param {HTMLFormElement|React.SyntheticEvent} formOrEvent — prefer form node from ref (stable after await). */
-  async function createUser(formOrEvent) {
-    const isEvent = formOrEvent && typeof formOrEvent.preventDefault === 'function';
-    if (isEvent) formOrEvent.preventDefault();
-    const formEl = isEvent ? formOrEvent.currentTarget : formOrEvent;
-    if (!formEl || formEl.nodeName !== 'FORM') return;
-    const form = new FormData(formEl);
+  async function createUser(payload) {
     try {
       const created = await apiFetch('/users', token, {
         method: 'POST',
         body: JSON.stringify({
-          name: form.get('name'),
-          email: form.get('email'),
-          password: form.get('password'),
-          role: String(form.get('role') || '').trim(),
-          mobileNumber: form.get('mobileNumber'),
-          profilePhotoUrl: form.get('profilePhotoUrl'),
+          name: payload.name,
+          email: payload.email,
+          password: payload.password,
+          role: payload.role,
+          mobileNumber: payload.mobileNumber,
+          profilePhotoUrl: payload.profilePhotoUrl || null,
+          gender: payload.gender || null,
+          birthDate: payload.birthDate || null,
+          addressLine1: payload.addressLine1 || null,
+          addressLine2: payload.addressLine2 || null,
+          cityDistrict: payload.cityDistrict || null,
+          stateProvince: payload.stateProvince || null,
+          country: payload.country || null,
+          countryCode: payload.countryCode || null,
+          occupation: payload.occupation || null,
+          policiesAgreed: payload.policiesAgreed === true,
         }),
       });
-      formEl.reset();
+      if (payload.profilePhotoBlob && created?.id != null) {
+        await uploadUserProfilePhoto(created.id, token, payload.profilePhotoBlob);
+      }
       if (created && created.id != null) {
         setUsers((prev) => {
           const list = Array.isArray(prev) ? prev : [];

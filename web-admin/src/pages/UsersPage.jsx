@@ -44,9 +44,12 @@ export default function UsersPage({
       ? 'Creates a Student login (role is fixed).'
       : 'Pick role: Trainer, Admin, Creator, or Lab (TV).');
   const [open, setOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [editForm, setEditForm] = useState(emptyEdit);
   const [listQuery, setListQuery] = useState('');
   const createFormRef = useRef(null);
+  const [createPhotoPreviewUrl, setCreatePhotoPreviewUrl] = useState('');
+  const [createPhotoBlob, setCreatePhotoBlob] = useState(null);
 
   const listRows = useMemo(() => {
     const q = listQuery.trim().toLowerCase();
@@ -73,7 +76,62 @@ export default function UsersPage({
     e.preventDefault();
     const formEl = createFormRef.current;
     if (!formEl || !onCreateUser) return;
-    await onCreateUser(formEl);
+    const form = new FormData(formEl);
+    await onCreateUser({
+      name: String(form.get('name') || '').trim(),
+      email: String(form.get('email') || '').trim(),
+      password: String(form.get('password') || ''),
+      role: String(form.get('role') || '').trim(),
+      mobileNumber: String(form.get('mobileNumber') || '').trim(),
+      gender: String(form.get('gender') || '').trim(),
+      birthDate: String(form.get('birthDate') || '').trim(),
+      addressLine1: String(form.get('addressLine1') || '').trim(),
+      addressLine2: String(form.get('addressLine2') || '').trim(),
+      cityDistrict: String(form.get('cityDistrict') || '').trim(),
+      stateProvince: String(form.get('stateProvince') || '').trim(),
+      country: String(form.get('country') || '').trim(),
+      countryCode: String(form.get('countryCode') || '').trim(),
+      occupation: String(form.get('occupation') || '').trim(),
+      policiesAgreed: form.get('policiesAgreed') === 'on',
+      profilePhotoBlob: createPhotoBlob,
+      profilePhotoUrl: '',
+    });
+    formEl.reset();
+    setCreatePhotoBlob(null);
+    setCreatePhotoPreviewUrl('');
+    setCreateOpen(false);
+  }
+
+  async function optimizeSquareImage(file) {
+    const src = URL.createObjectURL(file);
+    try {
+      const image = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = src;
+      });
+      const size = Math.min(image.naturalWidth, image.naturalHeight);
+      const sx = Math.floor((image.naturalWidth - size) / 2);
+      const sy = Math.floor((image.naturalHeight - size) / 2);
+      const canvas = document.createElement('canvas');
+      canvas.width = 512;
+      canvas.height = 512;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(image, sx, sy, size, size, 0, 0, 512, 512);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+      return blob || file;
+    } finally {
+      URL.revokeObjectURL(src);
+    }
+  }
+
+  async function onCreatePhotoPicked(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const optimized = await optimizeSquareImage(file);
+    setCreatePhotoBlob(optimized);
+    setCreatePhotoPreviewUrl(URL.createObjectURL(optimized));
   }
 
   async function openEdit(u) {
@@ -108,26 +166,27 @@ export default function UsersPage({
 
   return (
     <div className="stack">
-      <SectionCard title={resolvedCreateTitle} subtitle={resolvedCreateSubtitle}>
-        <form ref={createFormRef} onSubmit={handleCreateSubmit} className="formGrid" autoComplete="off">
-          <input name="name" placeholder="Name" required autoComplete="name" />
-          <input name="email" placeholder="Email" type="email" required autoComplete="off" />
-          <input name="password" placeholder="Password" type="password" required autoComplete="new-password" />
-          {variant === 'students' ? (
-            <input type="hidden" name="role" value="Student" />
-          ) : (
+      {variant === 'students' ? (
+        <SectionCard title={resolvedCreateTitle} subtitle={resolvedCreateSubtitle}>
+          <button onClick={() => setCreateOpen(true)}>Create student</button>
+        </SectionCard>
+      ) : (
+        <SectionCard title={resolvedCreateTitle} subtitle={resolvedCreateSubtitle}>
+          <form ref={createFormRef} onSubmit={handleCreateSubmit} className="formGrid" autoComplete="off">
+            <input name="name" placeholder="Name" required autoComplete="name" />
+            <input name="email" placeholder="Email" type="email" required autoComplete="off" />
+            <input name="password" placeholder="Password" type="password" required autoComplete="new-password" />
             <select name="role" defaultValue={defaultRole} aria-label="Account type">
               <option value="Trainer">Trainer</option>
               <option value="Admin">Admin</option>
               <option value="Creator">Creator</option>
               <option value="Lab">Lab (TV app)</option>
             </select>
-          )}
-          <input name="mobileNumber" placeholder="Mobile number" />
-          <input name="profilePhotoUrl" placeholder="Profile photo URL" />
-          <button type="submit">{variant === 'students' ? 'Create student' : 'Create user'}</button>
-        </form>
-      </SectionCard>
+            <input name="mobileNumber" placeholder="Mobile number" />
+            <button type="submit">Create user</button>
+          </form>
+        </SectionCard>
+      )}
       <SectionCard
         title={title}
         subtitle={
@@ -211,6 +270,34 @@ export default function UsersPage({
             </>
           ) : null}
           <button type="submit">Save Profile</button>
+        </form>
+      </Modal>
+      <Modal open={createOpen} title="Create Student" onClose={() => setCreateOpen(false)} variant="drawer">
+        <form ref={createFormRef} onSubmit={handleCreateSubmit} className="formGrid" autoComplete="off">
+          <input name="name" placeholder="Name" required autoComplete="name" />
+          <input name="email" placeholder="Email" type="email" required autoComplete="off" />
+          <input name="password" placeholder="Password" type="password" required autoComplete="new-password" />
+          <input type="hidden" name="role" value="Student" />
+          <input name="mobileNumber" placeholder="Mobile number" />
+          <input name="gender" placeholder="Gender (optional)" />
+          <input name="birthDate" placeholder="Birth date YYYY-MM-DD (optional)" />
+          <input name="addressLine1" placeholder="Address line 1 (optional)" />
+          <input name="addressLine2" placeholder="Address line 2 (optional)" />
+          <input name="cityDistrict" placeholder="City / District (optional)" />
+          <input name="stateProvince" placeholder="State / Province (optional)" />
+          <input name="country" placeholder="Country (optional)" />
+          <input name="countryCode" placeholder="Country code (optional)" />
+          <input name="occupation" placeholder="Occupation (optional)" />
+          <label className="fieldLabel">
+            <span className="muted">Profile photo (1:1 crop optimized)</span>
+            <input type="file" accept="image/*" onChange={onCreatePhotoPicked} />
+          </label>
+          {createPhotoPreviewUrl ? <img src={createPhotoPreviewUrl} alt="Profile preview" style={{ width: 96, height: 96, borderRadius: 999, objectFit: 'cover' }} /> : null}
+          <label className="checkboxLine">
+            <input type="checkbox" name="policiesAgreed" />
+            <span>Policies agreed (optional)</span>
+          </label>
+          <button type="submit">Create student</button>
         </form>
       </Modal>
     </div>

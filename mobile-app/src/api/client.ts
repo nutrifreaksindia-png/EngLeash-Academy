@@ -134,6 +134,16 @@ export const api = {
     return data;
   },
 
+  async put(path: string, body?: object) {
+    const res = await authFetch(path, {
+      method: 'PUT',
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+    return data;
+  },
+
   async signup(body: Record<string, any>) {
     const doSignup = async () => {
       const controller = new AbortController();
