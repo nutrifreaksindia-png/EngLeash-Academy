@@ -4,7 +4,7 @@ const path = require('path');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
 const uploadMemory = require('../uploadMemory');
-const { uploadToSpaces, isSpacesConfigured, getSignedPlaybackUrl, deleteObjectsUnderPrefix } = require('../services/spaces');
+const { uploadToSpaces, isSpacesConfigured, deleteObjectsUnderPrefix } = require('../services/spaces');
 
 const router = express.Router();
 
@@ -21,14 +21,9 @@ function extractSpacesKeyFromUrl(url) {
 
 async function resolveProfilePhotoUrl(url) {
   const raw = String(url || '').trim();
-  if (!raw || !isSpacesConfigured()) return raw;
-  const key = extractSpacesKeyFromUrl(raw);
-  if (!key || !key.startsWith('profiles/')) return raw;
-  try {
-    return await getSignedPlaybackUrl(key, Number(process.env.SPACES_SIGNED_URL_TTL_SECONDS || 21600));
-  } catch {
-    return raw;
-  }
+  // Profile photos are uploaded with public-read ACL; return stable raw URL for mobile image rendering.
+  // Signed URLs caused Android Image decode/load failures in RN for this flow.
+  return raw;
 }
 
 router.get('/me', auth, async (req, res) => {
@@ -232,7 +227,7 @@ async function uploadProfilePhotoForUser(userId, file) {
   }
   const prefix = `profiles/user-${userId}/`;
   // Keep one active profile photo per user by clearing old files first.
-  await deleteObjectsUnderPrefix(prefix);
+  const deleted = await deleteObjectsUnderPrefix(prefix);
   const extByMime = (file.mimetype || '').toLowerCase();
   let safeExt = '.jpg';
   if (extByMime.includes('png')) safeExt = '.png';
@@ -248,6 +243,14 @@ async function uploadProfilePhotoForUser(userId, file) {
     mimeType: file.mimetype || 'image/jpeg',
     key,
   });
+  console.info('[profile-photo] upload complete', {
+    userId,
+    prefix,
+    deletedObjects: deleted,
+    key,
+    mimeType: file.mimetype || 'image/jpeg',
+    size: Number(file.size || 0),
+  });
   db.prepare('UPDATE users SET profile_photo_url = ? WHERE id = ?').run(uploaded.publicUrl, userId);
   db.prepare(`
     INSERT INTO user_profiles (user_id, full_name, email, role, profile_photo_url, mobile_number)
@@ -261,11 +264,25 @@ async function uploadProfilePhotoForUser(userId, file) {
 
 router.post('/me/photo', auth, uploadMemory.single('file'), async (req, res) => {
   try {
+    console.info('[profile-photo] request start', {
+      userId: req.user?.id,
+      hasFile: Boolean(req.file),
+      mimetype: req.file?.mimetype || null,
+      size: Number(req.file?.size || 0),
+      originalname: req.file?.originalname || null,
+    });
     if (!req.file) return res.status(400).json({ error: 'File required' });
     const photoUrl = await uploadProfilePhotoForUser(req.user.id, req.file);
-    const signedPhotoUrl = await resolveProfilePhotoUrl(photoUrl);
-    res.json({ ok: true, photoUrl: signedPhotoUrl || photoUrl });
+    console.info('[profile-photo] request success', {
+      userId: req.user?.id,
+      photoUrl,
+    });
+    res.json({ ok: true, photoUrl });
   } catch (e) {
+    console.error('[profile-photo] request failure', {
+      userId: req.user?.id,
+      error: e?.message || String(e),
+    });
     res.status(500).json({ error: e.message || 'Profile photo upload failed' });
   }
 });
