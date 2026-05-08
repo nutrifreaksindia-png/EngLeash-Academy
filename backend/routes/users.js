@@ -47,7 +47,43 @@ router.get('/me', auth, async (req, res) => {
 router.get('/', auth, requireRole('Admin'), (req, res) => {
   const users = db
     .prepare(
-      'SELECT id, email, name, role, status, mobile_number, profile_photo_url, created_at FROM users ORDER BY id DESC'
+      `SELECT
+        u.id,
+        u.email,
+        u.name,
+        u.role,
+        u.status,
+        u.mobile_number,
+        u.profile_photo_url,
+        u.created_at,
+        sp.city_district AS city_district,
+        (
+          SELECT b.batch_number
+          FROM batch_members bm
+          JOIN batches b ON b.id = bm.batch_id
+          WHERE bm.student_id = u.id
+          ORDER BY b.id DESC
+          LIMIT 1
+        ) AS connected_batch_number,
+        (
+          SELECT COALESCE(b.title, b.name)
+          FROM batch_members bm
+          JOIN batches b ON b.id = bm.batch_id
+          WHERE bm.student_id = u.id
+          ORDER BY b.id DESC
+          LIMIT 1
+        ) AS connected_batch_title,
+        (
+          SELECT COALESCE(b.batch_type, b.session_type)
+          FROM batch_members bm
+          JOIN batches b ON b.id = bm.batch_id
+          WHERE bm.student_id = u.id
+          ORDER BY b.id DESC
+          LIMIT 1
+        ) AS connected_batch_type
+      FROM users u
+      LEFT JOIN student_profiles sp ON sp.user_id = u.id
+      ORDER BY u.id DESC`
     )
     .all();
   res.json(users);
@@ -62,7 +98,20 @@ router.get('/:id', auth, requireRole('Admin'), (req, res) => {
   if (!user) return res.status(404).json({ error: 'User not found' });
   const profile = db.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(id) || null;
   const studentProfile = db.prepare('SELECT * FROM student_profiles WHERE user_id = ?').get(id) || null;
-  res.json({ ...user, profile, studentProfile });
+  const connectedBatches = db
+    .prepare(
+      `SELECT
+        b.id,
+        b.batch_number,
+        COALESCE(b.title, b.name) AS batch_title,
+        COALESCE(b.batch_type, b.session_type) AS batch_type
+      FROM batch_members bm
+      JOIN batches b ON b.id = bm.batch_id
+      WHERE bm.student_id = ?
+      ORDER BY b.id DESC`
+    )
+    .all(id);
+  res.json({ ...user, profile, studentProfile, connectedBatches });
 });
 
 router.post('/', auth, requireRole('Admin'), (req, res) => {
@@ -243,14 +292,6 @@ async function uploadProfilePhotoForUser(userId, file) {
     mimeType: file.mimetype || 'image/jpeg',
     key,
   });
-  console.info('[profile-photo] upload complete', {
-    userId,
-    prefix,
-    deletedObjects: deleted,
-    key,
-    mimeType: file.mimetype || 'image/jpeg',
-    size: Number(file.size || 0),
-  });
   db.prepare('UPDATE users SET profile_photo_url = ? WHERE id = ?').run(uploaded.publicUrl, userId);
   db.prepare(`
     INSERT INTO user_profiles (user_id, full_name, email, role, profile_photo_url, mobile_number)
@@ -264,25 +305,10 @@ async function uploadProfilePhotoForUser(userId, file) {
 
 router.post('/me/photo', auth, uploadMemory.single('file'), async (req, res) => {
   try {
-    console.info('[profile-photo] request start', {
-      userId: req.user?.id,
-      hasFile: Boolean(req.file),
-      mimetype: req.file?.mimetype || null,
-      size: Number(req.file?.size || 0),
-      originalname: req.file?.originalname || null,
-    });
     if (!req.file) return res.status(400).json({ error: 'File required' });
     const photoUrl = await uploadProfilePhotoForUser(req.user.id, req.file);
-    console.info('[profile-photo] request success', {
-      userId: req.user?.id,
-      photoUrl,
-    });
     res.json({ ok: true, photoUrl });
   } catch (e) {
-    console.error('[profile-photo] request failure', {
-      userId: req.user?.id,
-      error: e?.message || String(e),
-    });
     res.status(500).json({ error: e.message || 'Profile photo upload failed' });
   }
 });

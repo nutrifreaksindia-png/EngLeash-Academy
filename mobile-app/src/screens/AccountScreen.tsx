@@ -33,7 +33,6 @@ export default function AccountScreen({ navigation }: any) {
   const [serverPhotoUrl, setServerPhotoUrl] = useState('');
   const [photoVersion, setPhotoVersion] = useState(0);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
-  const [debugLines, setDebugLines] = useState<string[]>([]);
   const [form, setForm] = useState({
     name: '',
     mobileNumber: '',
@@ -52,12 +51,6 @@ export default function AccountScreen({ navigation }: any) {
   const profile = userAny.profile || {};
   const studentProfile = userAny.studentProfile || {};
   const profilePhotoUrl = String(localPhotoUrl || serverPhotoUrl || userAny.profile_photo_url || profile.profile_photo_url || '').trim();
-  function logDebug(label: string, payload?: unknown) {
-    const line = `${new Date().toISOString()} | ${label}${payload !== undefined ? ` | ${JSON.stringify(payload)}` : ''}`;
-    setDebugLines((prev) => [line, ...prev].slice(0, 16));
-    console.log(`[account-photo-debug] ${line}`);
-  }
-
   const displayMobile = `${String(studentProfile.country_code || form.countryCode || '').trim()} ${String(userAny.mobile_number || form.mobileNumber || '').trim()}`.trim();
   const displayBirthDate = useMemo(() => {
     const raw = String(studentProfile.birth_date || '').trim();
@@ -66,6 +59,24 @@ export default function AccountScreen({ navigation }: any) {
     if (Number.isNaN(dt.getTime())) return raw;
     return dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   }, [studentProfile.birth_date]);
+  const displayAddress = useMemo(() => {
+    const parts = [
+      studentProfile.address_line_1,
+      studentProfile.address_line_2,
+      studentProfile.city_district,
+      studentProfile.state_province,
+      studentProfile.country,
+    ]
+      .map((x) => String(x || '').trim())
+      .filter(Boolean);
+    return parts.length ? parts.join(', ') : '-';
+  }, [
+    studentProfile.address_line_1,
+    studentProfile.address_line_2,
+    studentProfile.city_district,
+    studentProfile.state_province,
+    studentProfile.country,
+  ]);
 
   const profileCompletion = useMemo(() => {
     const fields = [
@@ -143,12 +154,10 @@ export default function AccountScreen({ navigation }: any) {
   async function uploadPhoto() {
     try {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      logDebug('permission', { granted: perm.granted });
       if (!perm.granted) {
         Alert.alert('Permission needed', 'Please allow photo library access to upload a profile photo.');
         return;
       }
-      logDebug('picker-open-start');
       const picked = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
         allowsEditing: true,
@@ -156,15 +165,7 @@ export default function AccountScreen({ navigation }: any) {
         quality: 0.9,
         base64: true,
       });
-      logDebug('picker-open-returned');
-    logDebug('picker-result', {
-      canceled: picked?.canceled,
-      hasAssets: Boolean(picked?.assets?.length),
-      assetsCount: picked?.assets?.length || 0,
-      keys: Object.keys(picked || {}),
-    });
     if (picked?.canceled) {
-      logDebug('picker-canceled');
       return;
     }
     let file: any = null;
@@ -175,16 +176,9 @@ export default function AccountScreen({ navigation }: any) {
       file = picked as any;
     }
     if (!file) {
-      logDebug('picker-no-file', picked);
       Alert.alert('Upload failed', 'Image picker returned no file. Please try again.');
       return;
     }
-    logDebug('picked', {
-      uri: file.uri,
-      mimeType: file.mimeType,
-      fileName: file.fileName,
-      hasBase64: Boolean(file.base64),
-    });
     let uploadUri = String(file.uri || '').trim();
     if (!uploadUri) {
       Alert.alert('Upload failed', 'Selected image has no file path.');
@@ -197,7 +191,6 @@ export default function AccountScreen({ navigation }: any) {
       const localPath = `${FileSystem.cacheDirectory || ''}profile-upload-${Date.now()}.${ext}`;
       await FileSystem.copyAsync({ from: uploadUri, to: localPath });
       uploadUri = localPath;
-      logDebug('copied-content-uri', { uploadUri });
     }
     const formData = new FormData();
     formData.append('file', {
@@ -209,26 +202,21 @@ export default function AccountScreen({ navigation }: any) {
     try {
       setImageLoadFailed(false);
       if (uploadUri) setLocalPhotoUrl(`${uploadUri}${uploadUri.includes('?') ? '&' : '?'}t=${Date.now()}`);
-      logDebug('local-preview-set', { uploadUri });
       const uploaded = await api.postForm('/users/me/photo', formData);
-      logDebug('upload-response', uploaded);
       const nextUrl = String(uploaded?.photoUrl || '').trim();
       if (nextUrl) {
         const sep = nextUrl.includes('?') ? '&' : '?';
         setLocalPhotoUrl('');
         setServerPhotoUrl(`${nextUrl}${sep}t=${Date.now()}`);
-        logDebug('server-photo-set', { nextUrl });
       }
       refreshUser();
       Alert.alert('Success', 'Profile photo updated.');
     } catch (e: any) {
-      logDebug('upload-error', { message: e?.message || 'unknown' });
       Alert.alert('Upload failed', e?.message || 'Could not upload photo');
     } finally {
       setBusy(false);
     }
     } catch (e: any) {
-      logDebug('picker-call-error', { message: e?.message || String(e) });
       Alert.alert('Upload failed', e?.message || 'Could not open image picker');
     }
   }
@@ -247,7 +235,6 @@ export default function AccountScreen({ navigation }: any) {
                   style={styles.avatar}
                   onError={() => {
                     setImageLoadFailed(true);
-                    logDebug('image-onError', { profilePhotoUrl });
                   }}
                 />
               ) : (
@@ -280,13 +267,6 @@ export default function AccountScreen({ navigation }: any) {
             <View style={styles.progressTrack}>
               <View style={[styles.progressFill, { width: `${profileCompletion}%` }]} />
             </View>
-            <View style={styles.debugCard}>
-              <Text style={styles.debugTitle}>Photo Debug</Text>
-              <Text style={styles.debugLine}>activeSource: {profilePhotoUrl || '(none)'}</Text>
-              {debugLines.map((line, idx) => (
-                <Text key={`dbg-${idx}`} style={styles.debugLine}>{line}</Text>
-              ))}
-            </View>
           </View>
 
           <View style={styles.sectionCard}>
@@ -295,16 +275,18 @@ export default function AccountScreen({ navigation }: any) {
             {editing ? <TextInput style={styles.input} value={form.gender} onChangeText={(value) => setForm((s) => ({ ...s, gender: value }))} /> : <Text style={styles.value}>{studentProfile.gender || '-'}</Text>}
             <Text style={[styles.label, styles.spaceTop]}>Birth Date</Text>
             {editing ? <TextInput style={styles.input} value={form.birthDate} onChangeText={(value) => setForm((s) => ({ ...s, birthDate: value }))} placeholder="YYYY-MM-DD" /> : <Text style={styles.value}>{displayBirthDate}</Text>}
-            <Text style={[styles.label, styles.spaceTop]}>Address Line 1</Text>
-            {editing ? <TextInput style={styles.input} value={form.addressLine1} onChangeText={(value) => setForm((s) => ({ ...s, addressLine1: value }))} /> : <Text style={styles.value}>{studentProfile.address_line_1 || '-'}</Text>}
-            <Text style={[styles.label, styles.spaceTop]}>Address Line 2</Text>
-            {editing ? <TextInput style={styles.input} value={form.addressLine2} onChangeText={(value) => setForm((s) => ({ ...s, addressLine2: value }))} /> : <Text style={styles.value}>{studentProfile.address_line_2 || '-'}</Text>}
-            <Text style={[styles.label, styles.spaceTop]}>City / District</Text>
-            {editing ? <TextInput style={styles.input} value={form.cityDistrict} onChangeText={(value) => setForm((s) => ({ ...s, cityDistrict: value }))} /> : <Text style={styles.value}>{studentProfile.city_district || '-'}</Text>}
-            <Text style={[styles.label, styles.spaceTop]}>State / Province</Text>
-            {editing ? <TextInput style={styles.input} value={form.stateProvince} onChangeText={(value) => setForm((s) => ({ ...s, stateProvince: value }))} /> : <Text style={styles.value}>{studentProfile.state_province || '-'}</Text>}
-            <Text style={[styles.label, styles.spaceTop]}>Country</Text>
-            {editing ? <TextInput style={styles.input} value={form.country} onChangeText={(value) => setForm((s) => ({ ...s, country: value }))} /> : <Text style={styles.value}>{studentProfile.country || '-'}</Text>}
+            <Text style={[styles.label, styles.spaceTop]}>Address</Text>
+            {editing ? (
+              <>
+                <TextInput style={styles.input} value={form.addressLine1} onChangeText={(value) => setForm((s) => ({ ...s, addressLine1: value }))} placeholder="Address line 1" />
+                <TextInput style={styles.input} value={form.addressLine2} onChangeText={(value) => setForm((s) => ({ ...s, addressLine2: value }))} placeholder="Address line 2" />
+                <TextInput style={styles.input} value={form.cityDistrict} onChangeText={(value) => setForm((s) => ({ ...s, cityDistrict: value }))} placeholder="City / District" />
+                <TextInput style={styles.input} value={form.stateProvince} onChangeText={(value) => setForm((s) => ({ ...s, stateProvince: value }))} placeholder="State / Province" />
+                <TextInput style={styles.input} value={form.country} onChangeText={(value) => setForm((s) => ({ ...s, country: value }))} placeholder="Country" />
+              </>
+            ) : (
+              <Text style={styles.value}>{displayAddress}</Text>
+            )}
             <Text style={[styles.label, styles.spaceTop]}>Occupation</Text>
             {editing ? <TextInput style={styles.input} value={form.occupation} onChangeText={(value) => setForm((s) => ({ ...s, occupation: value }))} /> : <Text style={styles.value}>{studentProfile.occupation || '-'}</Text>}
           </View>
@@ -532,24 +514,4 @@ const styles = StyleSheet.create({
   loginScroll: { padding: 20, paddingTop: 12 },
   signInTitle: { fontSize: 26, fontWeight: '800', color: '#fff', marginBottom: 8 },
   signInSub: { fontSize: 15, color: '#e8eaf6', marginBottom: 20, lineHeight: 22 },
-  debugCard: {
-    marginTop: 8,
-    width: '100%',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.35)',
-    backgroundColor: 'rgba(2,6,23,0.35)',
-    padding: 8,
-    gap: 3,
-  },
-  debugTitle: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  debugLine: {
-    color: '#e2e8f0',
-    fontSize: 10,
-    lineHeight: 14,
-  },
 });

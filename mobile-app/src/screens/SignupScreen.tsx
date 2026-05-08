@@ -99,7 +99,16 @@ export default function SignupScreen({ navigation }: any) {
     try {
       await signup(payload);
       Alert.alert('Welcome', 'Your account was created successfully.', [
-        { text: 'OK' },
+        {
+          text: 'OK',
+          onPress: () => {
+            if (navigation?.canGoBack?.()) {
+              navigation.goBack();
+            } else {
+              navigation?.navigate?.('Account');
+            }
+          },
+        },
       ]);
     } catch (e: any) {
       Alert.alert('Signup failed', e?.message || 'Could not sign up');
