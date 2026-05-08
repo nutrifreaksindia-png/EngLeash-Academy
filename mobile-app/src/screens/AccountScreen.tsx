@@ -1,6 +1,19 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import * as ImagePicker from 'expo-image-picker';
-import { Alert, Image, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import LoginForm from '../components/LoginForm';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
@@ -15,6 +28,7 @@ export default function AccountScreen({ navigation }: any) {
   const insets = useSafeAreaInsets();
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [localPhotoUrl, setLocalPhotoUrl] = useState('');
   const [form, setForm] = useState({
     name: '',
     mobileNumber: '',
@@ -32,7 +46,43 @@ export default function AccountScreen({ navigation }: any) {
   const userAny = (user || {}) as any;
   const profile = userAny.profile || {};
   const studentProfile = userAny.studentProfile || {};
-  const profilePhotoUrl = userAny.profile_photo_url || profile.profile_photo_url || '';
+  const profilePhotoUrl = localPhotoUrl || userAny.profile_photo_url || profile.profile_photo_url || '';
+  const displayMobile = `${String(studentProfile.country_code || form.countryCode || '').trim()} ${String(userAny.mobile_number || form.mobileNumber || '').trim()}`.trim();
+  const displayBirthDate = useMemo(() => {
+    const raw = String(studentProfile.birth_date || '').trim();
+    if (!raw) return '-';
+    const dt = new Date(`${raw}T00:00:00`);
+    if (Number.isNaN(dt.getTime())) return raw;
+    return dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  }, [studentProfile.birth_date]);
+
+  const profileCompletion = useMemo(() => {
+    const fields = [
+      userAny.name,
+      userAny.email,
+      userAny.mobile_number,
+      studentProfile.gender,
+      studentProfile.birth_date,
+      studentProfile.city_district,
+      studentProfile.state_province,
+      studentProfile.country,
+      studentProfile.occupation,
+      profilePhotoUrl,
+    ];
+    const done = fields.filter((x) => String(x || '').trim()).length;
+    return Math.round((done / fields.length) * 100);
+  }, [
+    profilePhotoUrl,
+    studentProfile.birth_date,
+    studentProfile.city_district,
+    studentProfile.country,
+    studentProfile.gender,
+    studentProfile.occupation,
+    studentProfile.state_province,
+    userAny.email,
+    userAny.mobile_number,
+    userAny.name,
+  ]);
 
   useEffect(() => {
     if (!user) return;
@@ -53,6 +103,12 @@ export default function AccountScreen({ navigation }: any) {
       occupation: nextStudentProfile.occupation || '',
     });
   }, [user]);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      refreshUser();
+    }, [refreshUser])
+  );
 
   async function saveProfile() {
     setBusy(true);
@@ -79,18 +135,29 @@ export default function AccountScreen({ navigation }: any) {
       allowsEditing: true,
       aspect: [1, 1],
       quality: 0.9,
+      base64: true,
     });
     if (picked.canceled || !picked.assets?.length) return;
     const file = picked.assets[0];
     const formData = new FormData();
     formData.append('file', {
       uri: file.uri,
-      name: file.name || `profile-${Date.now()}.jpg`,
+      name: file.fileName || `profile-${Date.now()}.jpg`,
       type: file.mimeType || 'image/jpeg',
     } as any);
     setBusy(true);
     try {
-      await api.postForm('/users/me/photo', formData);
+      if (file.base64) {
+        setLocalPhotoUrl(`data:image/jpeg;base64,${file.base64}`);
+      } else if (file.uri) {
+        setLocalPhotoUrl(file.uri);
+      }
+      const uploaded = await api.postForm('/users/me/photo', formData);
+      const nextUrl = String(uploaded?.photoUrl || '').trim();
+      if (nextUrl) {
+        const sep = nextUrl.includes('?') ? '&' : '?';
+        setLocalPhotoUrl(`${nextUrl}${sep}t=${Date.now()}`);
+      }
       refreshUser();
       Alert.alert('Success', 'Profile photo updated.');
     } catch (e: any) {
@@ -104,64 +171,75 @@ export default function AccountScreen({ navigation }: any) {
     return (
       <View style={styles.profileRoot}>
         <ScreenPageTitle title="My Account" />
-        <ScrollView
-          style={styles.container}
-          contentContainerStyle={[styles.profileContent, { paddingBottom: 24 + insets.bottom }]}
-        >
-        <View style={styles.card}>
-          {profilePhotoUrl ? <Image source={{ uri: profilePhotoUrl }} style={styles.avatar} /> : null}
-          <TouchableOpacity style={styles.refreshBtn} onPress={uploadPhoto} disabled={busy}>
-            <Text style={styles.refreshText}>{busy ? 'Please wait...' : 'Upload profile photo'}</Text>
+        <ScrollView style={styles.container} contentContainerStyle={[styles.profileContent, { paddingBottom: 24 + insets.bottom }]}>
+          <View style={styles.heroCard}>
+            <View style={styles.avatarWrap}>
+              {profilePhotoUrl ? (
+                <Image source={{ uri: profilePhotoUrl }} style={styles.avatar} />
+              ) : (
+                <View style={styles.avatarFallback}>
+                  <View style={styles.avatarHumanHead} />
+                  <View style={styles.avatarHumanBody} />
+                </View>
+              )}
+              <TouchableOpacity style={styles.avatarActionBtn} onPress={uploadPhoto} disabled={busy}>
+                <Text style={styles.avatarActionText}>{profilePhotoUrl ? '✎' : '+'}</Text>
+              </TouchableOpacity>
+              {busy ? (
+                <View style={styles.avatarBusy}>
+                  <ActivityIndicator color="#fff" />
+                </View>
+              ) : null}
+            </View>
+            {!profilePhotoUrl ? <Text style={styles.avatarHint}>Add profile photo</Text> : null}
+            <Text style={styles.heroName}>{userAny.name || 'User'}</Text>
+            <View style={styles.heroMetaRow}>
+              <Text style={styles.heroEmail}>{userAny.email}</Text>
+              <Text style={styles.heroMetaDivider}>•</Text>
+              <Text style={styles.heroEmail}>{displayMobile || '-'}</Text>
+            </View>
+            <View style={styles.progressRow}>
+              <Text style={styles.progressLabel}>Profile completion</Text>
+              <Text style={styles.progressValue}>{profileCompletion}%</Text>
+            </View>
+            <View style={styles.progressTrack}>
+              <View style={[styles.progressFill, { width: `${profileCompletion}%` }]} />
+            </View>
+          </View>
+
+          <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>Student profile</Text>
+            <Text style={[styles.label, styles.spaceTop]}>Gender</Text>
+            {editing ? <TextInput style={styles.input} value={form.gender} onChangeText={(value) => setForm((s) => ({ ...s, gender: value }))} /> : <Text style={styles.value}>{studentProfile.gender || '-'}</Text>}
+            <Text style={[styles.label, styles.spaceTop]}>Birth Date</Text>
+            {editing ? <TextInput style={styles.input} value={form.birthDate} onChangeText={(value) => setForm((s) => ({ ...s, birthDate: value }))} placeholder="YYYY-MM-DD" /> : <Text style={styles.value}>{displayBirthDate}</Text>}
+            <Text style={[styles.label, styles.spaceTop]}>Address Line 1</Text>
+            {editing ? <TextInput style={styles.input} value={form.addressLine1} onChangeText={(value) => setForm((s) => ({ ...s, addressLine1: value }))} /> : <Text style={styles.value}>{studentProfile.address_line_1 || '-'}</Text>}
+            <Text style={[styles.label, styles.spaceTop]}>Address Line 2</Text>
+            {editing ? <TextInput style={styles.input} value={form.addressLine2} onChangeText={(value) => setForm((s) => ({ ...s, addressLine2: value }))} /> : <Text style={styles.value}>{studentProfile.address_line_2 || '-'}</Text>}
+            <Text style={[styles.label, styles.spaceTop]}>City / District</Text>
+            {editing ? <TextInput style={styles.input} value={form.cityDistrict} onChangeText={(value) => setForm((s) => ({ ...s, cityDistrict: value }))} /> : <Text style={styles.value}>{studentProfile.city_district || '-'}</Text>}
+            <Text style={[styles.label, styles.spaceTop]}>State / Province</Text>
+            {editing ? <TextInput style={styles.input} value={form.stateProvince} onChangeText={(value) => setForm((s) => ({ ...s, stateProvince: value }))} /> : <Text style={styles.value}>{studentProfile.state_province || '-'}</Text>}
+            <Text style={[styles.label, styles.spaceTop]}>Country</Text>
+            {editing ? <TextInput style={styles.input} value={form.country} onChangeText={(value) => setForm((s) => ({ ...s, country: value }))} /> : <Text style={styles.value}>{studentProfile.country || '-'}</Text>}
+            <Text style={[styles.label, styles.spaceTop]}>Occupation</Text>
+            {editing ? <TextInput style={styles.input} value={form.occupation} onChangeText={(value) => setForm((s) => ({ ...s, occupation: value }))} /> : <Text style={styles.value}>{studentProfile.occupation || '-'}</Text>}
+          </View>
+
+          <View style={styles.actionRow}>
+            <TouchableOpacity style={styles.ghostBtn} onPress={() => setEditing((v) => !v)}>
+              <Text style={styles.ghostBtnText}>{editing ? 'Cancel edit' : 'Edit profile'}</Text>
+            </TouchableOpacity>
+            {editing ? (
+              <TouchableOpacity style={styles.primaryBtnSmall} onPress={saveProfile} disabled={busy}>
+                <Text style={styles.primaryBtnText}>{busy ? 'Saving...' : 'Save profile'}</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+          <TouchableOpacity style={styles.logoutBtn} onPress={() => logout()}>
+            <Text style={styles.logoutText}>Log out</Text>
           </TouchableOpacity>
-          <Text style={styles.label}>Name</Text>
-          {editing ? (
-            <TextInput style={styles.input} value={form.name} onChangeText={(value) => setForm((s) => ({ ...s, name: value }))} />
-          ) : (
-            <Text style={styles.value}>{userAny.name}</Text>
-          )}
-          <Text style={[styles.label, { marginTop: 16 }]}>Email</Text>
-          <Text style={styles.value}>{userAny.email}</Text>
-          <Text style={[styles.label, { marginTop: 16 }]}>Mobile Number</Text>
-          {editing ? (
-            <TextInput style={styles.input} value={form.mobileNumber} onChangeText={(value) => setForm((s) => ({ ...s, mobileNumber: value }))} />
-          ) : (
-            <Text style={styles.value}>{userAny.mobile_number || '-'}</Text>
-          )}
-          <Text style={[styles.label, { marginTop: 16 }]}>Role</Text>
-          <Text style={styles.value}>{userAny.role}</Text>
-          <Text style={[styles.label, { marginTop: 16 }]}>Gender</Text>
-          {editing ? <TextInput style={styles.input} value={form.gender} onChangeText={(value) => setForm((s) => ({ ...s, gender: value }))} /> : <Text style={styles.value}>{studentProfile.gender || '-'}</Text>}
-          <Text style={[styles.label, { marginTop: 16 }]}>Birth Date</Text>
-          {editing ? <TextInput style={styles.input} value={form.birthDate} onChangeText={(value) => setForm((s) => ({ ...s, birthDate: value }))} placeholder="YYYY-MM-DD" /> : <Text style={styles.value}>{studentProfile.birth_date || '-'}</Text>}
-          <Text style={[styles.label, { marginTop: 16 }]}>Address Line 1</Text>
-          {editing ? <TextInput style={styles.input} value={form.addressLine1} onChangeText={(value) => setForm((s) => ({ ...s, addressLine1: value }))} /> : <Text style={styles.value}>{studentProfile.address_line_1 || '-'}</Text>}
-          <Text style={[styles.label, { marginTop: 16 }]}>Address Line 2</Text>
-          {editing ? <TextInput style={styles.input} value={form.addressLine2} onChangeText={(value) => setForm((s) => ({ ...s, addressLine2: value }))} /> : <Text style={styles.value}>{studentProfile.address_line_2 || '-'}</Text>}
-          <Text style={[styles.label, { marginTop: 16 }]}>City / District</Text>
-          {editing ? <TextInput style={styles.input} value={form.cityDistrict} onChangeText={(value) => setForm((s) => ({ ...s, cityDistrict: value }))} /> : <Text style={styles.value}>{studentProfile.city_district || '-'}</Text>}
-          <Text style={[styles.label, { marginTop: 16 }]}>State / Province</Text>
-          {editing ? <TextInput style={styles.input} value={form.stateProvince} onChangeText={(value) => setForm((s) => ({ ...s, stateProvince: value }))} /> : <Text style={styles.value}>{studentProfile.state_province || '-'}</Text>}
-          <Text style={[styles.label, { marginTop: 16 }]}>Country</Text>
-          {editing ? <TextInput style={styles.input} value={form.country} onChangeText={(value) => setForm((s) => ({ ...s, country: value }))} /> : <Text style={styles.value}>{studentProfile.country || '-'}</Text>}
-          <Text style={[styles.label, { marginTop: 16 }]}>Country Code</Text>
-          {editing ? <TextInput style={styles.input} value={form.countryCode} onChangeText={(value) => setForm((s) => ({ ...s, countryCode: value }))} /> : <Text style={styles.value}>{studentProfile.country_code || '-'}</Text>}
-          <Text style={[styles.label, { marginTop: 16 }]}>Occupation</Text>
-          {editing ? <TextInput style={styles.input} value={form.occupation} onChangeText={(value) => setForm((s) => ({ ...s, occupation: value }))} /> : <Text style={styles.value}>{studentProfile.occupation || '-'}</Text>}
-        </View>
-        <TouchableOpacity style={styles.refreshBtn} onPress={() => setEditing((v) => !v)}>
-          <Text style={styles.refreshText}>{editing ? 'Cancel edit' : 'Edit profile'}</Text>
-        </TouchableOpacity>
-        {editing ? (
-          <TouchableOpacity style={styles.refreshBtn} onPress={saveProfile} disabled={busy}>
-            <Text style={styles.refreshText}>{busy ? 'Saving...' : 'Save profile'}</Text>
-          </TouchableOpacity>
-        ) : null}
-        <TouchableOpacity style={styles.refreshBtn} onPress={() => refreshUser()}>
-          <Text style={styles.refreshText}>Refresh profile</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.logoutBtn} onPress={() => logout()}>
-          <Text style={styles.logoutText}>Log out</Text>
-        </TouchableOpacity>
         </ScrollView>
       </View>
     );
@@ -170,41 +248,155 @@ export default function AccountScreen({ navigation }: any) {
   return (
     <View style={styles.loginRoot}>
       <ScreenPageTitle title="My Account" />
-      <KeyboardAvoidingView
-        style={[styles.loginWrap, { paddingBottom: insets.bottom }]}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-      <ScrollView contentContainerStyle={styles.loginScroll} keyboardShouldPersistTaps="handled">
-        <Text style={styles.signInTitle}>Sign in</Text>
-        <Text style={styles.signInSub}>Sign in to access My Courses, Sessions, and Assignments.</Text>
-        <LoginForm navigation={navigation} showSignupLink />
-      </ScrollView>
+      <KeyboardAvoidingView style={[styles.loginWrap, { paddingBottom: insets.bottom }]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ScrollView contentContainerStyle={styles.loginScroll} keyboardShouldPersistTaps="handled">
+          <Text style={styles.signInTitle}>Sign in</Text>
+          <Text style={styles.signInSub}>Sign in to access My Courses, Sessions, and Assignments.</Text>
+          <LoginForm navigation={navigation} showSignupLink />
+        </ScrollView>
       </KeyboardAvoidingView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  profileRoot: { flex: 1, backgroundColor: '#f5f5f5' },
+  profileRoot: { flex: 1, backgroundColor: '#f5f7fb' },
   loginRoot: { flex: 1, backgroundColor: BRAND_BLUE },
-  container: { flex: 1, backgroundColor: '#f5f5f5' },
-  profileContent: { padding: 20, paddingTop: 16 },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
+  container: { flex: 1, backgroundColor: '#f5f7fb' },
+  profileContent: { padding: 16, paddingTop: 12, gap: 12 },
+  heroCard: {
+    backgroundColor: '#1a237e',
+    borderRadius: 16,
     padding: 16,
-    borderLeftWidth: 4,
-    borderLeftColor: BRAND_RED,
+    alignItems: 'center',
   },
-  avatar: {
-    width: 96,
-    height: 96,
-    borderRadius: 48,
-    alignSelf: 'center',
+  avatarWrap: {
+    position: 'relative',
+    width: 98,
+    height: 98,
     marginBottom: 10,
   },
-  label: { fontSize: 13, fontWeight: '600', color: '#666' },
-  value: { fontSize: 17, color: '#222', marginTop: 4 },
+  avatar: {
+    width: 98,
+    height: 98,
+    borderRadius: 49,
+    borderWidth: 2,
+    borderColor: '#fff',
+  },
+  avatarFallback: {
+    width: 98,
+    height: 98,
+    borderRadius: 49,
+    backgroundColor: '#3949ab',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    borderWidth: 2,
+    borderColor: '#fff',
+    overflow: 'hidden',
+  },
+  avatarHumanHead: {
+    position: 'absolute',
+    top: 20,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: 'rgba(255,255,255,0.58)',
+  },
+  avatarHumanBody: {
+    width: 64,
+    height: 38,
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
+    backgroundColor: 'rgba(255,255,255,0.42)',
+  },
+  avatarActionBtn: {
+    position: 'absolute',
+    right: -4,
+    bottom: -2,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#dbe3f0',
+  },
+  avatarActionText: {
+    color: BRAND_BLUE,
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  avatarBusy: {
+    position: 'absolute',
+    right: 0,
+    bottom: 0,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#0f172a',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heroName: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  heroEmail: {
+    color: '#c7d2fe',
+    fontSize: 13,
+  },
+  avatarHint: {
+    color: '#c7d2fe',
+    fontSize: 12,
+    marginBottom: 6,
+  },
+  heroMetaRow: {
+    marginTop: 4,
+    marginBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+  },
+  heroMetaDivider: { color: '#93a0c6' },
+  progressRow: {
+    width: '100%',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  progressLabel: { color: '#e8eaf6', fontSize: 12, fontWeight: '600' },
+  progressValue: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  progressTrack: {
+    width: '100%',
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.25)',
+    overflow: 'hidden',
+    marginBottom: 12,
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#22c55e',
+  },
+  sectionCard: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#e8ecf6',
+  },
+  sectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1f2a44',
+    marginBottom: 6,
+  },
+  label: { fontSize: 12, fontWeight: '700', color: '#6b7280', textTransform: 'uppercase' },
+  value: { fontSize: 16, color: '#111827', marginTop: 4 },
   input: {
     borderWidth: 1,
     borderColor: '#d7def0',
@@ -215,7 +407,31 @@ const styles = StyleSheet.create({
     color: '#1f2a44',
     backgroundColor: '#fff',
   },
-  refreshBtn: { marginTop: 16, paddingVertical: 12, alignItems: 'center' },
+  spaceTop: { marginTop: 16 },
+  actionRow: {
+    flexDirection: 'row',
+    gap: 10,
+    alignItems: 'center',
+  },
+  primaryBtnSmall: {
+    flex: 1,
+    backgroundColor: BRAND_RED,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  primaryBtnText: { color: '#fff', fontWeight: '700' },
+  ghostBtn: {
+    flex: 1,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#c7d2fe',
+    paddingVertical: 12,
+    alignItems: 'center',
+    backgroundColor: '#eef2ff',
+  },
+  ghostBtnText: { color: BRAND_BLUE, fontWeight: '700' },
+  refreshBtn: { marginTop: 6, paddingVertical: 12, alignItems: 'center' },
   refreshText: { color: BRAND_BLUE, fontWeight: '700' },
   logoutBtn: {
     marginTop: 8,

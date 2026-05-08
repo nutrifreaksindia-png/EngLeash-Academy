@@ -4,16 +4,45 @@ const path = require('path');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
 const uploadMemory = require('../uploadMemory');
-const { uploadToSpaces, isSpacesConfigured } = require('../services/spaces');
+const { uploadToSpaces, isSpacesConfigured, getSignedPlaybackUrl } = require('../services/spaces');
 
 const router = express.Router();
 
-router.get('/me', auth, (req, res) => {
+function extractSpacesKeyFromUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    return decodeURIComponent(parsed.pathname || '').replace(/^\/+/, '');
+  } catch {
+    return '';
+  }
+}
+
+async function resolveProfilePhotoUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw || !isSpacesConfigured()) return raw;
+  const key = extractSpacesKeyFromUrl(raw);
+  if (!key || !key.startsWith('profiles/')) return raw;
+  try {
+    return await getSignedPlaybackUrl(key, Number(process.env.SPACES_SIGNED_URL_TTL_SECONDS || 21600));
+  } catch {
+    return raw;
+  }
+}
+
+router.get('/me', auth, async (req, res) => {
   const profile = db.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(req.user.id);
   const studentProfile = req.user.role === 'Student'
     ? db.prepare('SELECT * FROM student_profiles WHERE user_id = ?').get(req.user.id)
     : null;
-  res.json({ ...req.user, profile: profile || null, studentProfile: studentProfile || null });
+  const resolvedPhoto = await resolveProfilePhotoUrl(req.user.profile_photo_url || profile?.profile_photo_url || '');
+  res.json({
+    ...req.user,
+    profile_photo_url: resolvedPhoto || req.user.profile_photo_url || null,
+    profile: profile ? { ...profile, profile_photo_url: resolvedPhoto || profile.profile_photo_url || null } : null,
+    studentProfile: studentProfile || null,
+  });
 });
 
 router.get('/', auth, requireRole('Admin'), (req, res) => {
@@ -220,7 +249,8 @@ router.post('/me/photo', auth, uploadMemory.single('file'), async (req, res) => 
   try {
     if (!req.file) return res.status(400).json({ error: 'File required' });
     const photoUrl = await uploadProfilePhotoForUser(req.user.id, req.file);
-    res.json({ ok: true, photoUrl });
+    const signedPhotoUrl = await resolveProfilePhotoUrl(photoUrl);
+    res.json({ ok: true, photoUrl: signedPhotoUrl || photoUrl });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Profile photo upload failed' });
   }
