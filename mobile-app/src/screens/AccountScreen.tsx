@@ -30,6 +30,9 @@ export default function AccountScreen({ navigation }: any) {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [localPhotoUrl, setLocalPhotoUrl] = useState('');
+  const [localPhotoFileUri, setLocalPhotoFileUri] = useState('');
+  const [serverPhotoUrl, setServerPhotoUrl] = useState('');
+  const [photoCandidateIndex, setPhotoCandidateIndex] = useState(0);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
   const [form, setForm] = useState({
     name: '',
@@ -48,7 +51,13 @@ export default function AccountScreen({ navigation }: any) {
   const userAny = (user || {}) as any;
   const profile = userAny.profile || {};
   const studentProfile = userAny.studentProfile || {};
-  const profilePhotoUrl = localPhotoUrl || userAny.profile_photo_url || profile.profile_photo_url || '';
+  const remoteProfilePhotoUrl = String(serverPhotoUrl || userAny.profile_photo_url || profile.profile_photo_url || '').trim();
+  const photoCandidates = [
+    String(localPhotoUrl || '').trim(),
+    String(localPhotoFileUri || '').trim(),
+    remoteProfilePhotoUrl,
+  ].filter(Boolean);
+  const profilePhotoUrl = photoCandidates[photoCandidateIndex] || '';
   const displayMobile = `${String(studentProfile.country_code || form.countryCode || '').trim()} ${String(userAny.mobile_number || form.mobileNumber || '').trim()}`.trim();
   const displayBirthDate = useMemo(() => {
     const raw = String(studentProfile.birth_date || '').trim();
@@ -106,6 +115,11 @@ export default function AccountScreen({ navigation }: any) {
     });
   }, [user]);
 
+  useEffect(() => {
+    setPhotoCandidateIndex(0);
+    setImageLoadFailed(false);
+  }, [localPhotoUrl, localPhotoFileUri, serverPhotoUrl, userAny.profile_photo_url, profile.profile_photo_url]);
+
   useFocusEffect(
     React.useCallback(() => {
       refreshUser();
@@ -150,6 +164,8 @@ export default function AccountScreen({ navigation }: any) {
     setBusy(true);
     try {
       setImageLoadFailed(false);
+      setPhotoCandidateIndex(0);
+      setLocalPhotoFileUri(file.uri || '');
       if (file.base64) {
         setLocalPhotoUrl(`data:image/jpeg;base64,${file.base64}`);
       } else if (file.uri) {
@@ -161,7 +177,7 @@ export default function AccountScreen({ navigation }: any) {
       const nextUrl = String(uploaded?.photoUrl || '').trim();
       if (nextUrl) {
         const sep = nextUrl.includes('?') ? '&' : '?';
-        setLocalPhotoUrl(`${nextUrl}${sep}t=${Date.now()}`);
+        setServerPhotoUrl(`${nextUrl}${sep}t=${Date.now()}`);
       }
       refreshUser();
       Alert.alert('Success', 'Profile photo updated.');
@@ -184,7 +200,12 @@ export default function AccountScreen({ navigation }: any) {
                   source={{ uri: profilePhotoUrl }}
                   style={styles.avatar}
                   onError={() => {
-                    setImageLoadFailed(true);
+                    const next = photoCandidateIndex + 1;
+                    if (next < photoCandidates.length) {
+                      setPhotoCandidateIndex(next);
+                    } else {
+                      setImageLoadFailed(true);
+                    }
                   }}
                 />
               ) : (
