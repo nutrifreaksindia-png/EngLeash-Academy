@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   ActivityIndicator,
@@ -147,16 +148,29 @@ export default function AccountScreen({ navigation }: any) {
     });
     if (picked.canceled || !picked.assets?.length) return;
     const file = picked.assets[0];
+    let uploadUri = String(file.uri || '').trim();
+    if (!uploadUri) {
+      Alert.alert('Upload failed', 'Selected image has no file path.');
+      return;
+    }
+    // On some Android devices, cropped picker output is content:// and fails in multipart upload.
+    // Copy to cache as file:// before appending to FormData.
+    if (uploadUri.startsWith('content://')) {
+      const ext = (file.mimeType || '').toLowerCase().includes('png') ? 'png' : 'jpg';
+      const localPath = `${FileSystem.cacheDirectory || ''}profile-upload-${Date.now()}.${ext}`;
+      await FileSystem.copyAsync({ from: uploadUri, to: localPath });
+      uploadUri = localPath;
+    }
     const formData = new FormData();
     formData.append('file', {
-      uri: file.uri,
+      uri: uploadUri,
       name: file.fileName || `profile-${Date.now()}.jpg`,
       type: file.mimeType || 'image/jpeg',
     } as any);
     setBusy(true);
     try {
       setImageLoadFailed(false);
-      if (file.uri) setLocalPhotoUrl(`${file.uri}${file.uri.includes('?') ? '&' : '?'}t=${Date.now()}`);
+      if (uploadUri) setLocalPhotoUrl(`${uploadUri}${uploadUri.includes('?') ? '&' : '?'}t=${Date.now()}`);
       const uploaded = await api.postForm('/users/me/photo', formData);
       const nextUrl = String(uploaded?.photoUrl || '').trim();
       if (nextUrl) {
