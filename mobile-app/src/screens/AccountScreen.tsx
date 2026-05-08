@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   ActivityIndicator,
@@ -30,9 +29,8 @@ export default function AccountScreen({ navigation }: any) {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [localPhotoUrl, setLocalPhotoUrl] = useState('');
-  const [localPhotoFileUri, setLocalPhotoFileUri] = useState('');
   const [serverPhotoUrl, setServerPhotoUrl] = useState('');
-  const [photoCandidateIndex, setPhotoCandidateIndex] = useState(0);
+  const [photoVersion, setPhotoVersion] = useState(0);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
   const [form, setForm] = useState({
     name: '',
@@ -51,13 +49,7 @@ export default function AccountScreen({ navigation }: any) {
   const userAny = (user || {}) as any;
   const profile = userAny.profile || {};
   const studentProfile = userAny.studentProfile || {};
-  const remoteProfilePhotoUrl = String(serverPhotoUrl || userAny.profile_photo_url || profile.profile_photo_url || '').trim();
-  const photoCandidates = [
-    String(localPhotoUrl || '').trim(),
-    String(localPhotoFileUri || '').trim(),
-    remoteProfilePhotoUrl,
-  ].filter(Boolean);
-  const profilePhotoUrl = photoCandidates[photoCandidateIndex] || '';
+  const profilePhotoUrl = String(localPhotoUrl || serverPhotoUrl || userAny.profile_photo_url || profile.profile_photo_url || '').trim();
   const displayMobile = `${String(studentProfile.country_code || form.countryCode || '').trim()} ${String(userAny.mobile_number || form.mobileNumber || '').trim()}`.trim();
   const displayBirthDate = useMemo(() => {
     const raw = String(studentProfile.birth_date || '').trim();
@@ -116,9 +108,9 @@ export default function AccountScreen({ navigation }: any) {
   }, [user]);
 
   useEffect(() => {
-    setPhotoCandidateIndex(0);
     setImageLoadFailed(false);
-  }, [localPhotoUrl, localPhotoFileUri, serverPhotoUrl, userAny.profile_photo_url, profile.profile_photo_url]);
+    setPhotoVersion((v) => v + 1);
+  }, [localPhotoUrl, serverPhotoUrl, userAny.profile_photo_url, profile.profile_photo_url]);
 
   useFocusEffect(
     React.useCallback(() => {
@@ -164,19 +156,12 @@ export default function AccountScreen({ navigation }: any) {
     setBusy(true);
     try {
       setImageLoadFailed(false);
-      setPhotoCandidateIndex(0);
-      setLocalPhotoFileUri(file.uri || '');
-      if (file.base64) {
-        setLocalPhotoUrl(`data:image/jpeg;base64,${file.base64}`);
-      } else if (file.uri) {
-        // Force reliable local preview regardless of Android content/file URI behavior.
-        const base64FromFile = await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 });
-        setLocalPhotoUrl(`data:image/jpeg;base64,${base64FromFile}`);
-      }
+      if (file.uri) setLocalPhotoUrl(`${file.uri}${file.uri.includes('?') ? '&' : '?'}t=${Date.now()}`);
       const uploaded = await api.postForm('/users/me/photo', formData);
       const nextUrl = String(uploaded?.photoUrl || '').trim();
       if (nextUrl) {
         const sep = nextUrl.includes('?') ? '&' : '?';
+        setLocalPhotoUrl('');
         setServerPhotoUrl(`${nextUrl}${sep}t=${Date.now()}`);
       }
       refreshUser();
@@ -197,15 +182,11 @@ export default function AccountScreen({ navigation }: any) {
             <View style={styles.avatarWrap}>
               {profilePhotoUrl ? (
                 <Image
+                  key={`profile-photo-${photoVersion}`}
                   source={{ uri: profilePhotoUrl }}
                   style={styles.avatar}
                   onError={() => {
-                    const next = photoCandidateIndex + 1;
-                    if (next < photoCandidates.length) {
-                      setPhotoCandidateIndex(next);
-                    } else {
-                      setImageLoadFailed(true);
-                    }
+                    setImageLoadFailed(true);
                   }}
                 />
               ) : (
