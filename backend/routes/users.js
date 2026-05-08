@@ -8,6 +8,15 @@ const { uploadToSpaces, isSpacesConfigured, deleteObjectsUnderPrefix } = require
 
 const router = express.Router();
 
+function hasColumn(tableName, columnName) {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(${tableName})`).all();
+    return cols.some((c) => String(c.name || '').toLowerCase() === String(columnName || '').toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 function extractSpacesKeyFromUrl(url) {
   const raw = String(url || '').trim();
   if (!raw) return '';
@@ -45,6 +54,14 @@ router.get('/me', auth, async (req, res) => {
 });
 
 router.get('/', auth, requireRole('Admin'), (req, res) => {
+  const hasBatchNumber = hasColumn('batches', 'batch_number');
+  const hasBatchTitle = hasColumn('batches', 'title');
+  const hasBatchType = hasColumn('batches', 'batch_type');
+
+  const batchNumberExpr = hasBatchNumber ? 'b.batch_number' : 'CAST(b.id AS TEXT)';
+  const batchTitleExpr = hasBatchTitle ? 'COALESCE(b.title, b.name)' : 'b.name';
+  const batchTypeExpr = hasBatchType ? 'COALESCE(b.batch_type, b.session_type)' : 'b.session_type';
+
   const users = db
     .prepare(
       `SELECT
@@ -58,7 +75,7 @@ router.get('/', auth, requireRole('Admin'), (req, res) => {
         u.created_at,
         sp.city_district AS city_district,
         (
-          SELECT b.batch_number
+          SELECT ${batchNumberExpr}
           FROM batch_members bm
           JOIN batches b ON b.id = bm.batch_id
           WHERE bm.student_id = u.id
@@ -66,7 +83,7 @@ router.get('/', auth, requireRole('Admin'), (req, res) => {
           LIMIT 1
         ) AS connected_batch_number,
         (
-          SELECT COALESCE(b.title, b.name)
+          SELECT ${batchTitleExpr}
           FROM batch_members bm
           JOIN batches b ON b.id = bm.batch_id
           WHERE bm.student_id = u.id
@@ -74,7 +91,7 @@ router.get('/', auth, requireRole('Admin'), (req, res) => {
           LIMIT 1
         ) AS connected_batch_title,
         (
-          SELECT COALESCE(b.batch_type, b.session_type)
+          SELECT ${batchTypeExpr}
           FROM batch_members bm
           JOIN batches b ON b.id = bm.batch_id
           WHERE bm.student_id = u.id
@@ -98,13 +115,21 @@ router.get('/:id', auth, requireRole('Admin'), (req, res) => {
   if (!user) return res.status(404).json({ error: 'User not found' });
   const profile = db.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(id) || null;
   const studentProfile = db.prepare('SELECT * FROM student_profiles WHERE user_id = ?').get(id) || null;
+  const hasBatchNumber = hasColumn('batches', 'batch_number');
+  const hasBatchTitle = hasColumn('batches', 'title');
+  const hasBatchType = hasColumn('batches', 'batch_type');
+
+  const batchNumberExpr = hasBatchNumber ? 'b.batch_number' : 'CAST(b.id AS TEXT)';
+  const batchTitleExpr = hasBatchTitle ? 'COALESCE(b.title, b.name)' : 'b.name';
+  const batchTypeExpr = hasBatchType ? 'COALESCE(b.batch_type, b.session_type)' : 'b.session_type';
+
   const connectedBatches = db
     .prepare(
       `SELECT
         b.id,
-        b.batch_number,
-        COALESCE(b.title, b.name) AS batch_title,
-        COALESCE(b.batch_type, b.session_type) AS batch_type
+        ${batchNumberExpr} AS batch_number,
+        ${batchTitleExpr} AS batch_title,
+        ${batchTypeExpr} AS batch_type
       FROM batch_members bm
       JOIN batches b ON b.id = bm.batch_id
       WHERE bm.student_id = ?
