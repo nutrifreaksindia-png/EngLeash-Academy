@@ -76,8 +76,8 @@ function joinTimeAllows(session) {
     return { ok: false, code: 'bad_status' };
   }
   const now = Date.now();
-  const start = new Date(session.starts_at).getTime();
-  const end = new Date(session.ends_at).getTime();
+  const start = parseSessionInstantMs(session.starts_at);
+  const end = parseSessionInstantMs(session.ends_at);
   if (Number.isNaN(start) || Number.isNaN(end)) return { ok: false, code: 'invalid_schedule' };
   const earlyMs = Number(process.env.LIVE_JOIN_EARLY_MS || 5 * 60 * 1000);
   if (now < start - earlyMs || now > end) {
@@ -96,6 +96,22 @@ function logSessionEvent(sessionId, userId, eventType, detail) {
   }
 }
 
+function parseSessionInstantMs(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return NaN;
+  const hasTz = /(?:Z|[+-]\d{2}:\d{2})$/i.test(raw);
+  if (hasTz) return new Date(raw).getTime();
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::(\d{2}))?$/.exec(raw);
+  if (!m) return new Date(raw).getTime();
+  const defaultOffsetMin = Number(process.env.LIVE_DEFAULT_TZ_OFFSET_MINUTES || 330);
+  const sign = defaultOffsetMin >= 0 ? '+' : '-';
+  const abs = Math.abs(defaultOffsetMin);
+  const hh = String(Math.floor(abs / 60)).padStart(2, '0');
+  const mm = String(abs % 60).padStart(2, '0');
+  const sec = m[3] || '00';
+  return new Date(`${m[1]}T${m[2]}:${sec}${sign}${hh}:${mm}`).getTime();
+}
+
 function countActiveParticipants(sessionId) {
   const row = db
     .prepare('SELECT COUNT(*) AS n FROM live_session_participants WHERE live_session_id = ? AND left_at IS NULL')
@@ -108,7 +124,7 @@ function reconcileLiveSessionLifecycle(sessionLike) {
   if (sessionLike.status === 'cancelled' || sessionLike.status === 'ended') return sessionLike;
   const active = countActiveParticipants(sessionLike.id);
   const now = Date.now();
-  const endMs = new Date(sessionLike.ends_at || sessionLike.endsAt || '').getTime();
+  const endMs = parseSessionInstantMs(sessionLike.ends_at || sessionLike.endsAt || '');
 
   let nextStatus = sessionLike.status;
   if (!Number.isNaN(endMs) && now > endMs && active === 0) {
@@ -285,6 +301,13 @@ router.get('/sessions/:id/state', auth, (req, res) => {
   }
   const promoted = db.prepare('SELECT user_id FROM live_session_speakers WHERE live_session_id = ?').all(sessionId);
   const hands = db.prepare('SELECT user_id FROM live_session_hands WHERE live_session_id = ?').all(sessionId);
+  const meActive = db
+    .prepare(
+      `SELECT 1 FROM live_session_participants
+       WHERE live_session_id = ? AND user_id = ? AND left_at IS NULL
+       LIMIT 1`
+    )
+    .get(sessionId, req.user.id);
   const recordingConfigured = liveRecording.isRecordingApiConfigured();
   const canSeeRecordingDebug =
     req.user.role === 'Admin' ||
@@ -305,6 +328,7 @@ router.get('/sessions/:id/state', auth, (req, res) => {
     sessionType: session.session_type,
     promotedUserIds: promoted.map((r) => r.user_id),
     handRaisedUserIds: hands.map((r) => r.user_id),
+    participantActive: Boolean(meActive),
     recordingActive: liveRecording.isRecordingActive(sessionId),
     recordingConfigured,
     recordingFailureHint,

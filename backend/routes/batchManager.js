@@ -75,6 +75,22 @@ function formatLocalDate(date) {
   return `${y}-${m}-${d}`;
 }
 
+function parseSessionInstantMs(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return NaN;
+  const hasTz = /(?:Z|[+-]\d{2}:\d{2})$/i.test(raw);
+  if (hasTz) return new Date(raw).getTime();
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::(\d{2}))?$/.exec(raw);
+  if (!m) return new Date(raw).getTime();
+  const defaultOffsetMin = Number(process.env.LIVE_DEFAULT_TZ_OFFSET_MINUTES || 330);
+  const sign = defaultOffsetMin >= 0 ? '+' : '-';
+  const abs = Math.abs(defaultOffsetMin);
+  const hh = String(Math.floor(abs / 60)).padStart(2, '0');
+  const mm = String(abs % 60).padStart(2, '0');
+  const sec = m[3] || '00';
+  return new Date(`${m[1]}T${m[2]}:${sec}${sign}${hh}:${mm}`).getTime();
+}
+
 function nextEligibleSessionDate(afterDateText, daysOfWeek) {
   const base = parseLocalDate(afterDateText);
   if (!base) return null;
@@ -465,7 +481,11 @@ router.get('/:id/sessions', auth, (req, res) => {
            ls.status AS live_status,
            ls.starts_at AS live_starts_at,
            ls.ends_at AS live_ends_at,
-           ls.agora_channel AS live_agora_channel
+           ls.agora_channel AS live_agora_channel,
+           (
+             SELECT COUNT(*) FROM live_session_participants p
+             WHERE p.live_session_id = ls.id AND p.left_at IS NULL
+           ) AS live_active_participants
     FROM batch_sessions bs
     LEFT JOIN live_sessions ls ON ls.batch_session_id = bs.id
     WHERE bs.batch_id = ?
@@ -473,7 +493,20 @@ router.get('/:id/sessions', auth, (req, res) => {
   `
     )
     .all(batchId);
-  res.json(sessions);
+  const reconciled = sessions.map((s) => {
+    if (!s.live_session_id || s.live_status === 'cancelled' || s.live_status === 'ended') return s;
+    const active = Number(s.live_active_participants || 0);
+    const endMs = parseSessionInstantMs(s.live_ends_at);
+    if (active > 0) return { ...s, live_status: 'live' };
+    if (!Number.isNaN(endMs) && Date.now() > endMs) return { ...s, live_status: 'ended' };
+    return { ...s, live_status: 'scheduled' };
+  });
+  reconciled.forEach((s) => {
+    if (s.live_session_id) {
+      db.prepare('UPDATE live_sessions SET status = ? WHERE id = ?').run(s.live_status, s.live_session_id);
+    }
+  });
+  res.json(reconciled);
 });
 
 router.get('/:id/sessions/audit', auth, requireRole('Admin', 'Trainer'), (req, res) => {

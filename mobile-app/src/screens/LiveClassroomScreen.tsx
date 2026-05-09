@@ -639,6 +639,14 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
       try {
         const s = await api.get(`/live/sessions/${liveSessionId}/state`);
         setRoomState(s);
+        if (s?.participantActive === false && !sessionEndedAlertRef.current) {
+          sessionEndedAlertRef.current = true;
+          clearInterval(id);
+          Alert.alert('Meeting ended', 'Host ended the meeting for all participants.', [
+            { text: 'OK', onPress: () => void exitLiveToSessions() },
+          ]);
+          return;
+        }
         if ((s?.status === 'ended' || s?.status === 'cancelled') && !sessionEndedAlertRef.current) {
           sessionEndedAlertRef.current = true;
           clearInterval(id);
