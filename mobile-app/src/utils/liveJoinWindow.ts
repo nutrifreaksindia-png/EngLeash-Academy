@@ -10,7 +10,8 @@ export function joinWindowAllows(args: {
 }): boolean {
   const { liveStatus, startsAt, endsAt } = args;
   const earlyMs = args.earlyMs ?? LIVE_JOIN_EARLY_MS;
-  if (liveStatus !== 'scheduled' && liveStatus !== 'live') return false;
+  if (liveStatus === 'live') return true;
+  if (liveStatus !== 'scheduled') return false;
   if (liveStatus === 'ended' || liveStatus === 'cancelled') return false;
   const now = Date.now();
   const start = new Date(startsAt).getTime();

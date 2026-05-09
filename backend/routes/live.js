@@ -68,10 +68,11 @@ function assertTrainerStaffCanManageLive(req, session) {
 
 /** Scheduled/live: only within [starts_at − early, ends_at]. */
 function joinTimeAllows(session) {
+  if (session.status === 'live') return { ok: true };
   if (session.status === 'ended' || session.status === 'cancelled') {
     return { ok: false, code: 'bad_status' };
   }
-  if (session.status !== 'scheduled' && session.status !== 'live') {
+  if (session.status !== 'scheduled') {
     return { ok: false, code: 'bad_status' };
   }
   const now = Date.now();

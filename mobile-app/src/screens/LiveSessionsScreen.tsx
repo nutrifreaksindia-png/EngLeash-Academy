@@ -34,6 +34,7 @@ export default function LiveSessionsScreen({ navigation }: any) {
   const [sessions, setSessions] = useState<LiveSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [timePulse, setTimePulse] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -58,6 +59,39 @@ export default function LiveSessionsScreen({ navigation }: any) {
     }, [load])
   );
 
+  useFocusEffect(
+    useCallback(() => {
+      const pulseTimer = setInterval(() => {
+        setTimePulse((v) => v + 1);
+      }, 15000);
+
+      const now = Date.now();
+      const candidates: number[] = [];
+      for (const s of sessions) {
+        const startMs = new Date(s.starts_at).getTime();
+        const endMs = new Date(s.ends_at).getTime();
+        if (Number.isNaN(startMs) || Number.isNaN(endMs)) continue;
+        if (s.status !== 'scheduled' && s.status !== 'live') continue;
+        const openAt = startMs - 5 * 60 * 1000;
+        if (openAt > now) candidates.push(openAt);
+        if (endMs > now) candidates.push(endMs);
+      }
+      const nextBoundary = candidates.length > 0 ? Math.min(...candidates) : null;
+      const boundaryTimer =
+        nextBoundary != null
+          ? setTimeout(() => {
+              setRefreshing(true);
+              load();
+            }, Math.max(0, nextBoundary - Date.now()) + 50)
+          : null;
+
+      return () => {
+        clearInterval(pulseTimer);
+        if (boundaryTimer) clearTimeout(boundaryTimer);
+      };
+    }, [sessions, load])
+  );
+
   if (loading) {
     return (
       <View style={styles.container}>
@@ -73,6 +107,7 @@ export default function LiveSessionsScreen({ navigation }: any) {
     <View style={styles.container}>
       <ScreenPageTitle title="My Sessions" />
       <FlatList style={styles.listFlex}
+        extraData={timePulse}
         data={sessions}
         keyExtractor={(item) => String(item.id)}
         refreshControl={
