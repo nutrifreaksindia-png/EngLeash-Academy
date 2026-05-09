@@ -12,8 +12,8 @@ const EXPLICIT_API_BASE = process.env.EXPO_PUBLIC_API_BASE?.trim();
 /** Optional override; do not default to a random LAN IP — wrong IP causes silent timeouts. */
 const DEV_API_HOST_OVERRIDE = process.env.EXPO_PUBLIC_DEV_API_HOST?.trim();
 const DEV_API_PORT = Number(process.env.EXPO_PUBLIC_DEV_API_PORT || 3001);
-const USE_REMOTE_API_IN_DEV = ['1', 'true', 'yes', 'on'].includes(
-  String(process.env.EXPO_PUBLIC_USE_REMOTE_API || '').toLowerCase()
+const USE_LOCAL_API_IN_DEV = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.EXPO_PUBLIC_USE_LOCAL_API || '').toLowerCase()
 );
 
 function hostFromExpoDev(): string | null {
@@ -47,7 +47,8 @@ function resolveDevApiHost(): string {
 
 const devBase = `http://${resolveDevApiHost()}:${DEV_API_PORT}`;
 
-export const API_BASE = EXPLICIT_API_BASE || (__DEV__ ? (USE_REMOTE_API_IN_DEV ? PROD_API_BASE : devBase) : PROD_API_BASE);
+// In dev builds, default to hosted API unless local mode is explicitly enabled.
+export const API_BASE = EXPLICIT_API_BASE || (__DEV__ ? (USE_LOCAL_API_IN_DEV ? devBase : PROD_API_BASE) : PROD_API_BASE);
 
 export const ROLES = ['Admin', 'Trainer', 'Student'] as const;
 export type Role = (typeof ROLES)[number];
