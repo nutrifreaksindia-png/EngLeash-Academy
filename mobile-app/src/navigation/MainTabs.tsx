@@ -28,6 +28,7 @@ import MyAssignmentsScreen from '../screens/MyAssignmentsScreen';
 import AssignmentScreen from '../screens/AssignmentScreen';
 import AccountScreen from '../screens/AccountScreen';
 import SignupScreen from '../screens/SignupScreen';
+import LoginScreen from '../screens/LoginScreen';
 
 const Tab = createBottomTabNavigator();
 const HomeStack = createNativeStackNavigator();
@@ -117,6 +118,7 @@ function AccountStackNavigator() {
   return (
     <AccountStack.Navigator screenOptions={stackOpts}>
       <AccountStack.Screen name="AccountMain" component={AccountScreen} options={{ title: 'My Account' }} />
+      <AccountStack.Screen name="Login" component={LoginScreen} options={{ title: 'Sign in' }} />
       <AccountStack.Screen name="Signup" component={SignupScreen} options={{ title: 'Sign up' }} />
     </AccountStack.Navigator>
   );

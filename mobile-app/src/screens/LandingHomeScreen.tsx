@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -18,6 +18,7 @@ import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { API_BASE } from '../config';
+import { alertPurchaseError, purchaseCourseWithRazorpay } from '../payments/razorpayCoursePurchase';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -76,7 +77,7 @@ function primaryCta(typeRaw?: string) {
   return { label: 'Join Free', kind: 'free' as const };
 }
 
-export default function LandingHomeScreen({ navigation }: any) {
+export default function LandingHomeScreen({ navigation, route }: any) {
   function formatDateFriendly(value: string | null | undefined) {
     if (!value) return '—';
     const d = new Date(value);
@@ -90,9 +91,12 @@ export default function LandingHomeScreen({ navigation }: any) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [enrollingId, setEnrollingId] = useState<number | null>(null);
+  const [purchasingId, setPurchasingId] = useState<number | null>(null);
   const [applyCourse, setApplyCourse] = useState<PublicCourse | null>(null);
   const [openBatches, setOpenBatches] = useState<OpenBatch[]>([]);
   const [openBatchesLoading, setOpenBatchesLoading] = useState(false);
+  const applyResumeKeyRef = useRef<string | null>(null);
+  const purchaseResumeKeyRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -112,7 +116,108 @@ export default function LandingHomeScreen({ navigation }: any) {
     }, [load])
   );
 
-  const goAccount = () => navigation.getParent()?.getParent()?.navigate('Account');
+  /** Load open batches modal for Apply (authenticated). */
+  const openApplyModalForCourse = useCallback((course: PublicCourse) => {
+    setApplyCourse(course);
+    setOpenBatches([]);
+    setOpenBatchesLoading(true);
+    api
+      .get(`/enrollments/courses/${course.id}/open-batches`)
+      .then((data) => setOpenBatches(Array.isArray(data?.batches) ? data.batches : []))
+      .catch((e: any) => Alert.alert('Apply', e?.message || 'Could not load open batches'))
+      .finally(() => setOpenBatchesLoading(false));
+  }, []);
+
+  const goAccount = () => navigation.getParent()?.navigate?.('Account');
+
+  useFocusEffect(
+    useCallback(() => {
+      const rawId = route.params?.applyAfterAuthCourseId;
+      if (!user || rawId == null) return;
+
+      const id = Number(rawId);
+      const nameRaw = route.params?.applyAfterAuthCourseName;
+      const resumeKey = `${user.id}:${id}:${String(nameRaw || '')}`;
+      if (!Number.isFinite(id) || applyResumeKeyRef.current === resumeKey) return;
+      applyResumeKeyRef.current = resumeKey;
+
+      navigation.setParams({
+        applyAfterAuthCourseId: undefined,
+        applyAfterAuthCourseName: undefined,
+      });
+
+      const fromList = courses.find((c) => c.id === id);
+      const course: PublicCourse =
+        fromList ||
+        ({
+          id,
+          name: String(nameRaw || 'Course'),
+          enrollment_type: 'apply',
+        } as PublicCourse);
+      openApplyModalForCourse(course);
+    }, [user, route.params?.applyAfterAuthCourseId, route.params?.applyAfterAuthCourseName, courses, navigation, openApplyModalForCourse])
+  );
+
+  const runPurchaseForCourse = useCallback(
+    async (course: PublicCourse) => {
+      if (!user) return;
+      setPurchasingId(course.id);
+      try {
+        const ok = await purchaseCourseWithRazorpay({
+          courseId: course.id,
+          courseDisplayName: course.name,
+          userEmail: user.email,
+          userName: user.name,
+          userMobileDigits: user.mobile_number ?? undefined,
+        });
+        if (ok) {
+          Alert.alert('Success', 'Payment successful. You now have access to this course.');
+          refreshUser();
+        }
+      } catch (e: unknown) {
+        alertPurchaseError(e);
+      } finally {
+        setPurchasingId(null);
+      }
+    },
+    [user, refreshUser]
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      const rawId = route.params?.purchaseAfterAuthCourseId;
+      if (!user || rawId == null) return;
+
+      const id = Number(rawId);
+      const nameRaw = route.params?.purchaseAfterAuthCourseName;
+      const resumeKey = `purchase:${user.id}:${id}:${String(nameRaw || '')}`;
+      if (!Number.isFinite(id) || purchaseResumeKeyRef.current === resumeKey) return;
+      purchaseResumeKeyRef.current = resumeKey;
+
+      navigation.setParams({
+        purchaseAfterAuthCourseId: undefined,
+        purchaseAfterAuthCourseName: undefined,
+      });
+
+      const fromList = courses.find((c) => c.id === id);
+      const course: PublicCourse =
+        fromList ||
+        ({
+          id,
+          name: String(nameRaw || 'Course'),
+          enrollment_type: 'purchase',
+        } as PublicCourse);
+
+      void runPurchaseForCourse(course);
+    }, [
+      user,
+      route.params?.purchaseAfterAuthCourseId,
+      route.params?.purchaseAfterAuthCourseName,
+      courses,
+      navigation,
+      runPurchaseForCourse,
+    ])
+  );
 
   const enroll = async (course: PublicCourse, typeOverride?: string) => {
     if (!user) {
@@ -145,19 +250,18 @@ export default function LandingHomeScreen({ navigation }: any) {
 
   const onApply = (course: PublicCourse) => {
     if (!user) {
-      Alert.alert('Sign in required', 'Please sign in from the Account tab to continue.', [
-        { text: 'OK', onPress: goAccount },
-      ]);
+      navigation.getParent()?.navigate?.('Account', {
+        screen: 'Signup',
+        params: {
+          redirectAfterSignup: 'apply',
+          courseId: course.id,
+          courseName: course.name,
+        },
+      });
       return;
     }
-    setApplyCourse(course);
-    setOpenBatches([]);
-    setOpenBatchesLoading(true);
-    api
-      .get(`/enrollments/courses/${course.id}/open-batches`)
-      .then((data) => setOpenBatches(Array.isArray(data?.batches) ? data.batches : []))
-      .catch((e: any) => Alert.alert('Apply', e?.message || 'Could not load open batches'))
-      .finally(() => setOpenBatchesLoading(false));
+    applyResumeKeyRef.current = null;
+    openApplyModalForCourse(course);
   };
 
   async function applyToBatch(batchId: number) {
@@ -173,8 +277,19 @@ export default function LandingHomeScreen({ navigation }: any) {
     }
   }
 
-  const onPurchase = () => {
-    Alert.alert('Purchase', 'Online purchase will be available soon. Use Apply or Join Free where applicable, or contact us.');
+  const onPurchase = async (course: PublicCourse) => {
+    if (!user) {
+      navigation.getParent()?.navigate?.('Account', {
+        screen: 'Signup',
+        params: {
+          redirectAfterSignup: 'purchase',
+          courseId: course.id,
+          courseName: course.name,
+        },
+      });
+      return;
+    }
+    await runPurchaseForCourse(course);
   };
 
   const onPrimaryAction = (course: PublicCourse) => {
@@ -184,7 +299,7 @@ export default function LandingHomeScreen({ navigation }: any) {
       return;
     }
     if (cta.kind === 'purchase') {
-      onPurchase();
+      void onPurchase(course);
       return;
     }
     onJoinFree(course);
@@ -219,7 +334,9 @@ export default function LandingHomeScreen({ navigation }: any) {
               </Text>
             ))}
             <Text style={[styles.sectionLabel, { marginTop: 20 }]}>Courses</Text>
-            <Text style={styles.hint}>Browse offerings below. Sign in from Account to enroll.</Text>
+            <Text style={styles.hint}>
+              Browse offerings below. Apply opens sign-up if needed, then open batches. Purchase opens sign-up to pay.
+            </Text>
           </View>
         }
         contentContainerStyle={styles.listContent}
@@ -261,9 +378,11 @@ export default function LandingHomeScreen({ navigation }: any) {
                 <TouchableOpacity
                   style={[styles.btnPrimary, type !== 'free' && primaryCta(item.enrollment_type).kind === 'free' && styles.btnMuted]}
                   onPress={() => onPrimaryAction(item)}
-                  disabled={enrollingId !== null}
+                  disabled={enrollingId !== null || purchasingId !== null}
                 >
-                  <Text style={styles.btnPrimaryText}>{enrollingId === item.id ? '…' : primaryCta(item.enrollment_type).label}</Text>
+                  <Text style={styles.btnPrimaryText}>
+                    {enrollingId === item.id || purchasingId === item.id ? '…' : primaryCta(item.enrollment_type).label}
+                  </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.btnOutline}

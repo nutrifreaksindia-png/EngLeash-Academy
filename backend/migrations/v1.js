@@ -145,6 +145,20 @@ function ensureV1Tables(db) {
       UNIQUE(assignment_id, student_id)
     );
 
+    CREATE TABLE IF NOT EXISTS razorpay_course_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      razorpay_order_id TEXT NOT NULL UNIQUE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+      amount_paise INTEGER NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      status TEXT NOT NULL DEFAULT 'created' CHECK(status IN ('created','paid','failed')),
+      payment_id TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_rp_orders_payment_id ON razorpay_course_orders(payment_id) WHERE payment_id IS NOT NULL;
+
     CREATE INDEX IF NOT EXISTS idx_course_enrollments_user ON course_enrollments(user_id);
     CREATE INDEX IF NOT EXISTS idx_course_enrollments_course ON course_enrollments(course_id);
     CREATE INDEX IF NOT EXISTS idx_course_lessons_course_day ON course_lessons(course_id, day_number, sequence_in_day);

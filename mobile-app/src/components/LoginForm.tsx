@@ -17,11 +17,13 @@ const BRAND_BLUE = '#1a237e';
 type Props = {
   /** Called after successful login (user is in context). */
   onLoggedIn?: () => void;
-  navigation?: { navigate: (name: string) => void };
+  navigation?: { navigate: (name: string, params?: Record<string, unknown>) => void };
   showSignupLink?: boolean;
+  /** Forward apply/purchase resume params when opening Signup from this form. */
+  signupRouteParams?: Record<string, unknown>;
 };
 
-export default function LoginForm({ onLoggedIn, navigation, showSignupLink = true }: Props) {
+export default function LoginForm({ onLoggedIn, navigation, showSignupLink = true, signupRouteParams }: Props) {
   const { login, replaceSessionAndLogin } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -102,7 +104,14 @@ export default function LoginForm({ onLoggedIn, navigation, showSignupLink = tru
         {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Sign In</Text>}
       </TouchableOpacity>
       {showSignupLink && navigation ? (
-        <TouchableOpacity style={styles.signUpLink} onPress={() => navigation.navigate('Signup')}>
+        <TouchableOpacity
+          style={styles.signUpLink}
+          onPress={() =>
+            signupRouteParams && Object.keys(signupRouteParams).length > 0
+              ? navigation.navigate('Signup', signupRouteParams)
+              : navigation.navigate('Signup')
+          }
+        >
           <Text style={styles.signUpText}>New student? Sign up</Text>
         </TouchableOpacity>
       ) : null}

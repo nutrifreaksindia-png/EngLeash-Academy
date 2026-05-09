@@ -1,18 +1,43 @@
 import React from 'react';
 import { KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native';
 import LoginForm from '../components/LoginForm';
+import {
+  navigateLandingResumeCourseAfterAuth,
+  normalizeResumeCourseAuthParams,
+  type ResumeCourseAuthNavParams,
+} from '../navigation/resumeCourseAfterAuth';
 
 const BRAND_BLUE = '#1a237e';
 
-/** Full-screen login (optional entry); primary login is on the Account tab. */
-export default function LoginScreen({ navigation }: any) {
+/** Stack login; used from Account funnel and Apply/Purchase “sign in instead” with resume params. */
+export default function LoginScreen({ navigation, route }: any) {
+  const resume: ResumeCourseAuthNavParams | null = normalizeResumeCourseAuthParams(route?.params);
+  const signupRouteParams = resume
+    ? { redirectAfterSignup: resume.redirectAfterSignup, courseId: resume.courseId, courseName: resume.courseName }
+    : undefined;
+
+  function handleLoggedIn() {
+    const tabNav = navigation.getParent?.()?.getParent?.() ?? navigation.getParent?.();
+    if (navigateLandingResumeCourseAfterAuth(tabNav, resume)) return;
+    if (navigation.canGoBack?.()) {
+      navigation.goBack();
+      return;
+    }
+    navigation.navigate('AccountMain');
+  }
+
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       style={styles.container}
     >
       <View style={styles.inner}>
-        <LoginForm navigation={navigation} />
+        <LoginForm
+          navigation={navigation}
+          signupRouteParams={signupRouteParams}
+          showSignupLink
+          onLoggedIn={handleLoggedIn}
+        />
       </View>
     </KeyboardAvoidingView>
   );

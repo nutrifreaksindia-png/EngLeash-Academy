@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { api, getToken, setToken, clearToken, setOnSessionReplaced, logoutFromServer } from '../api/client';
 
-export type User = { id: number; email: string; name: string; role: string };
+export type User = { id: number; email: string; name: string; role: string; mobile_number?: string | null };
 
 type AuthState = { user: User | null; loading: boolean };
 

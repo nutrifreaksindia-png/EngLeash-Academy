@@ -424,8 +424,13 @@ export default function BatchesPage({
   function openStartModal(batch, evt) {
     evt.stopPropagation();
     if (!batch.course_id) {
-      window.alert('Link a course before starting the batch.');
-      return;
+      const d = Number(batch.duration_days);
+      if (!Number.isFinite(d) || d < 1) {
+        window.alert(
+          'Without a linked course, open Course & duration and set Session count (number of sessions) before starting.'
+        );
+        return;
+      }
     }
     const p = parseTrainingSchedule(batch.training_schedule_json);
     if (!p.daysOfWeek || p.daysOfWeek.length === 0) {
@@ -519,7 +524,7 @@ export default function BatchesPage({
     <div className="stack">
       <SectionCard
         title="Batches"
-        subtitle="Batch numbers must be unique per type. Link a course, set Sessions (weekdays + times), then start the batch."
+        subtitle="Batch numbers must be unique per type. Set Sessions (weekdays + times). Optionally link a course — if not, set session count in Course & duration before starting."
         actions={
           <button type="button" onClick={() => setCreateModalOpen(true)}>
             Create batch
@@ -964,8 +969,13 @@ export default function BatchesPage({
             <input name="plannedStartDate" type="date" />
           </label>
           <label className="batchCreateLabel">
-            Number of days (optional)
-            <input name="durationDays" type="number" min={1} placeholder="Overrides course length when set" />
+            Number of sessions (optional — required if no course linked)
+            <input
+              name="durationDays"
+              type="number"
+              min={1}
+              placeholder="How many sessions when starting without a course"
+            />
           </label>
           <label className="batchCreateLabel">
             Trainer (optional)
@@ -1009,12 +1019,15 @@ export default function BatchesPage({
             <input
               type="number"
               min={1}
-              placeholder="Leave empty to use course duration"
+              placeholder="With a course: overrides its length. Without a course: required to start."
               value={durationOverride}
               onChange={(e) => setDurationOverride(e.target.value)}
             />
           </label>
-          <p className="muted fieldHint">Clear override to use the linked course duration when starting.</p>
+          <p className="muted fieldHint">
+            With a linked course, leave empty to use the course length. With no course, set a positive number here before
+            starting the batch.
+          </p>
           <div className="row">
             <button type="button" onClick={handleSaveCourse}>
               Save

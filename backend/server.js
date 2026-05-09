@@ -135,6 +135,7 @@ const videoRoutes = require('./routes/videos');
 const studyMaterialRoutes = require('./routes/studyMaterials');
 const worksheetRoutes = require('./routes/worksheets');
 const assignmentRoutes = require('./routes/assignments');
+const { router: paymentRoutes, razorpayWebhookHandler } = require('./routes/payments');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -143,6 +144,9 @@ const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 
 app.use(cors());
+/** Razorpay webhooks must receive the raw JSON body for signature verification — register before express.json(). */
+app.post('/api/payments/razorpay/webhook', express.raw({ type: 'application/json' }), razorpayWebhookHandler);
+
 app.use(express.json());
 app.use('/uploads', express.static(uploadsDir));
 
@@ -159,6 +163,7 @@ app.use('/api/videos', videoRoutes);
 app.use('/api/study-materials', studyMaterialRoutes);
 app.use('/api/worksheets', worksheetRoutes);
 app.use('/api/assignments', assignmentRoutes);
+app.use('/api/payments', paymentRoutes);
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 app.get('/api/health/details', (req, res) => {

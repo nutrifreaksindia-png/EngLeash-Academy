@@ -33,7 +33,14 @@ router.post('/enroll', auth, requireRole('Trainer', 'Student', 'Lab'), (req, res
   if (course.course_status && course.course_status !== 'Active') {
     return res.status(400).json({ error: 'Course is not active' });
   }
-  const type = enrollmentType || course.enrollment_type || 'free';
+  const courseType = String(course.enrollment_type || 'free').toLowerCase();
+  if (enrollmentType != null && String(enrollmentType).trim() !== '') {
+    const requested = String(enrollmentType).toLowerCase();
+    if (requested !== courseType) {
+      return res.status(400).json({ error: 'Enrollment type does not match this course' });
+    }
+  }
+  const type = courseType;
   const finalStatus = type === 'free' ? 'approved' : 'pending';
   try {
     db.prepare(`

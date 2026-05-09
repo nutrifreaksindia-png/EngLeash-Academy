@@ -4,6 +4,7 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { City, Country, State } from 'country-state-city';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { useAuth } from '../context/AuthContext';
+import { navigateLandingResumeCourseAfterAuth, normalizeResumeCourseAuthParams } from '../navigation/resumeCourseAfterAuth';
 
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
@@ -12,7 +13,7 @@ const POLICY_URL = 'https://engleashacademy.com/policies/';
 const ALL_COUNTRIES = Country.getAllCountries().sort((a, b) => a.name.localeCompare(b.name));
 const DEFAULT_COUNTRY_ISO = ALL_COUNTRIES.find((c) => c.isoCode === 'IN')?.isoCode || ALL_COUNTRIES[0]?.isoCode || '';
 
-export default function SignupScreen({ navigation }: any) {
+export default function SignupScreen({ navigation, route }: any) {
   const { signup } = useAuth();
   const [loading, setLoading] = useState(false);
   const [showBirthDatePicker, setShowBirthDatePicker] = useState(false);
@@ -98,14 +99,17 @@ export default function SignupScreen({ navigation }: any) {
     setLoading(true);
     try {
       await signup(payload);
+      const resume = normalizeResumeCourseAuthParams(route?.params);
       Alert.alert('Welcome', 'Your account was created successfully.', [
         {
           text: 'OK',
           onPress: () => {
+            const tabNav = navigation.getParent?.()?.getParent?.() ?? navigation.getParent?.();
+            if (navigateLandingResumeCourseAfterAuth(tabNav, resume)) return;
             if (navigation?.canGoBack?.()) {
               navigation.goBack();
             } else {
-              navigation?.navigate?.('Account');
+              navigation?.navigate?.('AccountMain');
             }
           },
         },
@@ -385,6 +389,20 @@ export default function SignupScreen({ navigation }: any) {
         {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitText}>Create account</Text>}
       </TouchableOpacity>
 
+      <TouchableOpacity
+        style={styles.loginLinkBelow}
+        onPress={() => {
+          const resume = normalizeResumeCourseAuthParams(route?.params);
+          const params =
+            resume != null
+              ? { redirectAfterSignup: resume.redirectAfterSignup, courseId: resume.courseId, courseName: resume.courseName }
+              : undefined;
+          navigation.navigate('Login', params ?? {});
+        }}
+      >
+        <Text style={styles.loginLinkBelowText}>Already have an account? Sign in</Text>
+      </TouchableOpacity>
+
       <Modal visible={showCodeModal} animationType="slide" transparent onRequestClose={() => setShowCodeModal(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
@@ -559,4 +577,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   submitText: { color: '#fff', fontWeight: '700' },
+  loginLinkBelow: { marginTop: 16, alignItems: 'center', paddingBottom: 8 },
+  loginLinkBelowText: { color: BRAND_BLUE, fontWeight: '700', fontSize: 15 },
 });

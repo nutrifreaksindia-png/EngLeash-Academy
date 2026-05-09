@@ -5,6 +5,7 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import type { PublicCourse } from './LandingHomeScreen';
 import { API_BASE } from '../config';
+import { alertPurchaseError, purchaseCourseWithRazorpay } from '../payments/razorpayCoursePurchase';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -126,13 +127,41 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
   const disc = course.discount_inr ?? 0;
   const eff = Math.max(0, fee - disc);
   const cta = primaryCta(course.enrollment_type);
-  const onPrimaryAction = () => {
+  const onPrimaryAction = async () => {
     if (cta.kind === 'apply') {
       void enroll('apply');
       return;
     }
     if (cta.kind === 'purchase') {
-      Alert.alert('Purchase', 'Online purchase will be available soon.');
+      if (!user) {
+        navigation.getParent()?.navigate?.('Account', {
+          screen: 'Signup',
+          params: {
+            redirectAfterSignup: 'purchase',
+            courseId: course.id,
+            courseName: course.name,
+          },
+        });
+        return;
+      }
+      setBusy(true);
+      try {
+        const ok = await purchaseCourseWithRazorpay({
+          courseId: course.id,
+          courseDisplayName: course.name,
+          userEmail: user.email,
+          userName: user.name,
+          userMobileDigits: user.mobile_number ?? undefined,
+        });
+        if (ok) {
+          Alert.alert('Success', 'Payment successful. You now have access to this course.');
+          refreshUser();
+        }
+      } catch (e: unknown) {
+        alertPurchaseError(e);
+      } finally {
+        setBusy(false);
+      }
       return;
     }
     void enroll('free');
@@ -190,7 +219,7 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
         ) : null}
 
         <View style={styles.btnRow}>
-          <TouchableOpacity style={styles.btnPrimary} onPress={onPrimaryAction} disabled={busy}>
+          <TouchableOpacity style={styles.btnPrimary} onPress={() => void onPrimaryAction()} disabled={busy}>
             <Text style={styles.btnPrimaryText}>{busy ? 'Please wait…' : cta.label}</Text>
           </TouchableOpacity>
           <TouchableOpacity

@@ -107,10 +107,6 @@ function nextEligibleSessionDate(afterDateText, daysOfWeek) {
 function generateSessionsForBatch(batchId, startDate, actorId) {
   const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
   if (!batch) throw new Error('Batch not found');
-  if (!batch.course_id) throw new Error('Batch has no course selected');
-
-  const course = db.prepare('SELECT id, duration_days, lesson_schedule_json FROM courses WHERE id = ?').get(batch.course_id);
-  if (!course) throw new Error('Course not found');
 
   const schedule = batch.training_schedule_json ? JSON.parse(batch.training_schedule_json) : {};
   const daysOfWeek = Array.isArray(schedule.daysOfWeek) && schedule.daysOfWeek.length
@@ -119,24 +115,43 @@ function generateSessionsForBatch(batchId, startDate, actorId) {
   const startTime = schedule.startTime || null;
   const endTime = schedule.endTime || null;
 
-  const mapRows = db.prepare(`
-    SELECT cl.day_number, ll.id AS lesson_id, ll.title AS lesson_title
-    FROM course_lessons cl
-    JOIN lesson_library ll ON ll.id = cl.lesson_id
-    WHERE cl.course_id = ?
-    ORDER BY cl.day_number, cl.sequence_in_day
-  `).all(course.id);
   const lessonByDay = new Map();
-  mapRows.forEach((r) => {
-    if (!lessonByDay.has(r.day_number)) lessonByDay.set(r.day_number, r);
-  });
+  /** How many numbered session days (N teaching meetings) to create. */
+  let durationCap = null;
+
+  if (batch.course_id) {
+    const course = db.prepare('SELECT id, duration_days, lesson_schedule_json FROM courses WHERE id = ?').get(
+      batch.course_id
+    );
+    if (!course) throw new Error('Course not found');
+
+    const mapRows = db.prepare(`
+      SELECT cl.day_number, ll.id AS lesson_id, ll.title AS lesson_title
+      FROM course_lessons cl
+      JOIN lesson_library ll ON ll.id = cl.lesson_id
+      WHERE cl.course_id = ?
+      ORDER BY cl.day_number, cl.sequence_in_day
+    `).all(course.id);
+    mapRows.forEach((r) => {
+      if (!lessonByDay.has(r.day_number)) lessonByDay.set(r.day_number, r);
+    });
+
+    durationCap =
+      batch.duration_days != null && Number(batch.duration_days) > 0
+        ? Number(batch.duration_days)
+        : Number(course.duration_days || 1);
+  } else {
+    const n =
+      batch.duration_days != null && Number(batch.duration_days) > 0 ? Number(batch.duration_days) : null;
+    if (!Number.isFinite(n) || n < 1) {
+      throw new Error(
+        'Set session count on the batch (Course & duration dialog) before starting without a linked course.'
+      );
+    }
+    durationCap = n;
+  }
 
   db.prepare('DELETE FROM batch_sessions WHERE batch_id = ?').run(batchId);
-
-  const durationCap =
-    batch.duration_days != null && Number(batch.duration_days) > 0
-      ? Number(batch.duration_days)
-      : Number(course.duration_days || 1);
   let day = 1;
   const startCursor = parseLocalDate(startDate);
   if (!startCursor) throw new Error('startDate must be YYYY-MM-DD');
