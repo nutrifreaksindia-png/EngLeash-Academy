@@ -188,6 +188,51 @@ function lessonByDayMapForCourse(courseId) {
   return map;
 }
 
+function isBatchTeachingSlotConsumed(row) {
+  if (row.status === 'completed') return true;
+  const endInstant = combineDateTime(row.session_date, row.ends_at);
+  const endMs = parseSessionInstantMs(row.live_ends_at || endInstant || '');
+  if (!Number.isNaN(endMs) && Date.now() > endMs) return true;
+  const ls = String(row.live_status || '').toLowerCase();
+  if (ls === 'ended' || ls === 'cancelled') return true;
+  return false;
+}
+
+/** After cancellations: walk non-cancelled sessions in calendar order. Each slot consumes one curriculum day.
+ * Past/completed slots keep stored lessons; future scheduled slots get lesson(courseDay). */
+function remapLessonsForBatch(batchId, courseId) {
+  const lessonMap = lessonByDayMapForCourse(courseId);
+  const rows = db
+    .prepare(
+      `
+    SELECT bs.id, bs.status, bs.session_date, bs.session_day,
+           ls.ends_at AS live_ends_at, ls.status AS live_status
+    FROM batch_sessions bs
+    LEFT JOIN live_sessions ls ON ls.batch_session_id = bs.id
+    WHERE bs.batch_id = ? AND bs.status != 'cancelled'
+    ORDER BY bs.session_date ASC, bs.session_day ASC
+  `
+    )
+    .all(batchId);
+  let curriculumDay = 1;
+  const upd = db.prepare(`
+    UPDATE batch_sessions
+    SET lesson_id = ?, lesson_title = ?, updated_at = datetime('now')
+    WHERE id = ?
+  `);
+  for (const row of rows) {
+    const mapped = lessonMap.get(curriculumDay);
+    const title =
+      String(mapped?.lesson_title || '').trim() || `Day ${String(curriculumDay).padStart(2, '0')}`;
+    const consumed = isBatchTeachingSlotConsumed(row);
+    const shouldRewrite = row.status === 'scheduled' && !consumed;
+    if (shouldRewrite) {
+      upd.run(mapped?.lesson_id || null, title, row.id);
+    }
+    curriculumDay += 1;
+  }
+}
+
 router.get('/', auth, (req, res) => {
   const isAdmin = req.user.role === 'Admin';
   let rows;
@@ -776,7 +821,6 @@ router.post('/:id/sessions/:sessionId/cancel', auth, requireRole('Admin', 'Train
   const session = db.prepare('SELECT * FROM batch_sessions WHERE id = ? AND batch_id = ?').get(sessionId, batchId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
   const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
-  const lessonMap = lessonByDayMapForCourse(batch?.course_id);
   const schedule = batch?.training_schedule_json ? JSON.parse(batch.training_schedule_json) : {};
   const daysOfWeek = Array.isArray(schedule.daysOfWeek) && schedule.daysOfWeek.length
     ? schedule.daysOfWeek
@@ -791,12 +835,11 @@ router.post('/:id/sessions/:sessionId/cancel', auth, requireRole('Admin', 'Train
 
     db.prepare(`UPDATE live_sessions SET status = 'cancelled' WHERE batch_session_id = ?`).run(sessionId);
 
-    const scheduledCount = db.prepare(`
-      SELECT COUNT(*) AS n
-      FROM batch_sessions
-      WHERE batch_id = ? AND status = 'scheduled'
-    `).get(batchId);
-    const nextEffectiveDay = Number(scheduledCount?.n || 0) + 1;
+    const maxDay =
+      Number(
+        db.prepare('SELECT COALESCE(MAX(session_day), 0) AS max_day FROM batch_sessions WHERE batch_id = ?').get(batchId)
+          ?.max_day || 0
+      );
 
     const lastScheduledByDate = db.prepare(`
       SELECT session_date
@@ -808,24 +851,20 @@ router.post('/:id/sessions/:sessionId/cancel', auth, requireRole('Admin', 'Train
     const anchorDate = lastScheduledByDate?.session_date || session.session_date;
     const appendDate = nextEligibleSessionDate(anchorDate, daysOfWeek);
     if (appendDate) {
-      const mapped = lessonMap.get(nextEffectiveDay);
       db.prepare(`
         INSERT INTO batch_sessions (batch_id, session_day, lesson_id, lesson_title, session_date, starts_at, ends_at, status, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', datetime('now'))
+        VALUES (?, ?, NULL, ?, ?, ?, ?, 'scheduled', datetime('now'))
       `).run(
         batchId,
-        Number(
-          db
-            .prepare('SELECT COALESCE(MAX(session_day), 0) AS max_day FROM batch_sessions WHERE batch_id = ?')
-            .get(batchId)?.max_day || 0
-        ) + 1,
-        mapped?.lesson_id || null,
-        String(mapped?.lesson_title || '').trim() || `Day ${String(nextEffectiveDay).padStart(2, '0')}`,
+        maxDay + 1,
+        '',
         appendDate,
         session.starts_at || null,
         session.ends_at || null
       );
     }
+
+    remapLessonsForBatch(batchId, batch?.course_id || null);
   });
   tx();
 
