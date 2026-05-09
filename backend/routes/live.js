@@ -180,6 +180,7 @@ router.get('/sessions', auth, (req, res) => {
   if (role === 'Admin') {
     rows = db.prepare(`
       SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId,
+             bs.session_day AS session_day,
              CASE
                WHEN ls.batch_session_id IS NOT NULL AND bs.session_day IS NOT NULL THEN printf('Day %02d', bs.session_day)
                ELSE ls.title
@@ -196,6 +197,7 @@ router.get('/sessions', auth, (req, res) => {
   } else if (role === 'Trainer') {
     rows = db.prepare(`
       SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId,
+             bs.session_day AS session_day,
              CASE
                WHEN ls.batch_session_id IS NOT NULL AND bs.session_day IS NOT NULL THEN printf('Day %02d', bs.session_day)
                ELSE ls.title
@@ -215,6 +217,7 @@ router.get('/sessions', auth, (req, res) => {
   } else {
     rows = db.prepare(`
       SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId,
+             bs.session_day AS session_day,
              CASE
                WHEN ls.batch_session_id IS NOT NULL AND bs.session_day IS NOT NULL THEN printf('Day %02d', bs.session_day)
                ELSE ls.title

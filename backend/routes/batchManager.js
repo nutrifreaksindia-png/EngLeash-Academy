@@ -120,7 +120,7 @@ function generateSessionsForBatch(batchId, startDate, actorId) {
   const endTime = schedule.endTime || null;
 
   const mapRows = db.prepare(`
-    SELECT cl.day_number, ll.id AS lesson_id
+    SELECT cl.day_number, ll.id AS lesson_id, ll.title AS lesson_title
     FROM course_lessons cl
     JOIN lesson_library ll ON ll.id = cl.lesson_id
     WHERE cl.course_id = ?
@@ -149,7 +149,15 @@ function generateSessionsForBatch(batchId, startDate, actorId) {
       db.prepare(`
         INSERT INTO batch_sessions (batch_id, session_day, lesson_id, lesson_title, session_date, starts_at, ends_at, status, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', datetime('now'))
-      `).run(batchId, day, mapped?.lesson_id || null, `Day ${String(day).padStart(2, '0')}`, dateText, startTime, endTime);
+      `).run(
+        batchId,
+        day,
+        mapped?.lesson_id || null,
+        String(mapped?.lesson_title || '').trim() || `Day ${String(day).padStart(2, '0')}`,
+        dateText,
+        startTime,
+        endTime
+      );
       day += 1;
     }
     cursor.setDate(cursor.getDate() + 1);
@@ -157,6 +165,27 @@ function generateSessionsForBatch(batchId, startDate, actorId) {
 
   db.prepare("UPDATE batches SET actual_start_date = ?, batch_status = 'started' WHERE id = ?").run(startDate, batchId);
   return db.prepare('SELECT * FROM batch_sessions WHERE batch_id = ? ORDER BY session_day').all(batchId);
+}
+
+function lessonByDayMapForCourse(courseId) {
+  if (!courseId) return new Map();
+  const rows = db.prepare(`
+    SELECT cl.day_number, ll.id AS lesson_id, ll.title AS lesson_title
+    FROM course_lessons cl
+    JOIN lesson_library ll ON ll.id = cl.lesson_id
+    WHERE cl.course_id = ?
+    ORDER BY cl.day_number, cl.sequence_in_day
+  `).all(courseId);
+  const map = new Map();
+  rows.forEach((r) => {
+    if (!map.has(r.day_number)) {
+      map.set(Number(r.day_number), {
+        lesson_id: r.lesson_id,
+        lesson_title: String(r.lesson_title || '').trim(),
+      });
+    }
+  });
+  return map;
 }
 
 router.get('/', auth, (req, res) => {
@@ -477,6 +506,7 @@ router.get('/:id/sessions', auth, (req, res) => {
     .prepare(
       `
     SELECT bs.*,
+           COALESCE(ll.title, bs.lesson_title) AS lesson_title,
            ls.id AS live_session_id,
            ls.status AS live_status,
            ls.starts_at AS live_starts_at,
@@ -487,6 +517,7 @@ router.get('/:id/sessions', auth, (req, res) => {
              WHERE p.live_session_id = ls.id AND p.left_at IS NULL
            ) AS live_active_participants
     FROM batch_sessions bs
+    LEFT JOIN lesson_library ll ON ll.id = bs.lesson_id
     LEFT JOIN live_sessions ls ON ls.batch_session_id = bs.id
     WHERE bs.batch_id = ?
     ORDER BY bs.session_day
@@ -719,59 +750,74 @@ router.post('/:id/sessions/:sessionId/cancel', auth, requireRole('Admin', 'Train
 
   const session = db.prepare('SELECT * FROM batch_sessions WHERE id = ? AND batch_id = ?').get(sessionId, batchId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
-  db.prepare(`
-    UPDATE batch_sessions
-    SET status = 'cancelled', cancellation_reason = ?, cancelled_by = ?, updated_at = datetime('now')
-    WHERE id = ?
-  `).run(reason, req.user.id, sessionId);
-
-  db.prepare(`UPDATE live_sessions SET status = 'cancelled' WHERE batch_session_id = ?`).run(sessionId);
-
-  liveRecording.forceStopForBatchSessionLink(sessionId);
-
-  const tail = db.prepare(`
-    SELECT * FROM batch_sessions
-    WHERE batch_id = ? AND session_day > ? AND status = 'scheduled'
-    ORDER BY session_day
-  `).all(batchId, session.session_day);
-  tail.forEach((row) => {
-    db.prepare('UPDATE batch_sessions SET session_day = ?, updated_at = datetime(\'now\') WHERE id = ?').run(
-      row.session_day - 1,
-      row.id
-    );
-  });
-
   const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  const lessonMap = lessonByDayMapForCourse(batch?.course_id);
   const schedule = batch?.training_schedule_json ? JSON.parse(batch.training_schedule_json) : {};
   const daysOfWeek = Array.isArray(schedule.daysOfWeek) && schedule.daysOfWeek.length
     ? schedule.daysOfWeek
     : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-  const lastScheduled = db.prepare(`
-    SELECT session_day, session_date
-    FROM batch_sessions
-    WHERE batch_id = ? AND status = 'scheduled'
-    ORDER BY session_day DESC
-    LIMIT 1
-  `).get(batchId);
+  const tx = db.transaction(() => {
+    db.prepare(`
+      UPDATE batch_sessions
+      SET status = 'cancelled', cancellation_reason = ?, cancelled_by = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(reason, req.user.id, sessionId);
 
-  if (lastScheduled?.session_day && lastScheduled?.session_date) {
-    const nextDate = nextEligibleSessionDate(lastScheduled.session_date, daysOfWeek);
-    if (nextDate) {
+    db.prepare(`UPDATE live_sessions SET status = 'cancelled' WHERE batch_session_id = ?`).run(sessionId);
+
+    const tail = db.prepare(`
+      SELECT id, session_day
+      FROM batch_sessions
+      WHERE batch_id = ? AND session_day > ? AND status = 'scheduled'
+      ORDER BY session_day ASC
+    `).all(batchId, session.session_day);
+
+    let nextDay = Number(session.session_day);
+    const upd = db.prepare(`
+      UPDATE batch_sessions
+      SET session_day = ?, lesson_id = ?, lesson_title = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `);
+    for (const row of tail) {
+      const mapped = lessonMap.get(nextDay);
+      upd.run(
+        nextDay,
+        mapped?.lesson_id || null,
+        String(mapped?.lesson_title || '').trim() || `Day ${String(nextDay).padStart(2, '0')}`,
+        row.id
+      );
+      nextDay += 1;
+    }
+
+    const lastScheduledByDate = db.prepare(`
+      SELECT session_date
+      FROM batch_sessions
+      WHERE batch_id = ? AND status = 'scheduled'
+      ORDER BY session_date DESC, session_day DESC
+      LIMIT 1
+    `).get(batchId);
+    const anchorDate = lastScheduledByDate?.session_date || session.session_date;
+    const appendDate = nextEligibleSessionDate(anchorDate, daysOfWeek);
+    if (appendDate) {
+      const mapped = lessonMap.get(nextDay);
       db.prepare(`
         INSERT INTO batch_sessions (batch_id, session_day, lesson_id, lesson_title, session_date, starts_at, ends_at, status, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', datetime('now'))
       `).run(
         batchId,
-        Number(lastScheduled.session_day) + 1,
-        null,
-        `Day ${String(Number(lastScheduled.session_day) + 1).padStart(2, '0')}`,
-        nextDate,
+        nextDay,
+        mapped?.lesson_id || null,
+        String(mapped?.lesson_title || '').trim() || `Day ${String(nextDay).padStart(2, '0')}`,
+        appendDate,
         session.starts_at || null,
         session.ends_at || null
       );
     }
-  }
+  });
+  tx();
+
+  liveRecording.forceStopForBatchSessionLink(sessionId);
 
   try {
     ensureLiveSessionsForBatch(batchId);

@@ -23,6 +23,7 @@ import AdminCourseManagerScreen from '../screens/AdminCourseManagerScreen';
 import LiveSessionsScreen from '../screens/LiveSessionsScreen';
 import LiveClassroomScreen from '../screens/LiveClassroomScreen';
 import LiveScheduleScreen from '../screens/LiveScheduleScreen';
+import SessionRecordingsScreen from '../screens/SessionRecordingsScreen';
 import MyAssignmentsScreen from '../screens/MyAssignmentsScreen';
 import AssignmentScreen from '../screens/AssignmentScreen';
 import AccountScreen from '../screens/AccountScreen';
@@ -92,6 +93,11 @@ function SessionsStackNavigator() {
         name="SessionRecordingPlayer"
         component={VideoPlayerScreen}
         options={{ title: 'Recording', headerShown: false }}
+      />
+      <SessionsStack.Screen
+        name="SessionRecordings"
+        component={SessionRecordingsScreen}
+        options={{ title: 'Recordings' }}
       />
       <SessionsStack.Screen name="LiveSchedule" component={LiveScheduleScreen} options={{ title: 'Schedule live' }} />
     </SessionsStack.Navigator>

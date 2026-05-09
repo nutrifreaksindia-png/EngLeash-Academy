@@ -72,6 +72,25 @@ function formatDateTimeFriendly(value) {
   });
 }
 
+function formatTimeValue(value) {
+  if (!value) return '—';
+  const s = String(value).trim();
+  if (/^\d{2}:\d{2}:\d{2}$/.test(s)) return s.slice(0, 5);
+  if (/^\d{2}:\d{2}$/.test(s)) return s;
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) {
+    return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+  return s;
+}
+
+function getSessionDisplayStatus(s) {
+  if (s?.status === 'cancelled') return 'Cancelled';
+  if (s?.live_status === 'live') return 'Live';
+  if (s?.live_status === 'ended' || s?.status === 'completed') return 'Ended';
+  return 'Scheduled';
+}
+
 export default function BatchesPage({
   onCreateBatch,
   onUpdateBatch,
@@ -790,9 +809,9 @@ export default function BatchesPage({
                     <tr>
                       <th>Day</th>
                       <th>Date</th>
+                      <th>Time</th>
                       <th>Lesson</th>
                       <th>Status</th>
-                      <th>Live</th>
                       <th />
                     </tr>
                   </thead>
@@ -801,34 +820,31 @@ export default function BatchesPage({
                       <tr key={s.id}>
                         <td>{s.session_day}</td>
                         <td>{formatDateFriendly(s.session_date)}</td>
-                        <td>{s.lesson_title}</td>
+                        <td>{`${formatTimeValue(s.starts_at)} - ${formatTimeValue(s.ends_at)}`}</td>
+                        <td>{s.lesson_title || '—'}</td>
                         <td>
-                          <span className={`badge ${s.status}`}>{s.status}</span>
+                          <span className={`badge ${String(getSessionDisplayStatus(s)).toLowerCase()}`}>
+                            {getSessionDisplayStatus(s)}
+                          </span>
                         </td>
                         <td>
-                          {canJoinLiveSession(s) ? (
+                          {s.live_session_id ? (
                             <button
                               type="button"
                               className="secondaryBtn"
+                              disabled={!canJoinLiveSession(s)}
                               onClick={() => navigate(`/live/${s.live_session_id}`)}
+                              title={canJoinLiveSession(s) ? 'Join now' : 'Join window is not open yet'}
                             >
                               Join live
                             </button>
-                          ) : s.live_session_id ? (
-                            <span className="muted" title={s.live_status || ''}>
-                              {s.live_status || '—'}
-                            </span>
-                          ) : (
-                            <span className="muted">—</span>
-                          )}
-                        </td>
-                        <td>
+                          ) : null}
                           {s.status === 'scheduled' ? (
                             <button type="button" className="dangerBtn" onClick={() => openCancelDialog(s.id)}>
                               Cancel
                             </button>
                           ) : (
-                            <span className="muted">—</span>
+                            !s.live_session_id ? <span className="muted">—</span> : null
                           )}
                         </td>
                       </tr>
