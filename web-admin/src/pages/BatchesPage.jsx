@@ -91,6 +91,10 @@ function getSessionDisplayStatus(s) {
   return 'Scheduled';
 }
 
+function canCancelScheduledSession(s) {
+  return s?.status === 'scheduled' && getSessionDisplayStatus(s) !== 'Ended';
+}
+
 export default function BatchesPage({
   onCreateBatch,
   onUpdateBatch,
@@ -818,7 +822,7 @@ export default function BatchesPage({
                   <tbody>
                     {(batchSessions || []).map((s) => (
                       <tr key={s.id}>
-                        <td>{s.display_day ?? s.session_day}</td>
+                        <td>{s.display_day != null ? s.display_day : '—'}</td>
                         <td>{formatDateFriendly(s.session_date)}</td>
                         <td>{`${formatTimeValue(s.starts_at)} - ${formatTimeValue(s.ends_at)}`}</td>
                         <td>{s.lesson_title || '—'}</td>
@@ -841,7 +845,7 @@ export default function BatchesPage({
                                 Join live
                               </button>
                             ) : null}
-                            {s.status === 'scheduled' ? (
+                            {canCancelScheduledSession(s) ? (
                               <button type="button" className="dangerBtn" onClick={() => openCancelDialog(s.id)}>
                                 Cancel
                               </button>

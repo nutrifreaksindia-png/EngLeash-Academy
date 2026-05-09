@@ -180,7 +180,10 @@ router.get('/sessions', auth, (req, res) => {
   if (role === 'Admin') {
     rows = db.prepare(`
       SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId,
+             bs.session_date AS session_date,
+             bs.cancellation_reason AS cancellation_reason,
              CASE
+               WHEN bs.status = 'cancelled' THEN NULL
                WHEN bs.id IS NOT NULL THEN (
                  SELECT COUNT(*)
                  FROM batch_sessions bs2
@@ -191,7 +194,14 @@ router.get('/sessions', auth, (req, res) => {
                ELSE NULL
              END AS session_day,
              CASE
-               WHEN ls.batch_session_id IS NOT NULL AND bs.session_day IS NOT NULL THEN printf('Day %02d', bs.session_day)
+               WHEN bs.status = 'cancelled' THEN ''
+               WHEN bs.id IS NOT NULL THEN printf('Day %02d', (
+                 SELECT COUNT(*)
+                 FROM batch_sessions bs3
+                 WHERE bs3.batch_id = ls.batch_id
+                   AND bs3.status != 'cancelled'
+                   AND bs3.session_day <= bs.session_day
+               ))
                ELSE ls.title
              END AS title,
              ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
@@ -206,7 +216,10 @@ router.get('/sessions', auth, (req, res) => {
   } else if (role === 'Trainer') {
     rows = db.prepare(`
       SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId,
+             bs.session_date AS session_date,
+             bs.cancellation_reason AS cancellation_reason,
              CASE
+               WHEN bs.status = 'cancelled' THEN NULL
                WHEN bs.id IS NOT NULL THEN (
                  SELECT COUNT(*)
                  FROM batch_sessions bs2
@@ -217,7 +230,14 @@ router.get('/sessions', auth, (req, res) => {
                ELSE NULL
              END AS session_day,
              CASE
-               WHEN ls.batch_session_id IS NOT NULL AND bs.session_day IS NOT NULL THEN printf('Day %02d', bs.session_day)
+               WHEN bs.status = 'cancelled' THEN ''
+               WHEN bs.id IS NOT NULL THEN printf('Day %02d', (
+                 SELECT COUNT(*)
+                 FROM batch_sessions bs3
+                 WHERE bs3.batch_id = ls.batch_id
+                   AND bs3.status != 'cancelled'
+                   AND bs3.session_day <= bs.session_day
+               ))
                ELSE ls.title
              END AS title,
              ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
@@ -235,7 +255,10 @@ router.get('/sessions', auth, (req, res) => {
   } else {
     rows = db.prepare(`
       SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId,
+             bs.session_date AS session_date,
+             bs.cancellation_reason AS cancellation_reason,
              CASE
+               WHEN bs.status = 'cancelled' THEN NULL
                WHEN bs.id IS NOT NULL THEN (
                  SELECT COUNT(*)
                  FROM batch_sessions bs2
@@ -246,7 +269,14 @@ router.get('/sessions', auth, (req, res) => {
                ELSE NULL
              END AS session_day,
              CASE
-               WHEN ls.batch_session_id IS NOT NULL AND bs.session_day IS NOT NULL THEN printf('Day %02d', bs.session_day)
+               WHEN bs.status = 'cancelled' THEN ''
+               WHEN bs.id IS NOT NULL THEN printf('Day %02d', (
+                 SELECT COUNT(*)
+                 FROM batch_sessions bs3
+                 WHERE bs3.batch_id = ls.batch_id
+                   AND bs3.status != 'cancelled'
+                   AND bs3.session_day <= bs.session_day
+               ))
                ELSE ls.title
              END AS title,
              ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,

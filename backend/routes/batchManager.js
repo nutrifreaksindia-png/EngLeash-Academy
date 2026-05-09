@@ -3,7 +3,7 @@ const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
 const uploadMemory = require('../uploadMemory');
 const { isSpacesConfigured, uploadToSpaces } = require('../services/spaces');
-const { ensureLiveSessionsForBatch } = require('../services/ensureLiveSessionsForBatch');
+const { ensureLiveSessionsForBatch, combineDateTime } = require('../services/ensureLiveSessionsForBatch');
 const liveRecording = require('../services/liveRecording');
 
 const router = express.Router();
@@ -526,20 +526,36 @@ router.get('/:id/sessions', auth, (req, res) => {
     .all(batchId);
   let displayDayCounter = 0;
   const withDisplayDay = sessions.map((s) => {
-    if (s.status !== 'cancelled') {
-      displayDayCounter += 1;
-      return { ...s, display_day: displayDayCounter };
+    if (s.status === 'cancelled') {
+      return { ...s, display_day: null };
     }
-    return { ...s, display_day: Number(s.session_day || 0) };
+    displayDayCounter += 1;
+    return { ...s, display_day: displayDayCounter };
   });
 
   const reconciled = withDisplayDay.map((s) => {
-    if (!s.live_session_id || s.live_status === 'cancelled' || s.live_status === 'ended') return s;
+    if (s.status === 'cancelled') return s;
+
+    const endInstant = combineDateTime(s.session_date, s.ends_at);
+    const endMs = parseSessionInstantMs(s.live_ends_at || endInstant || '');
     const active = Number(s.live_active_participants || 0);
-    const endMs = parseSessionInstantMs(s.live_ends_at);
-    if (active > 0) return { ...s, live_status: 'live' };
-    if (!Number.isNaN(endMs) && Date.now() > endMs) return { ...s, live_status: 'ended' };
-    return { ...s, live_status: 'scheduled' };
+    let nextLive = s.live_status;
+
+    if (!s.live_session_id) {
+      if (!Number.isNaN(endMs) && Date.now() > endMs && active === 0) {
+        nextLive = 'ended';
+      }
+      return { ...s, live_status: nextLive || s.live_status };
+    }
+
+    if (s.live_status === 'cancelled') return s;
+    if (s.live_status === 'ended') return s;
+
+    if (active > 0) nextLive = 'live';
+    else if (!Number.isNaN(endMs) && Date.now() > endMs && active === 0) nextLive = 'ended';
+    else nextLive = 'scheduled';
+
+    return { ...s, live_status: nextLive };
   });
   reconciled.forEach((s) => {
     if (s.live_session_id) {

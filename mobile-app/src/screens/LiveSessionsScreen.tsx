@@ -14,6 +14,8 @@ type LiveSession = {
   batch_id: number;
   title: string;
   session_day?: number | null;
+  session_date?: string | null;
+  cancellation_reason?: string | null;
   starts_at: string;
   ends_at: string;
   status: 'scheduled' | 'live' | 'ended' | 'cancelled';
@@ -28,6 +30,32 @@ function formatTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString();
+}
+
+function formatDateFriendly(value?: string | null) {
+  if (!value) return '—';
+  const s = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const d = new Date(`${s}T12:00:00`);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+  }
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function statusBadgeStyle(status: LiveSession['status']) {
+  if (status === 'live') return styles.badgeLive;
+  if (status === 'ended') return styles.badgeEnded;
+  if (status === 'cancelled') return styles.badgeCancelled;
+  return styles.badgeScheduled;
+}
+
+function statusLabel(status: LiveSession['status']) {
+  if (status === 'cancelled') return 'CANCELLED';
+  return status.toUpperCase();
 }
 
 export default function LiveSessionsScreen({ navigation }: any) {
@@ -123,12 +151,14 @@ export default function LiveSessionsScreen({ navigation }: any) {
         contentContainerStyle={styles.list}
         ListEmptyComponent={<Text style={styles.empty}>No live sessions available yet.</Text>}
         renderItem={({ item }) => {
-          const canJoin = userMayJoinLiveSession({
-            userRole: user?.role,
-            liveStatus: item.status,
-            startsAt: item.starts_at,
-            endsAt: item.ends_at,
-          });
+          const canJoin =
+            item.status !== 'cancelled' &&
+            userMayJoinLiveSession({
+              userRole: user?.role,
+              liveStatus: item.status,
+              startsAt: item.starts_at,
+              endsAt: item.ends_at,
+            });
           const showWaitHint =
             !canJoin &&
             (user?.role === 'Student' || user?.role === 'Lab') &&
@@ -137,10 +167,16 @@ export default function LiveSessionsScreen({ navigation }: any) {
             item.status === 'ended' &&
             typeof item.recordingPlaybackUrl === 'string' &&
             item.recordingPlaybackUrl.length > 0;
-          const titleText =
-            Number.isFinite(Number(item.session_day))
+          const cancelled = item.status === 'cancelled';
+          const headlineDate = formatDateFriendly(item.session_date ?? item.starts_at);
+          const titleText = cancelled
+            ? headlineDate
+            : Number.isFinite(Number(item.session_day))
               ? `Day ${String(Number(item.session_day)).padStart(2, '0')}`
-              : item.title;
+              : item.title?.trim() || headlineDate;
+
+          const reason = (item.cancellation_reason || '').trim();
+
           return (
             <View style={styles.card}>
               <TouchableOpacity
@@ -152,14 +188,21 @@ export default function LiveSessionsScreen({ navigation }: any) {
               >
                 <View style={styles.row}>
                   <Text style={styles.title}>{titleText}</Text>
-                  <Text style={[styles.badge, item.status === 'live' ? styles.badgeLive : styles.badgeScheduled]}>
-                    {item.status.toUpperCase()}
-                  </Text>
+                  <Text style={[styles.badge, statusBadgeStyle(item.status)]}>{statusLabel(item.status)}</Text>
                 </View>
-                <Text style={styles.meta}>{item.batch_name} ({item.session_type === 'group' ? 'Group' : '1:1'})</Text>
-                <Text style={styles.meta}>Trainer: {item.trainer_name}</Text>
-                <Text style={styles.meta}>Starts: {formatTime(item.starts_at)}</Text>
-                <Text style={styles.meta}>Ends: {formatTime(item.ends_at)}</Text>
+                {cancelled ? (
+                  <>
+                    {reason ? <Text style={styles.reasonLabel}>Reason</Text> : null}
+                    {reason ? <Text style={styles.reasonText}>{reason}</Text> : null}
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.meta}>{item.batch_name} ({item.session_type === 'group' ? 'Group' : '1:1'})</Text>
+                    <Text style={styles.meta}>Trainer: {item.trainer_name}</Text>
+                    <Text style={styles.meta}>Starts: {formatTime(item.starts_at)}</Text>
+                    <Text style={styles.meta}>Ends: {formatTime(item.ends_at)}</Text>
+                  </>
+                )}
                 {showWaitHint ? (
                   <Text style={styles.hint}>{joinOpensAtLabel(item.starts_at)}</Text>
                 ) : null}
@@ -181,7 +224,13 @@ export default function LiveSessionsScreen({ navigation }: any) {
               ) : (
                 <View style={[styles.joinBtn, !canJoin && styles.joinBtnDisabled]}>
                   <Text style={styles.joinBtnText}>
-                    {canJoin ? 'Join class' : item.status === 'ended' || item.status === 'cancelled' ? 'Ended' : 'Not yet'}
+                    {canJoin
+                      ? 'Join class'
+                      : item.status === 'cancelled'
+                        ? 'Cancelled'
+                        : item.status === 'ended'
+                          ? 'Ended'
+                          : 'Not yet'}
                   </Text>
                 </View>
               )}
@@ -212,7 +261,18 @@ const styles = StyleSheet.create({
   badge: { color: '#fff', borderRadius: 999, overflow: 'hidden', paddingHorizontal: 10, paddingVertical: 4, fontSize: 11, fontWeight: '700' },
   badgeLive: { backgroundColor: '#2e7d32' },
   badgeScheduled: { backgroundColor: BRAND_RED },
+  badgeEnded: { backgroundColor: '#757575' },
+  badgeCancelled: { backgroundColor: '#424242' },
   meta: { fontSize: 13, color: '#666', marginTop: 2 },
+  reasonLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#888',
+    textTransform: 'uppercase',
+    marginTop: 6,
+    letterSpacing: 0.6,
+  },
+  reasonText: { fontSize: 14, color: '#444', marginTop: 4, lineHeight: 20 },
   joinBtn: {
     marginTop: 12,
     backgroundColor: BRAND_BLUE,
