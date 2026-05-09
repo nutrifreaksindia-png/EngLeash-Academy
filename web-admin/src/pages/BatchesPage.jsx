@@ -818,7 +818,7 @@ export default function BatchesPage({
                   <tbody>
                     {(batchSessions || []).map((s) => (
                       <tr key={s.id}>
-                        <td>{s.session_day}</td>
+                        <td>{s.display_day ?? s.session_day}</td>
                         <td>{formatDateFriendly(s.session_date)}</td>
                         <td>{`${formatTimeValue(s.starts_at)} - ${formatTimeValue(s.ends_at)}`}</td>
                         <td>{s.lesson_title || '—'}</td>
@@ -828,24 +828,26 @@ export default function BatchesPage({
                           </span>
                         </td>
                         <td>
-                          {s.live_session_id ? (
-                            <button
-                              type="button"
-                              className="secondaryBtn"
-                              disabled={!canJoinLiveSession(s)}
-                              onClick={() => navigate(`/live/${s.live_session_id}`)}
-                              title={canJoinLiveSession(s) ? 'Join now' : 'Join window is not open yet'}
-                            >
-                              Join live
-                            </button>
-                          ) : null}
-                          {s.status === 'scheduled' ? (
-                            <button type="button" className="dangerBtn" onClick={() => openCancelDialog(s.id)}>
-                              Cancel
-                            </button>
-                          ) : (
-                            !s.live_session_id ? <span className="muted">—</span> : null
-                          )}
+                          <div className="row">
+                            {s.live_session_id ? (
+                              <button
+                                type="button"
+                                className="secondaryBtn"
+                                disabled={!canJoinLiveSession(s)}
+                                onClick={() => navigate(`/live/${s.live_session_id}`)}
+                                title={canJoinLiveSession(s) ? 'Join now' : 'Join window is not open yet'}
+                                style={!canJoinLiveSession(s) ? { opacity: 0.55, cursor: 'not-allowed' } : undefined}
+                              >
+                                Join live
+                              </button>
+                            ) : null}
+                            {s.status === 'scheduled' ? (
+                              <button type="button" className="dangerBtn" onClick={() => openCancelDialog(s.id)}>
+                                Cancel
+                              </button>
+                            ) : null}
+                            {!s.live_session_id && s.status !== 'scheduled' ? <span className="muted">—</span> : null}
+                          </div>
                         </td>
                       </tr>
                     ))}
