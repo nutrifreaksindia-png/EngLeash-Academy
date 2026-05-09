@@ -96,6 +96,36 @@ function logSessionEvent(sessionId, userId, eventType, detail) {
   }
 }
 
+function countActiveParticipants(sessionId) {
+  const row = db
+    .prepare('SELECT COUNT(*) AS n FROM live_session_participants WHERE live_session_id = ? AND left_at IS NULL')
+    .get(sessionId);
+  return Number(row?.n || 0);
+}
+
+function reconcileLiveSessionLifecycle(sessionLike) {
+  if (!sessionLike?.id) return sessionLike;
+  if (sessionLike.status === 'cancelled' || sessionLike.status === 'ended') return sessionLike;
+  const active = countActiveParticipants(sessionLike.id);
+  const now = Date.now();
+  const endMs = new Date(sessionLike.ends_at || sessionLike.endsAt || '').getTime();
+
+  let nextStatus = sessionLike.status;
+  if (!Number.isNaN(endMs) && now > endMs && active === 0) {
+    nextStatus = 'ended';
+  } else if (active > 0) {
+    nextStatus = 'live';
+  } else if (sessionLike.status === 'live') {
+    nextStatus = 'scheduled';
+  }
+
+  if (nextStatus !== sessionLike.status) {
+    db.prepare('UPDATE live_sessions SET status = ? WHERE id = ?').run(nextStatus, sessionLike.id);
+    return { ...sessionLike, status: nextStatus };
+  }
+  return sessionLike;
+}
+
 /**
  * Batch live sessions use two-way communication: every allowed participant gets a publisher token
  * (camera/mic) so web (rtc) and mobile (communication profile) can all send and receive.
@@ -185,7 +215,8 @@ router.get('/sessions', auth, (req, res) => {
       LIMIT 100
     `).all(userId);
   }
-  res.json(liveRecording.enrichLiveSessionsList(rows));
+  const reconciled = rows.map((row) => reconcileLiveSessionLifecycle(row));
+  res.json(liveRecording.enrichLiveSessionsList(reconciled));
 });
 
 router.get('/students', auth, requireRole('Admin', 'Trainer'), (req, res) => {
@@ -241,12 +272,13 @@ router.get('/batches/:id', auth, requireRole('Admin', 'Trainer'), (req, res) => 
 
 router.get('/sessions/:id/state', auth, (req, res) => {
   const sessionId = Number(req.params.id);
-  const session = db.prepare(`
+  let session = db.prepare(`
     SELECT ls.id, ls.batch_id, ls.status, b.trainer_id, b.session_type
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
   `).get(sessionId);
+  session = reconcileLiveSessionLifecycle(session);
   if (!session) return res.status(404).json({ error: 'Live session not found' });
   if (!isUserAllowedForSession(session, req.user)) {
     return res.status(403).json({ error: 'You are not part of this live session' });
@@ -282,12 +314,24 @@ router.get('/sessions/:id/state', auth, (req, res) => {
 /** Pre-join: session title and window without joining the channel (Phase C green room). */
 router.get('/sessions/:id/meta', auth, (req, res) => {
   const sessionId = Number(req.params.id);
-  const session = db.prepare(`
+  let session = db.prepare(`
     SELECT ls.id, ls.batch_id, ls.title, ls.status, ls.starts_at AS startsAt, ls.ends_at AS endsAt, b.session_type AS sessionType
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
   `).get(sessionId);
+  session = reconcileLiveSessionLifecycle({
+    ...session,
+    starts_at: session?.startsAt,
+    ends_at: session?.endsAt,
+  });
+  if (session) {
+    session = {
+      ...session,
+      startsAt: session.startsAt || session.starts_at,
+      endsAt: session.endsAt || session.ends_at,
+    };
+  }
   if (!session) return res.status(404).json({ error: 'Live session not found' });
   if (!isUserAllowedForSession(session, req.user)) {
     return res.status(403).json({ error: 'You are not part of this live session' });
@@ -624,7 +668,7 @@ router.post('/sessions', auth, requireRole('Admin', 'Trainer'), (req, res) => {
 router.post('/sessions/:id/start', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const sessionId = Number(req.params.id);
   const session = db.prepare(`
-    SELECT ls.id, ls.status, ls.batch_id, b.trainer_id
+    SELECT ls.id, ls.status, ls.batch_id, ls.ends_at, b.trainer_id
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
@@ -654,22 +698,25 @@ router.post('/sessions/:id/end', auth, requireRole('Admin', 'Trainer'), async (r
   } catch (e) {
     console.warn('liveRecording.forceStopRecordingForSession', sessionId, e?.message || e);
   }
-  db.prepare("UPDATE live_sessions SET status = 'ended' WHERE id = ?").run(sessionId);
+  const endedAt = new Date(session.ends_at || '').getTime();
+  const shouldBeEnded = !Number.isNaN(endedAt) && Date.now() > endedAt;
   db.prepare('UPDATE live_session_participants SET left_at = datetime(\'now\') WHERE live_session_id = ? AND left_at IS NULL').run(sessionId);
+  db.prepare("UPDATE live_sessions SET status = ? WHERE id = ?").run(shouldBeEnded ? 'ended' : 'scheduled', sessionId);
   db.prepare('DELETE FROM live_session_speakers WHERE live_session_id = ?').run(sessionId);
   db.prepare('DELETE FROM live_session_hands WHERE live_session_id = ?').run(sessionId);
-  logSessionEvent(sessionId, req.user.id, 'session_end', null);
-  res.json({ ok: true });
+  logSessionEvent(sessionId, req.user.id, 'session_force_leave', null);
+  res.json({ ok: true, status: shouldBeEnded ? 'ended' : 'scheduled' });
 });
 
 router.post('/sessions/:id/join', auth, (req, res) => {
   const sessionId = Number(req.params.id);
-  const session = db.prepare(`
+  let session = db.prepare(`
     SELECT ls.id, ls.batch_id, ls.batch_session_id, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status, b.trainer_id, b.session_type
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
   `).get(sessionId);
+  session = reconcileLiveSessionLifecycle(session);
   if (!session) return res.status(404).json({ error: 'Live session not found' });
   if (!isUserAllowedForSession(session, req.user)) {
     return res.status(403).json({ error: 'You are not part of this live session' });
@@ -740,12 +787,13 @@ router.post('/sessions/:id/join', auth, (req, res) => {
 
 router.post('/sessions/:id/token', auth, (req, res) => {
   const sessionId = Number(req.params.id);
-  const session = db.prepare(`
+  let session = db.prepare(`
     SELECT ls.id, ls.batch_id, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status, b.trainer_id, b.session_type
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
   `).get(sessionId);
+  session = reconcileLiveSessionLifecycle(session);
   if (!session) return res.status(404).json({ error: 'Live session not found' });
   if (!isUserAllowedForSession(session, req.user)) {
     return res.status(403).json({ error: 'You are not part of this live session' });
@@ -793,6 +841,11 @@ router.post('/sessions/:id/leave', auth, (req, res) => {
   void liveRecording.maybeStopRecordingAfterLeave(sessionId).catch((e) =>
     console.warn('maybeStopRecordingAfterLeave', sessionId, e?.message || e)
   );
+
+  const s = db
+    .prepare('SELECT id, status, starts_at, ends_at FROM live_sessions WHERE id = ?')
+    .get(sessionId);
+  if (s) reconcileLiveSessionLifecycle(s);
 
   res.json({ ok: true });
 });

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, FlatList, Modal, RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
@@ -23,6 +23,13 @@ type LiveSession = {
   recordingPlaybackUrl?: string | null;
 };
 
+type RecordingRow = {
+  id: number;
+  started_at?: string | null;
+  stopped_at?: string | null;
+  cdnUrls?: string[];
+};
+
 function formatTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -35,6 +42,10 @@ export default function LiveSessionsScreen({ navigation }: any) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [timePulse, setTimePulse] = useState(0);
+  const [recordingsOpen, setRecordingsOpen] = useState(false);
+  const [recordingsLoading, setRecordingsLoading] = useState(false);
+  const [recordingsTitle, setRecordingsTitle] = useState('');
+  const [recordingRows, setRecordingRows] = useState<RecordingRow[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -58,6 +69,29 @@ export default function LiveSessionsScreen({ navigation }: any) {
       load();
     }, [load])
   );
+
+  async function openRecordings(item: LiveSession) {
+    setRecordingsTitle(item.title || 'Session');
+    setRecordingRows([]);
+    setRecordingsOpen(true);
+    setRecordingsLoading(true);
+    try {
+      const data = await api.get(`/live/sessions/${item.id}/recordings`);
+      setRecordingRows(Array.isArray(data?.recordings) ? data.recordings : []);
+    } catch {
+      setRecordingRows([]);
+    } finally {
+      setRecordingsLoading(false);
+    }
+  }
+
+  function pickPlayableUrl(row: RecordingRow) {
+    const urls = Array.isArray(row?.cdnUrls) ? row.cdnUrls.filter(Boolean) : [];
+    const mp4 = urls.find((u) => /\.mp4(\?|$)/i.test(String(u)));
+    if (mp4) return mp4;
+    const hls = urls.find((u) => /\.m3u8(\?|$)/i.test(String(u)));
+    return hls || urls[0] || null;
+  }
 
   useFocusEffect(
     useCallback(() => {
@@ -132,11 +166,10 @@ export default function LiveSessionsScreen({ navigation }: any) {
             !canJoin &&
             (user?.role === 'Student' || user?.role === 'Lab') &&
             item.status === 'scheduled';
-          const playUrl =
-            typeof item.recordingPlaybackUrl === 'string' && item.recordingPlaybackUrl.length > 0
-              ? item.recordingPlaybackUrl
-              : null;
-          const showPlayRecording = Boolean(playUrl && item.status === 'ended');
+          const showPlayRecording =
+            item.status === 'ended' &&
+            typeof item.recordingPlaybackUrl === 'string' &&
+            item.recordingPlaybackUrl.length > 0;
           return (
             <View style={styles.card}>
               <TouchableOpacity
@@ -163,17 +196,11 @@ export default function LiveSessionsScreen({ navigation }: any) {
               {showPlayRecording ? (
                 <TouchableOpacity
                   style={styles.playBtn}
-                  onPress={() =>
-                    navigation.navigate('SessionRecordingPlayer', {
-                      videoUrl: playUrl,
-                      title: item.title,
-                      allowDownload: false,
-                    })
-                  }
+                  onPress={() => openRecordings(item)}
                   accessibilityRole="button"
                   accessibilityLabel="Play recording"
                 >
-                  <Text style={styles.playBtnText}>Play recording</Text>
+                  <Text style={styles.playBtnText}>Play recording(s)</Text>
                 </TouchableOpacity>
               ) : (
                 <View style={[styles.joinBtn, !canJoin && styles.joinBtnDisabled]}>
@@ -186,6 +213,55 @@ export default function LiveSessionsScreen({ navigation }: any) {
           );
         }}
       />
+
+      <Modal visible={recordingsOpen} transparent animationType="fade" onRequestClose={() => setRecordingsOpen(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Recordings - {recordingsTitle}</Text>
+            {recordingsLoading ? (
+              <ActivityIndicator color={BRAND_RED} />
+            ) : (
+              <ScrollView style={styles.modalScroll}>
+                {recordingRows.length === 0 ? (
+                  <Text style={styles.empty}>No recordings available yet.</Text>
+                ) : (
+                  recordingRows.map((r, idx) => {
+                    const playUrl = pickPlayableUrl(r);
+                    const started = r.started_at ? formatTime(String(r.started_at)) : '—';
+                    const stopped = r.stopped_at ? formatTime(String(r.stopped_at)) : '—';
+                    return (
+                      <View key={r.id || idx} style={styles.recordingRow}>
+                        <Text style={styles.meta}>Segment {idx + 1}</Text>
+                        <Text style={styles.meta}>Started: {started}</Text>
+                        <Text style={styles.meta}>Stopped: {stopped}</Text>
+                        {playUrl ? (
+                          <TouchableOpacity
+                            style={styles.playBtn}
+                            onPress={() =>
+                              navigation.navigate('SessionRecordingPlayer', {
+                                videoUrl: playUrl,
+                                title: `${recordingsTitle} - Segment ${idx + 1}`,
+                                allowDownload: false,
+                              })
+                            }
+                          >
+                            <Text style={styles.playBtnText}>Play</Text>
+                          </TouchableOpacity>
+                        ) : (
+                          <Text style={styles.hint}>No playable URL</Text>
+                        )}
+                      </View>
+                    );
+                  })
+                )}
+              </ScrollView>
+            )}
+            <TouchableOpacity style={[styles.joinBtn, styles.modalCloseBtn]} onPress={() => setRecordingsOpen(false)}>
+              <Text style={styles.joinBtnText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -230,4 +306,26 @@ const styles = StyleSheet.create({
   },
   playBtnText: { color: '#fff', fontWeight: '700' },
   hint: { fontSize: 12, color: '#666', marginTop: 6, fontStyle: 'italic' },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'center',
+    padding: 16,
+  },
+  modalCard: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 14,
+    maxHeight: '80%',
+  },
+  modalTitle: { fontSize: 16, fontWeight: '700', color: '#222', marginBottom: 10 },
+  modalScroll: { maxHeight: 420 },
+  recordingRow: {
+    borderWidth: 1,
+    borderColor: '#eee',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 10,
+  },
+  modalCloseBtn: { marginTop: 6 },
 });
