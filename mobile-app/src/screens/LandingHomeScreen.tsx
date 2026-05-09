@@ -77,6 +77,13 @@ function primaryCta(typeRaw?: string) {
 }
 
 export default function LandingHomeScreen({ navigation }: any) {
+  function formatDateFriendly(value: string | null | undefined) {
+    if (!value) return '—';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return String(value);
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  }
+
   const { user, refreshUser } = useAuth();
   const insets = useSafeAreaInsets();
   const [courses, setCourses] = useState<PublicCourse[]>([]);
@@ -304,11 +311,11 @@ export default function LandingHomeScreen({ navigation }: any) {
                       <Text style={styles.batchMeta}>Status: {b.batch_status === 'started' ? 'Started' : 'Not started'}</Text>
                       {b.batch_status === 'started' ? (
                         <>
-                          <Text style={styles.batchMeta}>Date started: {b.actual_start_date || '—'}</Text>
+                          <Text style={styles.batchMeta}>Date started: {formatDateFriendly(b.actual_start_date)}</Text>
                           <Text style={styles.batchMeta}>Sessions passed: {b.sessions_passed || 0}</Text>
                         </>
                       ) : (
-                        <Text style={styles.batchMeta}>Expected start: {b.planned_start_date || '—'}</Text>
+                        <Text style={styles.batchMeta}>Expected start: {formatDateFriendly(b.planned_start_date)}</Text>
                       )}
                     </TouchableOpacity>
                   );

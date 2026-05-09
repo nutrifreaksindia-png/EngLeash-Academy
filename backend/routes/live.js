@@ -66,17 +66,19 @@ function assertTrainerStaffCanManageLive(req, session) {
   throw e;
 }
 
-/** Scheduled: only within [starts_at − early, ends_at]. Live: allowed until ended. */
+/** Scheduled/live: only within [starts_at − early, ends_at]. */
 function joinTimeAllows(session) {
-  if (session.status === 'live') return { ok: true };
   if (session.status === 'ended' || session.status === 'cancelled') {
+    return { ok: false, code: 'bad_status' };
+  }
+  if (session.status !== 'scheduled' && session.status !== 'live') {
     return { ok: false, code: 'bad_status' };
   }
   const now = Date.now();
   const start = new Date(session.starts_at).getTime();
   const end = new Date(session.ends_at).getTime();
-  if (Number.isNaN(start) || Number.isNaN(end)) return { ok: true };
-  const earlyMs = Number(process.env.LIVE_JOIN_EARLY_MS || 30 * 60 * 1000);
+  if (Number.isNaN(start) || Number.isNaN(end)) return { ok: false, code: 'invalid_schedule' };
+  const earlyMs = Number(process.env.LIVE_JOIN_EARLY_MS || 5 * 60 * 1000);
   if (now < start - earlyMs || now > end) {
     return { ok: false, code: 'outside_window' };
   }
@@ -130,21 +132,33 @@ router.get('/sessions', auth, (req, res) => {
   let rows = [];
   if (role === 'Admin') {
     rows = db.prepare(`
-      SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
+      SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId,
+             CASE
+               WHEN ls.batch_session_id IS NOT NULL AND bs.session_day IS NOT NULL THEN printf('Day %02d', bs.session_day)
+               ELSE ls.title
+             END AS title,
+             ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
              b.name AS batch_name, b.session_type, b.trainer_id, u.name AS trainer_name
       FROM live_sessions ls
       JOIN batches b ON b.id = ls.batch_id
       JOIN users u ON u.id = b.trainer_id
+      LEFT JOIN batch_sessions bs ON bs.id = ls.batch_session_id
       ORDER BY ls.starts_at ASC
       LIMIT 100
     `).all();
   } else if (role === 'Trainer') {
     rows = db.prepare(`
-      SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
+      SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId,
+             CASE
+               WHEN ls.batch_session_id IS NOT NULL AND bs.session_day IS NOT NULL THEN printf('Day %02d', bs.session_day)
+               ELSE ls.title
+             END AS title,
+             ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
              b.name AS batch_name, b.session_type, b.trainer_id, u.name AS trainer_name
       FROM live_sessions ls
       JOIN batches b ON b.id = ls.batch_id
       JOIN users u ON u.id = b.trainer_id
+      LEFT JOIN batch_sessions bs ON bs.id = ls.batch_session_id
       WHERE b.trainer_id = ? OR EXISTS (
         SELECT 1 FROM batch_trainers bt WHERE bt.batch_id = b.id AND bt.trainer_id = ?
       )
@@ -153,11 +167,17 @@ router.get('/sessions', auth, (req, res) => {
     `).all(userId, userId);
   } else {
     rows = db.prepare(`
-      SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
+      SELECT ls.id, ls.batch_id, ls.batch_session_id AS batchSessionId,
+             CASE
+               WHEN ls.batch_session_id IS NOT NULL AND bs.session_day IS NOT NULL THEN printf('Day %02d', bs.session_day)
+               ELSE ls.title
+             END AS title,
+             ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
              b.name AS batch_name, b.session_type, b.trainer_id, u.name AS trainer_name
       FROM live_sessions ls
       JOIN batches b ON b.id = ls.batch_id
       JOIN users u ON u.id = b.trainer_id
+      LEFT JOIN batch_sessions bs ON bs.id = ls.batch_session_id
       JOIN batch_members bm ON bm.batch_id = b.id
       WHERE bm.student_id = ?
       ORDER BY ls.starts_at ASC

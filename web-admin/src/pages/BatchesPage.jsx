@@ -41,7 +41,35 @@ function canJoinLiveSession(s) {
   if (s.status === 'cancelled') return false;
   const ls = s.live_status;
   if (ls === 'ended' || ls === 'cancelled') return false;
-  return ls === 'scheduled' || ls === 'live';
+  if (ls !== 'scheduled' && ls !== 'live') return false;
+  const startsAt = s.live_starts_at || s.starts_at;
+  const endsAt = s.live_ends_at || s.ends_at;
+  const startMs = new Date(startsAt).getTime();
+  const endMs = new Date(endsAt).getTime();
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) return false;
+  const nowMs = Date.now();
+  const earlyMs = 5 * 60 * 1000;
+  return nowMs >= startMs - earlyMs && nowMs <= endMs;
+}
+
+function formatDateFriendly(value) {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function formatDateTimeFriendly(value) {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
 }
 
 export default function BatchesPage({
@@ -385,9 +413,7 @@ export default function BatchesPage({
       window.alert('Set session start and end time in the Sessions dialog, then save the schedule, before starting.');
       return;
     }
-    const defaultDate =
-      (batch.planned_start_date && String(batch.planned_start_date).slice(0, 10)) ||
-      new Date().toISOString().slice(0, 10);
+    const defaultDate = new Date().toISOString().slice(0, 10);
     setStartDateValue(defaultDate);
     setStartModalBatch(batch);
     setStartModalOpen(true);
@@ -508,7 +534,7 @@ export default function BatchesPage({
                       </span>
                     </td>
                     <td>{b.course_name || <span className="muted">None</span>}</td>
-                    <td>{b.planned_start_date || '—'}</td>
+                    <td>{formatDateFriendly(b.planned_start_date)}</td>
                     <td className="batchColActions" onClick={(e) => e.stopPropagation()}>
                       <button type="button" className="secondaryBtn batchRowActionBtn" onClick={() => openModal('batchView', b)}>
                         View
@@ -774,7 +800,7 @@ export default function BatchesPage({
                     {(batchSessions || []).map((s) => (
                       <tr key={s.id}>
                         <td>{s.session_day}</td>
-                        <td>{s.session_date}</td>
+                        <td>{formatDateFriendly(s.session_date)}</td>
                         <td>{s.lesson_title}</td>
                         <td>
                           <span className={`badge ${s.status}`}>{s.status}</span>
@@ -841,7 +867,7 @@ export default function BatchesPage({
               <strong>Course</strong> {modalBatch.course_name || <span className="muted">None</span>}
             </p>
             <p>
-              <strong>Planned start</strong> {modalBatch.planned_start_date || '—'}
+              <strong>Planned start</strong> {formatDateFriendly(modalBatch.planned_start_date)}
             </p>
             <p>
               <strong>Duration override (days)</strong> {modalBatch.duration_days ?? '—'}
@@ -995,11 +1021,11 @@ export default function BatchesPage({
               {(cancelAuditRows || []).map((r) => (
                 <tr key={r.id}>
                   <td>{r.session_day}</td>
-                  <td>{r.session_date}</td>
+                  <td>{formatDateFriendly(r.session_date)}</td>
                   <td>{r.lesson_title}</td>
                   <td>{r.cancellation_reason || '—'}</td>
                   <td>{r.cancelled_by_name || r.cancelled_by_email || '—'}</td>
-                  <td>{r.updated_at || '—'}</td>
+                  <td>{formatDateTimeFriendly(r.updated_at)}</td>
                 </tr>
               ))}
               {(!cancelAuditRows || cancelAuditRows.length === 0) && (
@@ -1106,7 +1132,7 @@ export default function BatchesPage({
                       {(attendanceData.sessions || []).map((s) => (
                         <th key={s.id} className="batchAttendanceSessionHead" title={s.lesson_title || ''}>
                           <span className="batchAttendanceDay">Day {s.session_day}</span>
-                          <span className="batchAttendanceDate">{s.session_date}</span>
+                          <span className="batchAttendanceDate">{formatDateFriendly(s.session_date)}</span>
                           {s.status === 'cancelled' ? (
                             <span className="badge cancelled batchAttendanceMiniBadge">
                               Off

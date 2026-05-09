@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
@@ -49,6 +50,13 @@ export default function LiveSessionsScreen({ navigation }: any) {
   useEffect(() => {
     load();
   }, [load]);
+
+  useFocusEffect(
+    useCallback(() => {
+      setRefreshing(true);
+      load();
+    }, [load])
+  );
 
   if (loading) {
     return (

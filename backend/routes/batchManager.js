@@ -58,6 +58,36 @@ function weekdayName(date) {
   return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.getDay()];
 }
 
+function parseLocalDate(dateText) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateText || '').trim());
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) return null;
+  return new Date(y, mo - 1, d);
+}
+
+function formatLocalDate(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function nextEligibleSessionDate(afterDateText, daysOfWeek) {
+  const base = parseLocalDate(afterDateText);
+  if (!base) return null;
+  const cursor = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+  for (let i = 0; i < 366; i += 1) {
+    cursor.setDate(cursor.getDate() + 1);
+    const dateText = formatLocalDate(cursor);
+    const wd = weekdayName(cursor);
+    if (daysOfWeek.includes(wd) && !isHoliday(dateText)) return dateText;
+  }
+  return null;
+}
+
 function generateSessionsForBatch(batchId, startDate, actorId) {
   const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
   if (!batch) throw new Error('Batch not found');
@@ -74,7 +104,7 @@ function generateSessionsForBatch(batchId, startDate, actorId) {
   const endTime = schedule.endTime || null;
 
   const mapRows = db.prepare(`
-    SELECT cl.day_number, ll.id AS lesson_id, ll.title
+    SELECT cl.day_number, ll.id AS lesson_id
     FROM course_lessons cl
     JOIN lesson_library ll ON ll.id = cl.lesson_id
     WHERE cl.course_id = ?
@@ -92,16 +122,18 @@ function generateSessionsForBatch(batchId, startDate, actorId) {
       ? Number(batch.duration_days)
       : Number(course.duration_days || 1);
   let day = 1;
-  let cursor = new Date(`${startDate}T00:00:00`);
+  const startCursor = parseLocalDate(startDate);
+  if (!startCursor) throw new Error('startDate must be YYYY-MM-DD');
+  const cursor = new Date(startCursor.getFullYear(), startCursor.getMonth(), startCursor.getDate());
   while (day <= durationCap) {
-    const dateText = cursor.toISOString().slice(0, 10);
+    const dateText = formatLocalDate(cursor);
     const wd = weekdayName(cursor);
     if (daysOfWeek.includes(wd) && !isHoliday(dateText)) {
       const mapped = lessonByDay.get(day);
       db.prepare(`
         INSERT INTO batch_sessions (batch_id, session_day, lesson_id, lesson_title, session_date, starts_at, ends_at, status, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', datetime('now'))
-      `).run(batchId, day, mapped?.lesson_id || null, mapped?.title || `Day ${String(day).padStart(2, '0')}`, dateText, startTime, endTime);
+      `).run(batchId, day, mapped?.lesson_id || null, `Day ${String(day).padStart(2, '0')}`, dateText, startTime, endTime);
       day += 1;
     }
     cursor.setDate(cursor.getDate() + 1);
@@ -366,7 +398,7 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     notes || null,
     bn,
     Number.isFinite(durationDaysNum) && durationDaysNum > 0 ? durationDaysNum : null,
-    enrollmentOpenStatus === 'open' ? 'open' : 'closed'
+    enrollmentOpenStatus === 'closed' ? 'closed' : 'open'
   );
   const batchId = row.lastInsertRowid;
 
@@ -395,10 +427,10 @@ router.post('/:id/start', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const batchId = Number(req.params.id);
   const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
   if (!batch) return res.status(404).json({ error: 'Batch not found' });
-  const raw =
-    (req.body.startDate && String(req.body.startDate).trim()) ||
-    batch.planned_start_date ||
-    new Date().toISOString().slice(0, 10);
+  const raw = String(req.body.startDate || '').trim();
+  if (!raw) {
+    return res.status(400).json({ error: 'startDate is required (YYYY-MM-DD)' });
+  }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
     return res.status(400).json({ error: 'startDate must be YYYY-MM-DD' });
   }
@@ -675,6 +707,44 @@ router.post('/:id/sessions/:sessionId/cancel', auth, requireRole('Admin', 'Train
       row.id
     );
   });
+
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  const schedule = batch?.training_schedule_json ? JSON.parse(batch.training_schedule_json) : {};
+  const daysOfWeek = Array.isArray(schedule.daysOfWeek) && schedule.daysOfWeek.length
+    ? schedule.daysOfWeek
+    : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  const lastScheduled = db.prepare(`
+    SELECT session_day, session_date
+    FROM batch_sessions
+    WHERE batch_id = ? AND status = 'scheduled'
+    ORDER BY session_day DESC
+    LIMIT 1
+  `).get(batchId);
+
+  if (lastScheduled?.session_day && lastScheduled?.session_date) {
+    const nextDate = nextEligibleSessionDate(lastScheduled.session_date, daysOfWeek);
+    if (nextDate) {
+      db.prepare(`
+        INSERT INTO batch_sessions (batch_id, session_day, lesson_id, lesson_title, session_date, starts_at, ends_at, status, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', datetime('now'))
+      `).run(
+        batchId,
+        Number(lastScheduled.session_day) + 1,
+        null,
+        `Day ${String(Number(lastScheduled.session_day) + 1).padStart(2, '0')}`,
+        nextDate,
+        session.starts_at || null,
+        session.ends_at || null
+      );
+    }
+  }
+
+  try {
+    ensureLiveSessionsForBatch(batchId);
+  } catch (liveErr) {
+    console.error('ensureLiveSessionsForBatch on cancel', batchId, liveErr);
+  }
 
   res.json({ ok: true });
 });

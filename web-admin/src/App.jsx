@@ -772,10 +772,13 @@ export default function App() {
   async function startBatch(batchId, startDate) {
     const id = batchId ?? selectedBatchId;
     if (!id) return;
-    const date =
-      startDate != null && String(startDate).trim()
-        ? String(startDate).trim()
-        : new Date().toISOString().slice(0, 10);
+    const date = String(startDate || '').trim();
+    if (!date) {
+      const err = new Error('Select a real start date to start the batch.');
+      setError(err.message);
+      pushToast(err.message, 'error');
+      throw err;
+    }
     try {
       await apiFetch(`/batch-manager/${id}/start`, token, {
         method: 'POST',

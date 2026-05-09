@@ -1,7 +1,7 @@
-/** Mirrors backend `LIVE_JOIN_EARLY_MS` default (30 minutes before start). */
-export const LIVE_JOIN_EARLY_MS = 30 * 60 * 1000;
+/** Mirrors backend `LIVE_JOIN_EARLY_MS` default (5 minutes before start). */
+export const LIVE_JOIN_EARLY_MS = 5 * 60 * 1000;
 
-/** Aligns with backend `joinTimeAllows` for subscribers (scheduled sessions). */
+/** Aligns with backend `joinTimeAllows` for subscribers (scheduled/live sessions). */
 export function joinWindowAllows(args: {
   liveStatus: string;
   startsAt: string;
@@ -10,13 +10,12 @@ export function joinWindowAllows(args: {
 }): boolean {
   const { liveStatus, startsAt, endsAt } = args;
   const earlyMs = args.earlyMs ?? LIVE_JOIN_EARLY_MS;
-  if (liveStatus === 'live') return true;
+  if (liveStatus !== 'scheduled' && liveStatus !== 'live') return false;
   if (liveStatus === 'ended' || liveStatus === 'cancelled') return false;
-  if (liveStatus !== 'scheduled') return false;
   const now = Date.now();
   const start = new Date(startsAt).getTime();
   const end = new Date(endsAt).getTime();
-  if (Number.isNaN(start) || Number.isNaN(end)) return true;
+  if (Number.isNaN(start) || Number.isNaN(end)) return false;
   return now >= start - earlyMs && now <= end;
 }
 

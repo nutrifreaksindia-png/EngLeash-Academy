@@ -59,7 +59,7 @@ function ensureLiveSessionsForBatch(batchId) {
     const endsAt = combineDateTime(bs.session_date, bs.ends_at);
     if (!startsAt || !endsAt) continue;
 
-    const title = (bs.lesson_title && String(bs.lesson_title).trim()) || `Day ${bs.session_day}`;
+    const title = `Day ${String(bs.session_day).padStart(2, '0')}`;
     const targetStatus = liveStatusFromBatchSession(bs);
     const channel = stableChannelName(bs.id);
 
