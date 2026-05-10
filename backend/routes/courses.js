@@ -35,8 +35,16 @@ router.get('/', auth, (req, res) => {
         OR EXISTS (SELECT 1 FROM enrollments e WHERE e.course_id = c.id AND e.user_id = ?)
         OR EXISTS (
           SELECT 1 FROM batch_members bm
-          INNER JOIN batches b ON b.id = bm.batch_id AND b.course_id = c.id AND b.course_id IS NOT NULL
+          INNER JOIN batches b ON b.id = bm.batch_id
           WHERE bm.student_id = ?
+            AND (
+              EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = b.id AND bc.course_id = c.id)
+              OR (
+                NOT EXISTS (SELECT 1 FROM batch_courses bx WHERE bx.batch_id = b.id)
+                AND b.course_id IS NOT NULL
+                AND b.course_id = c.id
+              )
+            )
         )
       )
     ORDER BY c.sort_order, c.id
@@ -66,13 +74,23 @@ router.get('/catalog', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), 
   const batchCourseRows = db
     .prepare(
       `
-    SELECT DISTINCT b.course_id AS course_id
-    FROM batch_members bm
-    INNER JOIN batches b ON b.id = bm.batch_id AND b.course_id IS NOT NULL
-    WHERE bm.student_id = ?
+    SELECT DISTINCT x.course_id AS course_id FROM (
+      SELECT bc.course_id AS course_id
+      FROM batch_members bm
+      INNER JOIN batches b ON b.id = bm.batch_id
+      INNER JOIN batch_courses bc ON bc.batch_id = b.id
+      WHERE bm.student_id = ?
+      UNION
+      SELECT b.course_id AS course_id
+      FROM batch_members bm
+      INNER JOIN batches b ON b.id = bm.batch_id
+      WHERE bm.student_id = ?
+        AND b.course_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM batch_courses bx WHERE bx.batch_id = b.id)
+    ) x
   `,
     )
-    .all(uid);
+    .all(uid, uid);
   for (const r of batchCourseRows) {
     if (r.course_id == null) continue;
     const prev = enrollmentByCourse.get(r.course_id);

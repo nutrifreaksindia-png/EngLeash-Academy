@@ -656,6 +656,7 @@ export default function App() {
           batchType: payload.batchType,
           batchNumber: Number(payload.batchNumber),
           courseId: payload.courseId,
+          courses: payload.courses,
           plannedStartDate: payload.plannedStartDate,
           durationDays: payload.durationDays,
           notes: payload.notes,

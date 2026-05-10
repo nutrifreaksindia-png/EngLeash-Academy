@@ -570,6 +570,7 @@ function ensureV1Tables(db) {
   }
 
   migrateBatchesBatchNumber(db);
+  migrateBatchCoursesTable(db);
   migrateCourseLessonsSchema(db);
   migrateUsersTableCreatorRole(db);
   migrateCourseEnrollmentsExpandSubscribe(db);
@@ -638,6 +639,35 @@ function migrateBackfillCourseAccessGrants(db) {
     const src = r.enrollment_type === 'purchase' ? 'purchase' : 'free';
     if (existsStmt.get(r.user_id, r.course_id, src)) continue;
     ins.run(r.user_id, r.course_id, src, nowMs);
+  }
+}
+
+/** Many-to-many batches ↔ courses with optional subscription package per course (session syllabus stays batches.course_id = first row). */
+function migrateBatchCoursesTable(db) {
+  const t = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='batch_courses'").get();
+  if (t) return;
+  db.exec(`
+    CREATE TABLE batch_courses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+      course_id INTEGER NOT NULL REFERENCES courses(id),
+      billing_package_id INTEGER REFERENCES billing_packages(id),
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(batch_id, course_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_batch_courses_batch ON batch_courses(batch_id);
+  `);
+  const ins = db.prepare(`
+    INSERT OR IGNORE INTO batch_courses (batch_id, course_id, billing_package_id, sort_order)
+    VALUES (?, ?, ?, 0)
+  `);
+  const rows = db
+    .prepare(
+      'SELECT id AS batch_id, course_id, subscription_package_id FROM batches WHERE course_id IS NOT NULL',
+    )
+    .all();
+  for (const r of rows) {
+    ins.run(r.batch_id, r.course_id, r.subscription_package_id ?? null);
   }
 }
 

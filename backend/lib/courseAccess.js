@@ -59,10 +59,18 @@ function learnerHasCourseAccess(userId, courseId, nowMs = Date.now()) {
   const batchRow = db
     .prepare(
       `SELECT 1 FROM batch_members bm
-       INNER JOIN batches b ON b.id = bm.batch_id AND b.course_id = ?
-       WHERE bm.student_id = ?`,
+       INNER JOIN batches b ON b.id = bm.batch_id
+       WHERE bm.student_id = ?
+         AND (
+           EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = b.id AND bc.course_id = ?)
+           OR (
+             NOT EXISTS (SELECT 1 FROM batch_courses bx WHERE bx.batch_id = b.id)
+             AND b.course_id IS NOT NULL
+             AND b.course_id = ?
+           )
+         )`,
     )
-    .get(cid, uid);
+    .get(uid, cid, cid);
   return !!batchRow;
 }
 
@@ -247,18 +255,15 @@ function loadComboCourses(comboId) {
   return db.prepare('SELECT course_id FROM course_combo_members WHERE combo_id = ? ORDER BY id').all(comboId).map((r) => Number(r.course_id));
 }
 
-/** Batch path: subscription package on batch, no payment. */
-/** Non-subscribe courses: batch membership implies full access; record grant + approved enrollment for My Courses / subscriptions. */
-function grantNonSubscribeBatchCourseAccess(batchId, userId) {
-  const batch = db.prepare('SELECT id, course_id FROM batches WHERE id = ?').get(batchId);
-  if (!batch?.course_id) return;
-  const course = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(batch.course_id);
+function grantNonSubscribeBatchCourseForSingleCourse(userId, courseId) {
+  const cid = Number(courseId);
+  if (!Number.isFinite(cid)) return;
+  const course = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(cid);
   if (!course) return;
   if (String(course.enrollment_type || '').toLowerCase() === 'subscribe') return;
 
-  upsertLifetimeGrant(userId, batch.course_id, 'batch_course');
+  upsertLifetimeGrant(userId, cid, 'batch_course');
   const ts = new Date().toISOString();
-  const cid = Number(batch.course_id);
   const existing = db.prepare('SELECT id, status FROM course_enrollments WHERE user_id = ? AND course_id = ?').get(userId, cid);
   if (!existing) {
     db.prepare(
@@ -274,43 +279,76 @@ function grantNonSubscribeBatchCourseAccess(batchId, userId) {
   db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(userId, cid);
 }
 
-function grantBatchSubscriptionAccess(batchId, userId) {
-  const dup = db
+/**
+ * Apply batch-linked course access for one member: timed grants from per-course subscription packages,
+ * or lifetime path for non-subscribe courses without a package.
+ */
+function syncBatchMemberCourseAccess(batchId, userId) {
+  const uid = Number(userId);
+  const bid = Number(batchId);
+  if (!Number.isFinite(uid) || !Number.isFinite(bid)) return;
+
+  let rows = db
     .prepare(
-      `SELECT 1 FROM course_access_grants WHERE user_id = ? AND batch_id = ? AND source = 'subscribe_batch' AND revoked_at_ms IS NULL`,
+      `SELECT course_id, billing_package_id FROM batch_courses WHERE batch_id = ? ORDER BY sort_order ASC, id ASC`,
     )
-    .get(userId, batchId);
-  if (dup) return true;
+    .all(bid);
 
-  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
-  if (!batch || !batch.course_id) return false;
-  const pkgId = batch.subscription_package_id;
-  if (!pkgId) return false;
-  const course = db.prepare('SELECT id, enrollment_type FROM courses WHERE id = ?').get(batch.course_id);
-  if (!course || String(course.enrollment_type || '').toLowerCase() !== 'subscribe') return false;
+  if (!rows.length) {
+    const batch = db.prepare('SELECT course_id, subscription_package_id FROM batches WHERE id = ?').get(bid);
+    if (batch?.course_id) {
+      rows = [{ course_id: batch.course_id, billing_package_id: batch.subscription_package_id }];
+    }
+  }
 
-  const pkg = db
-    .prepare(
-      `SELECT * FROM billing_packages WHERE id = ? AND is_active = 1 AND scope = 'course' AND package_kind = 'subscription' AND course_id = ?`
-    )
-    .get(pkgId, batch.course_id);
-  if (!pkg) return false;
+  const batchMeta = db.prepare('SELECT planned_start_date FROM batches WHERE id = ?').get(bid);
+  const startMs = batchMeta?.planned_start_date ? startOfDayFromYmd(batchMeta.planned_start_date) : Date.now();
 
-  const startMs = batch.planned_start_date ? startOfDayFromYmd(batch.planned_start_date) : Date.now();
   db.transaction(() => {
-    applyPackageGrantsForPayment({
-      userId,
-      pkg,
-      startMs,
-      source: 'subscribe_batch',
-      razorpayOrderId: null,
-      paymentId: null,
-      batchId,
-      comboId: null,
-      courseIds: [batch.course_id],
-    });
+    for (const row of rows) {
+      const cid = Number(row.course_id);
+      if (!Number.isFinite(cid)) continue;
+
+      db.prepare(
+        `DELETE FROM course_access_grants
+         WHERE user_id = ? AND batch_id = ? AND course_id = ?
+           AND source = 'subscribe_batch' AND revoked_at_ms IS NULL`,
+      ).run(uid, bid, cid);
+
+      const course = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(cid);
+      if (!course) continue;
+      const isSubscribe = String(course.enrollment_type || '').toLowerCase() === 'subscribe';
+
+      const pkgId = row.billing_package_id != null ? Number(row.billing_package_id) : null;
+      let appliedPkg = false;
+      if (pkgId && Number.isFinite(pkgId)) {
+        const pkg = db
+          .prepare(
+            `SELECT * FROM billing_packages WHERE id = ? AND is_active = 1 AND scope = 'course'
+             AND package_kind = 'subscription' AND course_id = ?`,
+          )
+          .get(pkgId, cid);
+        if (pkg) {
+          applyPackageGrantsForPayment({
+            userId: uid,
+            pkg,
+            startMs,
+            source: 'subscribe_batch',
+            razorpayOrderId: null,
+            paymentId: null,
+            batchId: bid,
+            comboId: null,
+            courseIds: [cid],
+          });
+          appliedPkg = true;
+        }
+      }
+
+      if (!appliedPkg && !isSubscribe) {
+        grantNonSubscribeBatchCourseForSingleCourse(uid, cid);
+      }
+    }
   })();
-  return true;
 }
 
 function upsertLifetimeGrant(userId, courseId, source) {
@@ -352,8 +390,7 @@ module.exports = {
   applyRenewalForPayment,
   loadBillingPackage,
   loadComboCourses,
-  grantBatchSubscriptionAccess,
-  grantNonSubscribeBatchCourseAccess,
+  syncBatchMemberCourseAccess,
   upsertLifetimeGrant,
   startOfDayFromYmd,
   hasActiveSubscribeWindow,

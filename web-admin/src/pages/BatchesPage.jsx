@@ -163,10 +163,20 @@ export default function BatchesPage({
   const [subPkgLoading, setSubPkgLoading] = React.useState(false);
   const [editSubPackageId, setEditSubPackageId] = React.useState('');
 
-  const [createModalCourseId, setCreateModalCourseId] = React.useState('');
-  const [createModalSubPkgId, setCreateModalSubPkgId] = React.useState('');
-  const [createSubPkgOptions, setCreateSubPkgOptions] = React.useState([]);
-  const [createSubPkgLoading, setCreateSubPkgLoading] = React.useState(false);
+  const [createCourseRows, setCreateCourseRows] = React.useState([{ courseId: '', packageId: '' }]);
+  const [createPkgByCourseId, setCreatePkgByCourseId] = React.useState({});
+  const createCoursesKey = React.useMemo(
+    () => [...new Set(createCourseRows.map((r) => r.courseId).filter(Boolean))].sort().join(','),
+    [createCourseRows],
+  );
+
+  const editCoursePickMeta = React.useMemo(() => {
+    if (modal !== 'course' || !coursePickId) return { isSubscribe: false };
+    const meta = (courses || []).find((c) => String(c.id) === String(coursePickId));
+    return {
+      isSubscribe: meta ? String(meta.enrollment_type || '').toLowerCase() === 'subscribe' : false,
+    };
+  }, [modal, coursePickId, courses]);
 
   const [assignments, setAssignments] = React.useState([]);
   const [assignLoading, setAssignLoading] = React.useState(false);
@@ -222,12 +232,6 @@ export default function BatchesPage({
       setSubPkgLoading(false);
       return undefined;
     }
-    const meta = (courses || []).find((c) => String(c.id) === String(coursePickId));
-    if (!meta || String(meta.enrollment_type || '').toLowerCase() !== 'subscribe') {
-      setSubPkgOptions([]);
-      setSubPkgLoading(false);
-      return undefined;
-    }
     let cancelled = false;
     (async () => {
       setSubPkgLoading(true);
@@ -245,38 +249,46 @@ export default function BatchesPage({
     return () => {
       cancelled = true;
     };
-  }, [modal, coursePickId, courses, fetchSubscribePackagesForCourse]);
+  }, [modal, coursePickId, fetchSubscribePackagesForCourse]);
 
   React.useEffect(() => {
-    if (!createModalOpen || !createModalCourseId || !fetchSubscribePackagesForCourse) {
-      setCreateSubPkgOptions([]);
-      setCreateSubPkgLoading(false);
+    if (!createModalOpen || !fetchSubscribePackagesForCourse) {
+      setCreatePkgByCourseId({});
       return undefined;
     }
-    const meta = (courses || []).find((c) => String(c.id) === String(createModalCourseId));
-    if (!meta || String(meta.enrollment_type || '').toLowerCase() !== 'subscribe') {
-      setCreateSubPkgOptions([]);
-      setCreateSubPkgLoading(false);
-      return undefined;
-    }
+    const ids = createCoursesKey ? createCoursesKey.split(',').filter(Boolean) : [];
+    if (!ids.length) return undefined;
+
     let cancelled = false;
-    (async () => {
-      setCreateSubPkgLoading(true);
-      try {
-        const data = await fetchSubscribePackagesForCourse(Number(createModalCourseId));
-        if (cancelled) return;
-        const opts = (data?.packages || []).filter((p) => p.is_active);
-        setCreateSubPkgOptions(opts);
-      } catch {
-        if (!cancelled) setCreateSubPkgOptions([]);
-      } finally {
-        if (!cancelled) setCreateSubPkgLoading(false);
-      }
-    })();
+
+    ids.forEach((idStr) => {
+      setCreatePkgByCourseId((prev) => {
+        if (prev[idStr]?.loaded || prev[idStr]?.loading) return prev;
+        return { ...prev, [idStr]: { loading: true, loaded: false, packages: prev[idStr]?.packages || [] } };
+      });
+
+      fetchSubscribePackagesForCourse(Number(idStr))
+        .then((data) => {
+          if (cancelled) return;
+          const opts = (data?.packages || []).filter((p) => p.is_active);
+          setCreatePkgByCourseId((prev) => ({
+            ...prev,
+            [idStr]: { loading: false, loaded: true, packages: opts },
+          }));
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setCreatePkgByCourseId((prev) => ({
+            ...prev,
+            [idStr]: { loading: false, loaded: true, packages: [] },
+          }));
+        });
+    });
+
     return () => {
       cancelled = true;
     };
-  }, [createModalOpen, createModalCourseId, courses, fetchSubscribePackagesForCourse]);
+  }, [createModalOpen, createCoursesKey, fetchSubscribePackagesForCourse]);
 
   function toggleSchedDay(day) {
     setSchedDays((prev) => (prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day]));
@@ -411,23 +423,34 @@ export default function BatchesPage({
     e.preventDefault();
     const formEl = e.currentTarget;
     const fd = new FormData(formEl);
-    const cidNum =
-      createModalCourseId.trim() !== '' && Number.isFinite(Number(createModalCourseId))
-        ? Number(createModalCourseId)
-        : undefined;
-    const cmeta =
-      cidNum != null ? (courses || []).find((x) => Number(x.id) === cidNum) : null;
-    const isSubscribe =
-      cmeta && String(cmeta.enrollment_type || '').toLowerCase() === 'subscribe';
-    if (isSubscribe) {
-      const pid = Number(createModalSubPkgId);
-      if (!Number.isFinite(pid)) {
+
+    const seen = new Set();
+    const coursePayload = [];
+    for (const row of createCourseRows) {
+      const idStr = String(row.courseId || '').trim();
+      if (!idStr) continue;
+      const cidNum = Number(idStr);
+      if (!Number.isFinite(cidNum)) continue;
+      if (seen.has(cidNum)) {
+        window.alert('Remove duplicate courses from the batch before creating.');
+        return;
+      }
+      seen.add(cidNum);
+      const cmeta = (courses || []).find((x) => Number(x.id) === cidNum);
+      const isSubscribe = cmeta && String(cmeta.enrollment_type || '').toLowerCase() === 'subscribe';
+      const pkgNum = row.packageId !== '' ? Number(row.packageId) : NaN;
+      if (isSubscribe && !Number.isFinite(pkgNum)) {
         window.alert(
-          'Choose a subscription package for this Subscribe course, or create packages under Billing & combos.',
+          `Subscribe course "${cmeta?.name || cidNum}" needs a subscription package. Add packages under Billing & combos if empty.`,
         );
         return;
       }
+      coursePayload.push({
+        courseId: cidNum,
+        subscriptionPackageId: Number.isFinite(pkgNum) ? pkgNum : undefined,
+      });
     }
+
     const trainerRaw = fd.get('trainerId');
     const trainers =
       trainerRaw && String(trainerRaw).trim() !== '' ? [Number(trainerRaw)] : undefined;
@@ -436,7 +459,7 @@ export default function BatchesPage({
       title: String(fd.get('title') || '').trim(),
       batchType: String(fd.get('batchType') || 'group'),
       batchNumber: Number(fd.get('batchNumber')),
-      courseId: cidNum,
+      courses: coursePayload.length ? coursePayload : undefined,
       plannedStartDate: String(fd.get('plannedStartDate') || '').trim() || undefined,
       durationDays:
         fd.get('durationDays') != null && String(fd.get('durationDays')).trim() !== ''
@@ -444,13 +467,11 @@ export default function BatchesPage({
           : undefined,
       notes: String(fd.get('notes') || '').trim() || undefined,
       trainers,
-      subscriptionPackageId: isSubscribe ? Number(createModalSubPkgId) : undefined,
     });
     if (ok) {
       formEl.reset();
-      setCreateModalCourseId('');
-      setCreateModalSubPkgId('');
-      setCreateSubPkgOptions([]);
+      setCreateCourseRows([{ courseId: '', packageId: '' }]);
+      setCreatePkgByCourseId({});
       setCreateModalOpen(false);
     }
   }
@@ -548,17 +569,34 @@ export default function BatchesPage({
     const cmeta = cid != null ? (courses || []).find((x) => Number(x.id) === cid) : null;
     const isSubscribe =
       cmeta && String(cmeta.enrollment_type || '').toLowerCase() === 'subscribe';
-    if (isSubscribe) {
-      const pid = Number(editSubPackageId);
-      if (!Number.isFinite(pid)) {
-        window.alert('Choose a subscription package for this Subscribe course, or use Billing & combos to create one.');
-        return;
-      }
+    const pkgNum = editSubPackageId === '' ? null : Number(editSubPackageId);
+
+    if (cid == null) {
+      await onUpdateBatch(modalBatch.id, {
+        courses: [],
+        courseId: null,
+        subscriptionPackageId: null,
+        durationDays: durationOverride === '' ? null : Number(durationOverride),
+      });
+      closeModal();
+      return;
     }
+
+    if (isSubscribe && !Number.isFinite(pkgNum)) {
+      window.alert('Choose a subscription package for this Subscribe course, or use Billing & combos to create one.');
+      return;
+    }
+
     await onUpdateBatch(modalBatch.id, {
+      courses: [
+        {
+          courseId: cid,
+          subscriptionPackageId: Number.isFinite(pkgNum) ? pkgNum : undefined,
+        },
+      ],
       courseId: cid,
       durationDays: durationOverride === '' ? null : Number(durationOverride),
-      subscriptionPackageId: isSubscribe ? Number(editSubPackageId) : null,
+      subscriptionPackageId: Number.isFinite(pkgNum) ? pkgNum : null,
     });
     closeModal();
   }
@@ -1105,9 +1143,8 @@ export default function BatchesPage({
         title="Create batch"
         onClose={() => {
           setCreateModalOpen(false);
-          setCreateModalCourseId('');
-          setCreateModalSubPkgId('');
-          setCreateSubPkgOptions([]);
+          setCreateCourseRows([{ courseId: '', packageId: '' }]);
+          setCreatePkgByCourseId({});
         }}
         variant="modal"
       >
@@ -1151,53 +1188,88 @@ export default function BatchesPage({
               ))}
             </select>
           </label>
-          <label className="batchCreateLabel batchCreateSpan2">
-            Course (optional — link syllabus & subscriptions)
-            <select
-              value={createModalCourseId}
-              onChange={(event) => {
-                setCreateModalCourseId(event.target.value);
-                setCreateModalSubPkgId('');
-              }}
-            >
-              <option value="">— None —</option>
-              {(courses || []).map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                  {String(c.enrollment_type || '').toLowerCase() === 'subscribe' ? ' (Subscribe)' : ''}
-                </option>
-              ))}
-            </select>
-          </label>
-          {(() => {
-            const meta = (courses || []).find((c) => String(c.id) === String(createModalCourseId));
-            const isSub = meta && String(meta.enrollment_type || '').toLowerCase() === 'subscribe';
-            if (!isSub) return null;
-            return (
-              <label className="batchCreateLabel batchCreateSpan2">
-                Subscription package (required for Subscribe courses)
-                <select
-                  value={createModalSubPkgId}
-                  onChange={(event) => setCreateModalSubPkgId(event.target.value)}
-                  disabled={createSubPkgLoading}
-                >
-                  <option value="">— Select package —</option>
-                  {createSubPkgOptions.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {packageOptionLabel(p)}
-                    </option>
-                  ))}
-                </select>
-                {createSubPkgLoading ? (
-                  <span className="muted fieldHint">Loading packages…</span>
-                ) : createSubPkgOptions.length === 0 ? (
-                  <span className="muted fieldHint">
-                    No active subscription packages for this course. Add them under Billing &amp; combos → Course packages.
-                  </span>
-                ) : null}
-              </label>
-            );
-          })()}
+          <div className="batchCreateSpan2 stack" style={{ gap: 12 }}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 8 }}>
+              <span className="batchCreateLabel" style={{ margin: 0 }}>
+                Courses (optional — first sets session syllabus; learners get every course listed)
+              </span>
+              <button
+                type="button"
+                className="secondaryBtn"
+                onClick={() => setCreateCourseRows((rows) => [...rows, { courseId: '', packageId: '' }])}
+              >
+                Add course
+              </button>
+            </div>
+            {createCourseRows.map((row, i) => {
+              const entry = createPkgByCourseId[row.courseId] || { loading: false, packages: [] };
+              const meta = row.courseId
+                ? (courses || []).find((c) => String(c.id) === String(row.courseId))
+                : null;
+              const isSub = meta && String(meta.enrollment_type || '').toLowerCase() === 'subscribe';
+              return (
+                <div key={i} className="stack" style={{ gap: 8, paddingBottom: 8, borderBottom: '1px solid var(--border, #e8e8ea)' }}>
+                  <label className="batchCreateLabel batchCreateSpan2">
+                    Course
+                    <select
+                      value={row.courseId}
+                      onChange={(event) => {
+                        const v = event.target.value;
+                        setCreateCourseRows((rows) =>
+                          rows.map((r, j) => (j === i ? { courseId: v, packageId: '' } : r)),
+                        );
+                      }}
+                    >
+                      <option value="">— None —</option>
+                      {(courses || []).map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                          {String(c.enrollment_type || '').toLowerCase() === 'subscribe' ? ' (Subscribe)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {row.courseId ? (
+                    <label className="batchCreateLabel batchCreateSpan2">
+                      Subscription package {isSub ? '(required for Subscribe courses)' : '(optional — timed access via package)'}
+                      <select
+                        value={row.packageId}
+                        onChange={(event) => {
+                          const v = event.target.value;
+                          setCreateCourseRows((rows) => rows.map((r, j) => (j === i ? { ...r, packageId: v } : r)));
+                        }}
+                        disabled={entry.loading}
+                      >
+                        <option value="">{isSub ? '— Select package —' : '— No package (full access) —'}</option>
+                        {entry.packages.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {packageOptionLabel(p)}
+                          </option>
+                        ))}
+                      </select>
+                      {entry.loading ? (
+                        <span className="muted fieldHint">Loading packages…</span>
+                      ) : entry.packages.length === 0 ? (
+                        <span className="muted fieldHint">
+                          No active subscription packages for this course. Add them under Billing &amp; combos → Course packages.
+                        </span>
+                      ) : null}
+                    </label>
+                  ) : null}
+                  {createCourseRows.length > 1 ? (
+                    <button
+                      type="button"
+                      className="secondaryBtn"
+                      style={{ alignSelf: 'flex-start' }}
+                      onClick={() => setCreateCourseRows((rows) => rows.filter((_, j) => j !== i))}
+                    >
+                      Remove row
+                    </button>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
           <label className="batchCreateLabel batchCreateSpan2">
             Notes (optional)
             <textarea name="notes" placeholder="Internal notes" rows={2} />
@@ -1231,36 +1303,36 @@ export default function BatchesPage({
               ))}
             </select>
           </label>
-          {(() => {
-            const meta = (courses || []).find((c) => String(c.id) === String(coursePickId));
-            const isSub = meta && String(meta.enrollment_type || '').toLowerCase() === 'subscribe';
-            if (!isSub) return null;
-            return (
-              <label className="batchCreateLabel">
-                Subscription package (required for Subscribe courses)
-                <select
-                  value={editSubPackageId}
-                  onChange={(e) => setEditSubPackageId(e.target.value)}
-                  disabled={subPkgLoading}
-                >
-                  <option value="">— Select package —</option>
-                  {subPkgOptions.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {packageOptionLabel(p)}
-                    </option>
-                  ))}
-                </select>
-                {subPkgLoading ? (
-                  <span className="muted fieldHint">Loading packages…</span>
-                ) : subPkgOptions.length === 0 ? (
-                  <span className="muted fieldHint">
-                    No active subscription packages for this course. An admin can add them under Billing &amp; combos →
-                    Course packages.
-                  </span>
-                ) : null}
-              </label>
-            );
-          })()}
+          {coursePickId ? (
+            <label className="batchCreateLabel">
+              Subscription package{' '}
+              {editCoursePickMeta.isSubscribe
+                ? '(required for Subscribe courses)'
+                : '(optional — timed access)'}
+              <select
+                value={editSubPackageId}
+                onChange={(e) => setEditSubPackageId(e.target.value)}
+                disabled={subPkgLoading}
+              >
+                <option value="">
+                  {editCoursePickMeta.isSubscribe ? '— Select package —' : '— No package (full access) —'}
+                </option>
+                {subPkgOptions.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {packageOptionLabel(p)}
+                  </option>
+                ))}
+              </select>
+              {subPkgLoading ? (
+                <span className="muted fieldHint">Loading packages…</span>
+              ) : subPkgOptions.length === 0 ? (
+                <span className="muted fieldHint">
+                  No active subscription packages for this course. An admin can add them under Billing &amp; combos → Course
+                  packages.
+                </span>
+              ) : null}
+            </label>
+          ) : null}
           <label className="batchCreateLabel">
             Session count override (optional)
             <input

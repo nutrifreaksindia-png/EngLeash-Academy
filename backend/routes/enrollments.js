@@ -88,10 +88,13 @@ router.get('/courses/:courseId/open-batches', auth, requireRole('Student', 'Lab'
           AND date(bs.session_date) <= date('now')
       ) AS sessions_passed
     FROM batches b
-    WHERE b.course_id = ?
-      AND COALESCE(b.enrollment_open_status, 'closed') = 'open'
+    WHERE COALESCE(b.enrollment_open_status, 'closed') = 'open'
+      AND (
+        b.course_id = ?
+        OR EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = b.id AND bc.course_id = ?)
+      )
     ORDER BY COALESCE(b.batch_number, 999999), b.id
-  `).all(courseId);
+  `).all(courseId, courseId);
   res.json({ batches: rows });
 });
 
@@ -110,7 +113,15 @@ router.post('/apply-batch', auth, requireRole('Student', 'Lab'), (req, res) => {
     FROM batches
     WHERE id = ?
   `).get(batchId);
-  if (!batch || Number(batch.course_id) !== courseId) {
+  const batchMatchesCourse =
+    batch &&
+    (Number(batch.course_id) === courseId ||
+      db
+        .prepare(
+          `SELECT 1 FROM batch_courses bc WHERE bc.batch_id = ? AND bc.course_id = ?`,
+        )
+        .get(batchId, courseId));
+  if (!batchMatchesCourse) {
     return res.status(404).json({ error: 'Batch not found for course' });
   }
   if ((batch.enrollment_open_status || 'closed') !== 'open') {

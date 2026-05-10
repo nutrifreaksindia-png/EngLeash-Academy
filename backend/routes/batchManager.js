@@ -7,22 +7,81 @@ const { ensureLiveSessionsForBatch, combineDateTime } = require('../services/ens
 const liveRecording = require('../services/liveRecording');
 
 const router = express.Router();
-const { grantBatchSubscriptionAccess, grantNonSubscribeBatchCourseAccess } = require('../lib/courseAccess');
+const { syncBatchMemberCourseAccess } = require('../lib/courseAccess');
 
-function subscriptionPackageRequired(courseIdNum, subscriptionPackageId) {
-  if (courseIdNum == null || !Number.isFinite(courseIdNum)) return { ok: true, pkgId: null };
-  const course = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(courseIdNum);
-  const et = String(course?.enrollment_type || '').toLowerCase();
-  if (et !== 'subscribe') return { ok: true, pkgId: null };
-  const pkgIdNum = subscriptionPackageId != null && subscriptionPackageId !== '' ? Number(subscriptionPackageId) : null;
-  if (!pkgIdNum || !Number.isFinite(pkgIdNum)) return { ok: false, error: 'subscription_package_id is required for subscribe courses' };
-  const pkg = db
-    .prepare(
-      `SELECT id FROM billing_packages WHERE id = ? AND scope = 'course' AND course_id = ? AND package_kind = 'subscription' AND is_active = 1`,
-    )
-    .get(pkgIdNum, courseIdNum);
-  if (!pkg) return { ok: false, error: 'Invalid subscription package for this course' };
-  return { ok: true, pkgId: pkgIdNum };
+function normalizeBatchCoursesInput(body) {
+  const rows = [];
+  const seen = new Set();
+
+  if (Array.isArray(body.courses) && body.courses.length) {
+    for (let i = 0; i < body.courses.length; i += 1) {
+      const item = body.courses[i];
+      const courseId = item?.courseId != null && item.courseId !== '' ? Number(item.courseId) : null;
+      if (courseId == null || !Number.isFinite(courseId)) continue;
+      if (seen.has(courseId)) return { ok: false, error: 'Duplicate course in courses list' };
+      seen.add(courseId);
+      const pkgRaw = item?.subscriptionPackageId ?? item?.billingPackageId;
+      const pkgNum = pkgRaw != null && pkgRaw !== '' ? Number(pkgRaw) : null;
+      rows.push({
+        courseId,
+        subscriptionPackageId: Number.isFinite(pkgNum) ? pkgNum : null,
+        sortOrder: rows.length,
+      });
+    }
+    return { ok: true, rows };
+  }
+
+  const legacyCid = body.courseId != null && body.courseId !== '' ? Number(body.courseId) : null;
+  if (legacyCid != null && Number.isFinite(legacyCid)) {
+    const pkgRaw = body.subscriptionPackageId;
+    const pkgNum = pkgRaw != null && pkgRaw !== '' ? Number(pkgRaw) : null;
+    rows.push({
+      courseId: legacyCid,
+      subscriptionPackageId: Number.isFinite(pkgNum) ? pkgNum : null,
+      sortOrder: 0,
+    });
+  }
+  return { ok: true, rows };
+}
+
+function validateBatchCourseRows(rows) {
+  for (const r of rows) {
+    const course = db.prepare('SELECT id, enrollment_type FROM courses WHERE id = ?').get(r.courseId);
+    if (!course) return { ok: false, error: `Course ${r.courseId} not found` };
+    const et = String(course.enrollment_type || '').toLowerCase();
+    if (et === 'subscribe' && !r.subscriptionPackageId) {
+      return { ok: false, error: 'Each subscribe course on the batch must have a subscription package' };
+    }
+    if (r.subscriptionPackageId) {
+      const pkg = db
+        .prepare(
+          `SELECT id FROM billing_packages WHERE id = ? AND scope = 'course' AND course_id = ?
+           AND package_kind = 'subscription' AND is_active = 1`,
+        )
+        .get(r.subscriptionPackageId, r.courseId);
+      if (!pkg) return { ok: false, error: `Invalid subscription package for course ${r.courseId}` };
+    }
+  }
+  return { ok: true };
+}
+
+function legacyBatchCourseColumnsFromRows(rows) {
+  const first = rows.length ? rows[0] : null;
+  return {
+    course_id: first ? first.courseId : null,
+    subscription_package_id: first && first.subscriptionPackageId ? first.subscriptionPackageId : null,
+  };
+}
+
+function persistBatchCourses(batchId, rows) {
+  db.prepare('DELETE FROM batch_courses WHERE batch_id = ?').run(batchId);
+  const ins = db.prepare(`
+    INSERT INTO batch_courses (batch_id, course_id, billing_package_id, sort_order)
+    VALUES (?, ?, ?, ?)
+  `);
+  for (const r of rows) {
+    ins.run(batchId, r.courseId, r.subscriptionPackageId || null, r.sortOrder);
+  }
 }
 
 function parseJsonArray(value, fallback = []) {
@@ -268,16 +327,19 @@ function remapLessonsForBatch(batchId, courseId) {
 router.get('/', auth, (req, res) => {
   const isAdmin = req.user.role === 'Admin';
   let rows;
+  const courseNameExpr =
+    "COALESCE((SELECT GROUP_CONCAT(co.name, ' · ') FROM batch_courses bc JOIN courses co ON co.id = bc.course_id WHERE bc.batch_id = b.id), c.name) AS course_name";
+
   if (isAdmin) {
     rows = db.prepare(`
-        SELECT b.*, c.name AS course_name
+        SELECT b.*, ${courseNameExpr}
         FROM batches b
         LEFT JOIN courses c ON c.id = b.course_id
         ORDER BY b.id DESC
       `).all();
   } else if (req.user.role === 'Student' || req.user.role === 'Lab') {
     rows = db.prepare(`
-        SELECT b.*, c.name AS course_name
+        SELECT b.*, ${courseNameExpr}
         FROM batches b
         LEFT JOIN courses c ON c.id = b.course_id
         WHERE EXISTS (SELECT 1 FROM batch_members bm WHERE bm.batch_id = b.id AND bm.student_id = ?)
@@ -285,7 +347,7 @@ router.get('/', auth, (req, res) => {
       `).all(req.user.id);
   } else {
     rows = db.prepare(`
-        SELECT b.*, c.name AS course_name
+        SELECT b.*, ${courseNameExpr}
         FROM batches b
         LEFT JOIN courses c ON c.id = b.course_id
         WHERE b.trainer_id = ? OR EXISTS (SELECT 1 FROM batch_trainers bt WHERE bt.batch_id = b.id AND bt.trainer_id = ?)
@@ -317,16 +379,10 @@ router.get('/course/:courseId/subscribe-packages', auth, requireRole('Admin', 'T
 
 router.get('/:id(\\d+)', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), (req, res) => {
   const batchId = Number(req.params.id);
-  const row = db
-    .prepare(
-      `
-    SELECT b.*, c.name AS course_name
-    FROM batches b
-    LEFT JOIN courses c ON c.id = b.course_id
-    WHERE b.id = ?
-  `
-    )
-    .get(batchId);
+  const courseNameExpr =
+    "COALESCE((SELECT GROUP_CONCAT(co.name, ' · ') FROM batch_courses bc JOIN courses co ON co.id = bc.course_id WHERE bc.batch_id = b.id), c.name) AS course_name";
+
+  const row = db.prepare(`SELECT b.*, ${courseNameExpr} FROM batches b LEFT JOIN courses c ON c.id = b.course_id WHERE b.id = ?`).get(batchId);
   if (!row) return res.status(404).json({ error: 'Batch not found' });
   if (req.user.role === 'Student' || req.user.role === 'Lab') {
     const member = db
@@ -339,7 +395,33 @@ router.get('/:id(\\d+)', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab')
       db.prepare('SELECT 1 FROM batch_trainers WHERE batch_id = ? AND trainer_id = ?').get(batchId, req.user.id);
     if (!ok) return res.status(403).json({ error: 'Forbidden' });
   }
-  res.json(row);
+
+  let batchCourses = db
+    .prepare(
+      `
+      SELECT bc.course_id, bc.billing_package_id AS subscription_package_id, bc.sort_order,
+             c.name AS course_name, c.enrollment_type
+      FROM batch_courses bc
+      JOIN courses c ON c.id = bc.course_id
+      WHERE bc.batch_id = ?
+      ORDER BY bc.sort_order ASC, bc.id ASC`,
+    )
+    .all(batchId);
+
+  if (!batchCourses.length && row.course_id) {
+    const cm = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(row.course_id);
+    batchCourses = [
+      {
+        course_id: row.course_id,
+        subscription_package_id: row.subscription_package_id ?? null,
+        sort_order: 0,
+        course_name: db.prepare('SELECT name FROM courses WHERE id = ?').get(row.course_id)?.name || null,
+        enrollment_type: cm?.enrollment_type ?? null,
+      },
+    ];
+  }
+
+  res.json({ ...row, batchCourses });
 });
 
 router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
@@ -364,6 +446,7 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     const touchesRestricted =
       (bt != null && String(bt).trim() && String(bt).trim() !== batch.title) ||
       ('courseId' in req.body && bodyCourseId !== batch.course_id) ||
+      ('courses' in req.body && Array.isArray(req.body.courses)) ||
       (bn != null && bn !== '' && Number(bn) !== batch.batch_number);
     if (touchesRestricted) {
       return res.status(403).json({
@@ -374,7 +457,6 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
 
   const {
     title,
-    courseId,
     plannedStartDate,
     durationDays,
     trainingSchedule,
@@ -393,11 +475,50 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   }
 
   let nextCourseId = batch.course_id;
-  if ('courseId' in req.body) {
-    nextCourseId =
-      req.body.courseId == null || req.body.courseId === '' ? null : Number(req.body.courseId);
-    if (nextCourseId != null && !Number.isFinite(nextCourseId)) {
-      return res.status(400).json({ error: 'Invalid courseId' });
+  let nextSubscriptionPackageId = batch.subscription_package_id;
+
+  if ('courses' in req.body && Array.isArray(req.body.courses)) {
+    const normalized = normalizeBatchCoursesInput({ courses: req.body.courses });
+    if (!normalized.ok) return res.status(400).json({ error: normalized.error });
+    const chk = validateBatchCourseRows(normalized.rows);
+    if (!chk.ok) return res.status(400).json({ error: chk.error });
+    persistBatchCourses(batchId, normalized.rows);
+    const leg = legacyBatchCourseColumnsFromRows(normalized.rows);
+    nextCourseId = leg.course_id;
+    nextSubscriptionPackageId = leg.subscription_package_id;
+  } else {
+    if ('courseId' in req.body) {
+      nextCourseId =
+        req.body.courseId == null || req.body.courseId === '' ? null : Number(req.body.courseId);
+      if (nextCourseId != null && !Number.isFinite(nextCourseId)) {
+        return res.status(400).json({ error: 'Invalid courseId' });
+      }
+    }
+
+    if ('subscriptionPackageId' in req.body) {
+      nextSubscriptionPackageId =
+        subscriptionPackageId == null || subscriptionPackageId === ''
+          ? null
+          : Number(subscriptionPackageId);
+      if (nextSubscriptionPackageId != null && !Number.isFinite(nextSubscriptionPackageId)) {
+        return res.status(400).json({ error: 'Invalid subscriptionPackageId' });
+      }
+    }
+
+    if ('courseId' in req.body || 'subscriptionPackageId' in req.body) {
+      const rows =
+        nextCourseId != null
+          ? [
+              {
+                courseId: nextCourseId,
+                subscriptionPackageId: nextSubscriptionPackageId,
+                sortOrder: 0,
+              },
+            ]
+          : [];
+      const chk = validateBatchCourseRows(rows);
+      if (!chk.ok) return res.status(400).json({ error: chk.error });
+      persistBatchCourses(batchId, rows);
     }
   }
 
@@ -440,16 +561,6 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
       ? enrollmentOpenStatus
       : batch.enrollment_open_status || 'closed';
 
-  let nextSubscriptionPackageId = batch.subscription_package_id;
-  if ('subscriptionPackageId' in req.body) {
-    const pkgCheck = subscriptionPackageRequired(
-      nextCourseId,
-      subscriptionPackageId == null || subscriptionPackageId === '' ? null : subscriptionPackageId,
-    );
-    if (!pkgCheck.ok) return res.status(400).json({ error: pkgCheck.error });
-    nextSubscriptionPackageId = pkgCheck.pkgId;
-  }
-
   db.prepare(
     `
     UPDATE batches SET
@@ -473,17 +584,53 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     batchId
   );
 
-  const updated = db
+  const courseLinkageChanged =
+    ('courses' in req.body && Array.isArray(req.body.courses)) ||
+    'courseId' in req.body ||
+    'subscriptionPackageId' in req.body;
+
+  if (courseLinkageChanged) {
+    const memberRows = db.prepare('SELECT student_id FROM batch_members WHERE batch_id = ?').all(batchId);
+    for (const m of memberRows) {
+      try {
+        syncBatchMemberCourseAccess(batchId, m.student_id);
+      } catch (_) {
+        /* best-effort */
+      }
+    }
+  }
+
+  const courseNameExpr =
+    "COALESCE((SELECT GROUP_CONCAT(co.name, ' · ') FROM batch_courses bc JOIN courses co ON co.id = bc.course_id WHERE bc.batch_id = b.id), c.name) AS course_name";
+
+  const updated = db.prepare(`SELECT b.*, ${courseNameExpr} FROM batches b LEFT JOIN courses c ON c.id = b.course_id WHERE b.id = ?`).get(batchId);
+
+  let batchCourses = db
     .prepare(
       `
-    SELECT b.*, c.name AS course_name
-    FROM batches b
-    LEFT JOIN courses c ON c.id = b.course_id
-    WHERE b.id = ?
-  `
+      SELECT bc.course_id, bc.billing_package_id AS subscription_package_id, bc.sort_order,
+             c.name AS course_name, c.enrollment_type
+      FROM batch_courses bc
+      JOIN courses c ON c.id = bc.course_id
+      WHERE bc.batch_id = ?
+      ORDER BY bc.sort_order ASC, bc.id ASC`,
     )
-    .get(batchId);
-  res.json(updated);
+    .all(batchId);
+
+  if (!batchCourses.length && updated.course_id) {
+    const cm = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(updated.course_id);
+    batchCourses = [
+      {
+        course_id: updated.course_id,
+        subscription_package_id: updated.subscription_package_id ?? null,
+        sort_order: 0,
+        course_name: db.prepare('SELECT name FROM courses WHERE id = ?').get(updated.course_id)?.name || null,
+        enrollment_type: cm?.enrollment_type ?? null,
+      },
+    ];
+  }
+
+  res.json({ ...updated, batchCourses });
 });
 
 router.delete('/:id(\\d+)', auth, requireRole('Admin'), async (req, res) => {
@@ -550,7 +697,6 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const {
     title,
     batchType,
-    courseId,
     trainingSchedule,
     meetingId,
     students,
@@ -560,7 +706,6 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     batchNumber,
     durationDays,
     enrollmentOpenStatus,
-    subscriptionPackageId,
   } = req.body;
 
   if (!title || !batchType || batchNumber == null || batchNumber === '') {
@@ -575,13 +720,11 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     return res.status(409).json({ error: 'Batch number already used for this batch type' });
   }
 
-  const courseIdNum = courseId != null && courseId !== '' ? Number(courseId) : null;
-  if (courseIdNum != null && !Number.isFinite(courseIdNum)) {
-    return res.status(400).json({ error: 'Invalid courseId' });
-  }
-
-  const pkgCheck = subscriptionPackageRequired(courseIdNum, subscriptionPackageId);
-  if (!pkgCheck.ok) return res.status(400).json({ error: pkgCheck.error });
+  const normalizedCourses = normalizeBatchCoursesInput(req.body);
+  if (!normalizedCourses.ok) return res.status(400).json({ error: normalizedCourses.error });
+  const courseCheck = validateBatchCourseRows(normalizedCourses.rows);
+  if (!courseCheck.ok) return res.status(400).json({ error: courseCheck.error });
+  const legacyCols = legacyBatchCourseColumnsFromRows(normalizedCourses.rows);
 
   const trainerCandidates = Array.isArray(trainers) ? trainers.map(Number).filter((x) => Number.isFinite(x)) : [];
   const trainerId =
@@ -600,7 +743,7 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     batchType,
     trainerId,
     req.user.id,
-    courseIdNum,
+    legacyCols.course_id,
     trainingSchedule ? JSON.stringify(trainingSchedule) : null,
     meetingId || null,
     plannedStartDate || null,
@@ -608,25 +751,25 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     bn,
     Number.isFinite(durationDaysNum) && durationDaysNum > 0 ? durationDaysNum : null,
     enrollmentOpenStatus === 'closed' ? 'closed' : 'open',
-    pkgCheck.pkgId
+    legacyCols.subscription_package_id
   );
   const batchId = row.lastInsertRowid;
+
+  try {
+    persistBatchCourses(batchId, normalizedCourses.rows);
+  } catch (e) {
+    db.prepare('DELETE FROM batches WHERE id = ?').run(batchId);
+    return res.status(500).json({ error: e.message || 'Could not save batch courses' });
+  }
 
   (Array.isArray(students) ? students : []).forEach((sid) => {
     const uid = Number(sid);
     if (!Number.isFinite(uid)) return;
     db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(batchId, uid);
-    if (pkgCheck.pkgId) {
-      try {
-        grantBatchSubscriptionAccess(batchId, uid);
-      } catch (_) {
-        /* best-effort; admin can fix */
-      }
-    }
     try {
-      grantNonSubscribeBatchCourseAccess(batchId, uid);
+      syncBatchMemberCourseAccess(batchId, uid);
     } catch (_) {
-      /* best-effort */
+      /* best-effort; admin can fix */
     }
   });
   const trainerAttach = trainerCandidates.length > 0 ? trainerCandidates : [trainerId];
@@ -634,17 +777,39 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     db.prepare('INSERT OR IGNORE INTO batch_trainers (batch_id, trainer_id) VALUES (?, ?)').run(batchId, tid);
   });
 
+  const courseNameExprCreated =
+    "COALESCE((SELECT GROUP_CONCAT(co.name, ' · ') FROM batch_courses bc JOIN courses co ON co.id = bc.course_id WHERE bc.batch_id = b.id), c.name) AS course_name";
+
   const created = db
+    .prepare(`SELECT b.*, ${courseNameExprCreated} FROM batches b LEFT JOIN courses c ON c.id = b.course_id WHERE b.id = ?`)
+    .get(batchId);
+
+  let batchCoursesCreated = db
     .prepare(
       `
-    SELECT b.*, c.name AS course_name
-    FROM batches b
-    LEFT JOIN courses c ON c.id = b.course_id
-    WHERE b.id = ?
-  `
+      SELECT bc.course_id, bc.billing_package_id AS subscription_package_id, bc.sort_order,
+             c.name AS course_name, c.enrollment_type
+      FROM batch_courses bc
+      JOIN courses c ON c.id = bc.course_id
+      WHERE bc.batch_id = ?
+      ORDER BY bc.sort_order ASC, bc.id ASC`,
     )
-    .get(batchId);
-  res.status(201).json(created);
+    .all(batchId);
+
+  if (!batchCoursesCreated.length && created.course_id) {
+    const cm = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(created.course_id);
+    batchCoursesCreated = [
+      {
+        course_id: created.course_id,
+        subscription_package_id: created.subscription_package_id ?? null,
+        sort_order: 0,
+        course_name: db.prepare('SELECT name FROM courses WHERE id = ?').get(created.course_id)?.name || null,
+        enrollment_type: cm?.enrollment_type ?? null,
+      },
+    ];
+  }
+
+  res.status(201).json({ ...created, batchCourses: batchCoursesCreated });
 });
 
 router.post('/:id/start', auth, requireRole('Admin', 'Trainer'), (req, res) => {
@@ -884,16 +1049,8 @@ router.post('/:id/members', auth, requireRole('Admin', 'Trainer'), (req, res) =>
   const user = db.prepare("SELECT id, role FROM users WHERE id = ? AND role IN ('Student','Lab')").get(studentId);
   if (!user) return res.status(404).json({ error: 'Student/Lab user not found' });
   db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(batchId, studentId);
-  const batch = db.prepare('SELECT subscription_package_id, course_id FROM batches WHERE id = ?').get(batchId);
-  if (batch?.subscription_package_id) {
-    try {
-      grantBatchSubscriptionAccess(batchId, studentId);
-    } catch (_) {
-      /* best-effort */
-    }
-  }
   try {
-    grantNonSubscribeBatchCourseAccess(batchId, studentId);
+    syncBatchMemberCourseAccess(batchId, studentId);
   } catch (_) {
     /* best-effort */
   }
