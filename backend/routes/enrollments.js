@@ -1,6 +1,7 @@
 const express = require('express');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
+const { upsertLifetimeGrant } = require('../lib/courseAccess');
 
 const router = express.Router();
 
@@ -41,6 +42,9 @@ router.post('/enroll', auth, requireRole('Trainer', 'Student', 'Lab'), (req, res
     }
   }
   const type = courseType;
+  if (type === 'subscribe' || type === 'purchase') {
+    return res.status(400).json({ error: 'This course must be joined via Subscribe or Purchase payment' });
+  }
   const finalStatus = type === 'free' ? 'approved' : 'pending';
   try {
     db.prepare(`
@@ -53,6 +57,9 @@ router.post('/enroll', auth, requireRole('Trainer', 'Student', 'Lab'), (req, res
   }
   if (finalStatus === 'approved') {
     db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(req.user.id, course_id);
+    db.transaction(() => {
+      upsertLifetimeGrant(req.user.id, Number(course_id), 'free');
+    })();
   }
   const row = db.prepare('SELECT * FROM course_enrollments WHERE user_id = ? AND course_id = ?').get(req.user.id, course_id);
   res.status(201).json(row);
@@ -93,6 +100,10 @@ router.post('/apply-batch', auth, requireRole('Student', 'Lab'), (req, res) => {
   const batchId = Number(req.body?.batch_id);
   if (!Number.isFinite(courseId) || !Number.isFinite(batchId)) {
     return res.status(400).json({ error: 'course_id and batch_id are required' });
+  }
+  const crs = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(courseId);
+  if (!crs || String(crs.enrollment_type || '').toLowerCase() !== 'apply') {
+    return res.status(400).json({ error: 'This course does not use batch applications' });
   }
   const batch = db.prepare(`
     SELECT id, course_id, enrollment_open_status
@@ -199,6 +210,11 @@ router.post('/:id/approve', auth, requireRole('Admin'), (req, res) => {
     .run(new Date().toISOString(), req.user.id, id);
   const latest = db.prepare('SELECT * FROM course_enrollments WHERE id = ?').get(id);
   db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(latest.user_id, latest.course_id);
+  if (String(latest.enrollment_type || '').toLowerCase() === 'free') {
+    db.transaction(() => {
+      upsertLifetimeGrant(latest.user_id, latest.course_id, 'free');
+    })();
+  }
   res.json(latest);
 });
 

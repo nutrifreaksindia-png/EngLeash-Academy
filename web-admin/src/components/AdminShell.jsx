@@ -36,10 +36,29 @@ const NAV_SECTIONS = [
   },
 ];
 
-export default function AdminShell({ currentPage, onNavigate, onRefresh, onLogout, children, creatorMode = false }) {
+export default function AdminShell({
+  currentPage,
+  onNavigate,
+  onRefresh,
+  onLogout,
+  children,
+  creatorMode = false,
+  showBillingNav = false,
+}) {
+  const lessonsCoursesItems = React.useMemo(() => {
+    const base = [
+      { id: 'lessons', label: 'Lessons' },
+      { id: 'courses', label: 'Courses' },
+    ];
+    if (showBillingNav) base.push({ id: 'billing', label: 'Billing & combos' });
+    return base;
+  }, [showBillingNav]);
+
   const navSections = creatorMode
-    ? NAV_SECTIONS.filter((s) => s.collapseKey === 'library' || s.collapseKey === 'lessonsCourses')
-    : NAV_SECTIONS;
+    ? NAV_SECTIONS.filter((s) => s.collapseKey === 'library' || s.collapseKey === 'lessonsCourses').map((s) =>
+        s.collapseKey === 'lessonsCourses' ? { ...s, items: lessonsCoursesItems.filter((i) => i.id !== 'billing') } : s
+      )
+    : NAV_SECTIONS.map((s) => (s.collapseKey === 'lessonsCourses' ? { ...s, items: lessonsCoursesItems } : s));
   const [collapsed, setCollapsed] = React.useState({
     studentsBatches: true,
     otherUsers: true,

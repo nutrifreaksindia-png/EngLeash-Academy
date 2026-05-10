@@ -10,6 +10,7 @@ const {
   canViewAssignment,
 } = require('../lib/libraryScope');
 const { syncCourseLessonSlots } = require('../lib/syncCourseLessonSlots');
+const { userHasCourseAccess } = require('../lib/courseAccess');
 
 const router = express.Router();
 const baseUrl = process.env.STORAGE_URL || process.env.API_URL || '';
@@ -241,11 +242,14 @@ function buildOrderedContentForLearner(reqUser, lessonId) {
   return out;
 }
 
-function canAccessCourse(db, userId, role, courseId) {
+function canAccessCourse(database, userId, role, courseId) {
   if (role === 'Admin') return true;
-  const e = db.prepare("SELECT 1 FROM course_enrollments WHERE user_id = ? AND course_id = ? AND status = 'approved'").get(userId, courseId)
-    || db.prepare('SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?').get(userId, courseId);
-  return !!e;
+  const e =
+    database
+      .prepare("SELECT 1 FROM course_enrollments WHERE user_id = ? AND course_id = ? AND status = 'approved'")
+      .get(userId, courseId)
+    || database.prepare('SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?').get(userId, courseId);
+  return !!e || userHasCourseAccess(userId, courseId);
 }
 
 /** Admin: one row per day 1..duration (synced with course); lesson optional until assigned. */

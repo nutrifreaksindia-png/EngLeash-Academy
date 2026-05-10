@@ -7,6 +7,23 @@ const { ensureLiveSessionsForBatch, combineDateTime } = require('../services/ens
 const liveRecording = require('../services/liveRecording');
 
 const router = express.Router();
+const { grantBatchSubscriptionAccess } = require('../lib/courseAccess');
+
+function subscriptionPackageRequired(courseIdNum, subscriptionPackageId) {
+  if (courseIdNum == null || !Number.isFinite(courseIdNum)) return { ok: true, pkgId: null };
+  const course = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(courseIdNum);
+  const et = String(course?.enrollment_type || '').toLowerCase();
+  if (et !== 'subscribe') return { ok: true, pkgId: null };
+  const pkgIdNum = subscriptionPackageId != null && subscriptionPackageId !== '' ? Number(subscriptionPackageId) : null;
+  if (!pkgIdNum || !Number.isFinite(pkgIdNum)) return { ok: false, error: 'subscription_package_id is required for subscribe courses' };
+  const pkg = db
+    .prepare(
+      `SELECT id FROM billing_packages WHERE id = ? AND scope = 'course' AND course_id = ? AND package_kind = 'subscription' AND is_active = 1`,
+    )
+    .get(pkgIdNum, courseIdNum);
+  if (!pkg) return { ok: false, error: 'Invalid subscription package for this course' };
+  return { ok: true, pkgId: pkgIdNum };
+}
 
 function parseJsonArray(value, fallback = []) {
   try {
@@ -278,6 +295,26 @@ router.get('/', auth, (req, res) => {
   res.json(rows);
 });
 
+/** Active course-scoped subscription packages (for batch subscription_package_id). Trainers need this; public billing list requires published courses. */
+router.get('/course/:courseId/subscribe-packages', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+  const courseId = Number(req.params.courseId);
+  if (!Number.isFinite(courseId)) return res.status(400).json({ error: 'Invalid course id' });
+  const course = db.prepare('SELECT id, enrollment_type, name FROM courses WHERE id = ?').get(courseId);
+  if (!course) return res.status(404).json({ error: 'Course not found' });
+  const rows = db
+    .prepare(
+      `SELECT id, package_kind, duration_unit, duration_count, fee_inr, discount_inr, sort_order, is_active
+       FROM billing_packages
+       WHERE scope = 'course' AND course_id = ? AND package_kind = 'subscription'
+       ORDER BY sort_order ASC, id ASC`,
+    )
+    .all(courseId);
+  res.json({
+    course: { id: course.id, name: course.name, enrollmentType: course.enrollment_type },
+    packages: rows.map((r) => ({ ...r, is_active: !!r.is_active })),
+  });
+});
+
 router.get('/:id(\\d+)', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), (req, res) => {
   const batchId = Number(req.params.id);
   const row = db
@@ -345,6 +382,7 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     batchNumber,
     meetingId,
     enrollmentOpenStatus,
+    subscriptionPackageId,
   } = req.body;
 
   let nextTitle = batch.title;
@@ -402,11 +440,22 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
       ? enrollmentOpenStatus
       : batch.enrollment_open_status || 'closed';
 
+  let nextSubscriptionPackageId = batch.subscription_package_id;
+  if ('subscriptionPackageId' in req.body) {
+    const pkgCheck = subscriptionPackageRequired(
+      nextCourseId,
+      subscriptionPackageId == null || subscriptionPackageId === '' ? null : subscriptionPackageId,
+    );
+    if (!pkgCheck.ok) return res.status(400).json({ error: pkgCheck.error });
+    nextSubscriptionPackageId = pkgCheck.pkgId;
+  }
+
   db.prepare(
     `
     UPDATE batches SET
       name = ?, title = ?, course_id = ?, planned_start_date = ?, duration_days = ?,
-      training_schedule_json = ?, notes = ?, meeting_id = ?, batch_number = ?, enrollment_open_status = ?
+      training_schedule_json = ?, notes = ?, meeting_id = ?, batch_number = ?, enrollment_open_status = ?,
+      subscription_package_id = ?
     WHERE id = ?
   `
   ).run(
@@ -420,6 +469,7 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     nextMeeting,
     nextBatchNumber,
     nextEnrollmentOpenStatus,
+    nextSubscriptionPackageId,
     batchId
   );
 
@@ -461,7 +511,9 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     batchNumber,
     durationDays,
     enrollmentOpenStatus,
+    subscriptionPackageId,
   } = req.body;
+
   if (!title || !batchType || batchNumber == null || batchNumber === '') {
     return res.status(400).json({ error: 'title, batchType and batchNumber are required' });
   }
@@ -479,6 +531,9 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     return res.status(400).json({ error: 'Invalid courseId' });
   }
 
+  const pkgCheck = subscriptionPackageRequired(courseIdNum, subscriptionPackageId);
+  if (!pkgCheck.ok) return res.status(400).json({ error: pkgCheck.error });
+
   const trainerCandidates = Array.isArray(trainers) ? trainers.map(Number).filter((x) => Number.isFinite(x)) : [];
   const trainerId =
     req.user.role === 'Trainer' ? req.user.id : trainerCandidates[0] || req.user.id;
@@ -488,8 +543,8 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
 
   const row = db.prepare(`
     INSERT INTO batches (
-      name, title, session_type, trainer_id, created_by, course_id, training_schedule_json, meeting_id, planned_start_date, notes, batch_status, batch_number, duration_days, enrollment_open_status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
+      name, title, session_type, trainer_id, created_by, course_id, training_schedule_json, meeting_id, planned_start_date, notes, batch_status, batch_number, duration_days, enrollment_open_status, subscription_package_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)
   `).run(
     title.trim(),
     title.trim(),
@@ -503,12 +558,22 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     notes || null,
     bn,
     Number.isFinite(durationDaysNum) && durationDaysNum > 0 ? durationDaysNum : null,
-    enrollmentOpenStatus === 'closed' ? 'closed' : 'open'
+    enrollmentOpenStatus === 'closed' ? 'closed' : 'open',
+    pkgCheck.pkgId
   );
   const batchId = row.lastInsertRowid;
 
   (Array.isArray(students) ? students : []).forEach((sid) => {
-    db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(batchId, Number(sid));
+    const uid = Number(sid);
+    if (!Number.isFinite(uid)) return;
+    db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(batchId, uid);
+    if (pkgCheck.pkgId) {
+      try {
+        grantBatchSubscriptionAccess(batchId, uid);
+      } catch (_) {
+        /* best-effort; admin can fix */
+      }
+    }
   });
   const trainerAttach = trainerCandidates.length > 0 ? trainerCandidates : [trainerId];
   trainerAttach.forEach((tid) => {
@@ -765,6 +830,14 @@ router.post('/:id/members', auth, requireRole('Admin', 'Trainer'), (req, res) =>
   const user = db.prepare("SELECT id, role FROM users WHERE id = ? AND role IN ('Student','Lab')").get(studentId);
   if (!user) return res.status(404).json({ error: 'Student/Lab user not found' });
   db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(batchId, studentId);
+  const batch = db.prepare('SELECT subscription_package_id, course_id FROM batches WHERE id = ?').get(batchId);
+  if (batch?.subscription_package_id) {
+    try {
+      grantBatchSubscriptionAccess(batchId, studentId);
+    } catch (_) {
+      /* best-effort */
+    }
+  }
   res.status(201).json({ ok: true });
 });
 

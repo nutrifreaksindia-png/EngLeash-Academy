@@ -2,6 +2,17 @@ const express = require('express');
 const crypto = require('crypto');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
+const {
+  packageAmountPaise,
+  userHasCourseAccess,
+  userCanStartNewSubscribe,
+  userEligibleForRenewal,
+  applyPackageGrantsForPayment,
+  applyRenewalForPayment,
+  loadBillingPackage,
+  loadComboCourses,
+  upsertLifetimeGrant,
+} = require('../lib/courseAccess');
 
 const router = express.Router();
 
@@ -38,6 +49,102 @@ function fulfillCoursePurchase(userId, courseId) {
     `).run(ts, existing.id);
   }
   db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(userId, courseId);
+  db.transaction(() => {
+    upsertLifetimeGrant(userId, courseId, 'purchase');
+  })();
+}
+
+function tryMarkBillingOrderPaid(razorpayOrderId, paymentId, amountPaiseFromPayment) {
+  const row = db.prepare('SELECT * FROM razorpay_billing_orders WHERE razorpay_order_id = ?').get(razorpayOrderId);
+  if (!row) return { ok: false, reason: 'unknown_order' };
+  if (row.status === 'paid') return { ok: true, duplicate: true };
+
+  if (Number(row.amount_paise) !== Number(amountPaiseFromPayment)) return { ok: false, reason: 'amount_mismatch' };
+
+  const pkg = loadBillingPackage(row.billing_package_id);
+  if (!pkg) return { ok: false, reason: 'missing_package' };
+
+  const kind = String(row.order_kind || '').toLowerCase();
+
+  const tx = db.transaction(() => {
+    const u = db.prepare(`
+      UPDATE razorpay_billing_orders
+      SET status = 'paid', payment_id = ?, updated_at = datetime('now')
+      WHERE razorpay_order_id = ? AND status = 'created'
+    `).run(paymentId, razorpayOrderId);
+    if (u.changes === 0) return false;
+
+    const userId = row.user_id;
+
+    if (kind === 'subscribe') {
+      applyPackageGrantsForPayment({
+        userId,
+        pkg,
+        startMs: Date.now(),
+        source: 'subscribe_direct',
+        razorpayOrderId,
+        paymentId,
+        batchId: null,
+        comboId: null,
+        courseIds: [Number(row.course_id)],
+      });
+      return true;
+    }
+
+    if (kind === 'renewal') {
+      applyRenewalForPayment({
+        userId,
+        courseId: Number(row.course_id),
+        pkg,
+        razorpayOrderId,
+        paymentId,
+        nowMs: Date.now(),
+      });
+      return true;
+    }
+
+    if (kind === 'combo') {
+      const comboId = Number(row.combo_id);
+      const courses = loadComboCourses(comboId);
+      const pk = String(pkg.package_kind || '').toLowerCase();
+      if (pk === 'subscription') {
+        applyPackageGrantsForPayment({
+          userId,
+          pkg,
+          startMs: Date.now(),
+          source: 'combo_subscribe',
+          razorpayOrderId,
+          paymentId,
+          batchId: null,
+          comboId,
+          courseIds: courses,
+        });
+      } else {
+        for (const cid of courses) {
+          applyRenewalForPayment({
+            userId,
+            courseId: cid,
+            pkg,
+            razorpayOrderId,
+            paymentId,
+            nowMs: Date.now(),
+            comboId,
+          });
+        }
+      }
+      return true;
+    }
+
+    return false;
+  });
+
+  try {
+    const applied = tx();
+    return applied ? { ok: true } : { ok: true, duplicate: true };
+  } catch (e) {
+    if (String(e.message || '').includes('UNIQUE')) return { ok: true, duplicate: true };
+    throw e;
+  }
 }
 
 function tryMarkOrderPaidAndFulfill(razorpayOrderId, paymentId, amountPaiseFromPayment) {
@@ -78,6 +185,124 @@ function verifyPaymentSignature(orderId, paymentId, signature) {
 }
 
 /** POST JSON body — mounted after express.json() */
+/** One-time payment for subscription / renewal / combo package (no Razorpay Subscriptions API). */
+router.post('/razorpay/create-billing-order', auth, requireRole('Student', 'Lab', 'Trainer', 'Admin'), (req, res) => {
+  const clientPkg = getRazorpayClient();
+  if (!clientPkg) return res.status(503).json({ error: 'Payments are not configured on the server' });
+
+  const packageId = Number(req.body?.billing_package_id);
+  if (!Number.isFinite(packageId)) return res.status(400).json({ error: 'billing_package_id is required' });
+
+  const pkg = loadBillingPackage(packageId);
+  if (!pkg) return res.status(404).json({ error: 'Package not found' });
+
+  const amount = packageAmountPaise(pkg);
+  if (amount < 100) return res.status(400).json({ error: 'Payable amount must be at least ₹1' });
+
+  const kind = String(pkg.package_kind || '').toLowerCase();
+  const scope = String(pkg.scope || '').toLowerCase();
+  const uid = req.user.id;
+  const now = Date.now();
+
+  let orderKind;
+  let courseId = null;
+  let comboId = null;
+
+  if (scope === 'course') {
+    const cid = Number(pkg.course_id);
+    const course = db
+      .prepare('SELECT id, enrollment_type, course_status, is_published, name FROM courses WHERE id = ?')
+      .get(cid);
+    if (!course || String(course.enrollment_type || '').toLowerCase() !== 'subscribe') {
+      return res.status(400).json({ error: 'Invalid course for billing package' });
+    }
+    if (!course.is_published || (course.course_status && course.course_status !== 'Active')) {
+      return res.status(400).json({ error: 'Course is not available' });
+    }
+
+    if (kind === 'subscription') {
+      if (!userCanStartNewSubscribe(uid, cid, now)) {
+        return res.status(409).json({ error: 'You already have an active subscription window for this course' });
+      }
+      orderKind = 'subscribe';
+      courseId = cid;
+    } else {
+      if (!userEligibleForRenewal(uid, cid, now)) {
+        return res.status(409).json({ error: 'Renewal packages are available only during your renewal period' });
+      }
+      orderKind = 'renewal';
+      courseId = cid;
+    }
+  } else if (scope === 'combo') {
+    const combId = Number(pkg.combo_id);
+    const combo = db.prepare('SELECT id, is_active FROM course_combos WHERE id = ?').get(combId);
+    if (!combo || !combo.is_active) return res.status(404).json({ error: 'Combo not found' });
+    const courseIds = loadComboCourses(combId);
+
+    if (kind === 'subscription') {
+      for (const cid of courseIds) {
+        if (!userCanStartNewSubscribe(uid, cid, now)) {
+          return res.status(409).json({ error: 'You already have an active subscription for at least one course in this bundle' });
+        }
+      }
+      orderKind = 'combo';
+      comboId = combId;
+    } else {
+      for (const cid of courseIds) {
+        if (!userEligibleForRenewal(uid, cid, now)) {
+          return res.status(409).json({ error: 'Renewal is not available for all courses in this bundle yet' });
+        }
+      }
+      orderKind = 'combo';
+      comboId = combId;
+    }
+  } else {
+    return res.status(400).json({ error: 'Invalid package scope' });
+  }
+
+  const receipt = `bp${packageId}_u${uid}_${Date.now()}`.slice(0, 40);
+  clientPkg.instance.orders
+    .create({
+      amount,
+      currency: 'INR',
+      receipt,
+      notes: {
+        billing_package_id: String(packageId),
+        user_id: String(uid),
+        order_kind: orderKind,
+      },
+    })
+    .then((order) => {
+      try {
+        db
+          .prepare(
+            `INSERT INTO razorpay_billing_orders (
+            razorpay_order_id, user_id, order_kind, billing_package_id, course_id, combo_id, amount_paise, currency, status
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'INR', 'created')`
+          )
+          .run(order.id, uid, orderKind, packageId, courseId, comboId, amount);
+      } catch (e) {
+        if (!String(e.message || '').includes('UNIQUE')) throw e;
+      }
+      const courseNameRow =
+        courseId != null
+          ? db.prepare('SELECT name FROM courses WHERE id = ?').get(courseId)
+          : db.prepare('SELECT name FROM course_combos WHERE id = ?').get(comboId);
+      res.status(201).json({
+        orderId: order.id,
+        amount,
+        currency: 'INR',
+        keyId: clientPkg.keyId,
+        courseName: courseNameRow?.name || 'EngLeash Academy',
+        orderKind,
+        billingPackageId: packageId,
+      });
+    })
+    .catch((err) => {
+      res.status(502).json({ error: err?.message || 'Could not create payment order' });
+    });
+});
+
 router.post('/razorpay/create-order', auth, requireRole('Student', 'Lab', 'Trainer', 'Admin'), (req, res) => {
   const clientPkg = getRazorpayClient();
   if (!clientPkg) return res.status(503).json({ error: 'Payments are not configured on the server' });
@@ -105,10 +330,9 @@ router.post('/razorpay/create-order', auth, requireRole('Student', 'Lab', 'Train
     return res.status(400).json({ error: 'Course price must be at least ₹1 to pay online' });
   }
 
-  const enrolled = db
-    .prepare("SELECT status FROM course_enrollments WHERE user_id = ? AND course_id = ? AND status = 'approved'")
-    .get(req.user.id, courseId);
-  if (enrolled) return res.status(409).json({ error: 'You already have access to this course' });
+  if (userHasCourseAccess(req.user.id, courseId)) {
+    return res.status(409).json({ error: 'You already have access to this course' });
+  }
 
   const receipt = `ce${courseId}_u${req.user.id}_${Date.now()}`.slice(0, 40);
   clientPkg.instance.orders
@@ -149,11 +373,16 @@ router.post('/razorpay/verify', auth, requireRole('Student', 'Lab', 'Trainer', '
     return res.status(400).json({ error: 'Invalid payment signature' });
   }
 
-  const row = db.prepare('SELECT * FROM razorpay_course_orders WHERE razorpay_order_id = ?').get(orderId);
-  if (!row) return res.status(404).json({ error: 'Order not found' });
+  const clientPkg = getRazorpayClient();
+
+  const courseRow = db.prepare('SELECT * FROM razorpay_course_orders WHERE razorpay_order_id = ?').get(orderId);
+  const billRow = db.prepare('SELECT * FROM razorpay_billing_orders WHERE razorpay_order_id = ?').get(orderId);
+
+  if (!courseRow && !billRow) return res.status(404).json({ error: 'Order not found' });
+
+  const row = courseRow || billRow;
   if (Number(row.user_id) !== Number(req.user.id)) return res.status(403).json({ error: 'Order does not belong to this account' });
 
-  const clientPkg = getRazorpayClient();
   let amountFromGateway = row.amount_paise;
   if (clientPkg) {
     try {
@@ -164,11 +393,19 @@ router.post('/razorpay/verify', auth, requireRole('Student', 'Lab', 'Trainer', '
     }
   }
 
-  const result = tryMarkOrderPaidAndFulfill(orderId, paymentId, amountFromGateway);
-  if (!result.ok && result.reason === 'amount_mismatch') {
+  if (courseRow) {
+    const result = tryMarkOrderPaidAndFulfill(orderId, paymentId, amountFromGateway);
+    if (!result.ok && result.reason === 'amount_mismatch') {
+      return res.status(400).json({ error: 'Paid amount did not match the order' });
+    }
+    return res.json({ ok: true, duplicate: !!result.duplicate, kind: 'purchase' });
+  }
+
+  const br = tryMarkBillingOrderPaid(orderId, paymentId, amountFromGateway);
+  if (!br.ok && br.reason === 'amount_mismatch') {
     return res.status(400).json({ error: 'Paid amount did not match the order' });
   }
-  res.json({ ok: true, duplicate: !!result.duplicate });
+  res.json({ ok: true, duplicate: !!br.duplicate, kind: 'billing' });
 });
 
 /** Raw JSON body — use express.raw only for this handler (see server.js). */
@@ -198,7 +435,12 @@ function razorpayWebhookHandler(req, res) {
     if (event.event === 'payment.captured') {
       const payEntity = event.payload?.payment?.entity;
       if (payEntity?.order_id && payEntity.id != null && payEntity.amount != null) {
-        tryMarkOrderPaidAndFulfill(payEntity.order_id, payEntity.id, Number(payEntity.amount));
+        const oid = payEntity.order_id;
+        const amt = Number(payEntity.amount);
+        const r1 = tryMarkOrderPaidAndFulfill(oid, payEntity.id, amt);
+        if (!r1.ok && r1.reason === 'unknown_order') {
+          tryMarkBillingOrderPaid(oid, payEntity.id, amt);
+        }
       }
     }
   } catch (_) {

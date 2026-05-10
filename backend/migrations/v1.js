@@ -27,6 +27,7 @@ function ensureV1Tables(db) {
   safeAlter(db, "ALTER TABLE courses ADD COLUMN discount_inr REAL DEFAULT 0");
   safeAlter(db, "ALTER TABLE courses ADD COLUMN course_status TEXT DEFAULT 'Active'");
   safeAlter(db, "ALTER TABLE courses ADD COLUMN enrollment_type TEXT DEFAULT 'free'");
+  safeAlter(db, "ALTER TABLE courses ADD COLUMN progression_type TEXT DEFAULT 'unlock_all'");
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS user_profiles (
@@ -60,7 +61,7 @@ function ensureV1Tables(db) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-      enrollment_type TEXT NOT NULL CHECK(enrollment_type IN ('free','apply','purchase')) DEFAULT 'free',
+      enrollment_type TEXT NOT NULL CHECK(enrollment_type IN ('free','apply','purchase','subscribe')) DEFAULT 'free',
       status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')) DEFAULT 'pending',
       requested_at TEXT DEFAULT (datetime('now')),
       approved_at TEXT,
@@ -411,6 +412,7 @@ function ensureV1Tables(db) {
   safeAlter(db, "ALTER TABLE batches ADD COLUMN enrollment_open_status TEXT DEFAULT 'closed'");
   safeAlter(db, 'ALTER TABLE batches ADD COLUMN batch_number INTEGER');
   safeAlter(db, 'ALTER TABLE batches ADD COLUMN duration_days INTEGER');
+  safeAlter(db, 'ALTER TABLE batches ADD COLUMN subscription_package_id INTEGER REFERENCES billing_packages(id)');
   safeAlter(db, 'ALTER TABLE course_enrollments ADD COLUMN batch_id INTEGER REFERENCES batches(id)');
   safeAlter(db, "ALTER TABLE video_library ADD COLUMN category_id INTEGER REFERENCES video_categories(id)");
   safeAlter(db, "ALTER TABLE study_material_library ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0");
@@ -487,6 +489,76 @@ function ensureV1Tables(db) {
       slug TEXT NOT NULL UNIQUE,
       created_at TEXT DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS course_combos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS course_combo_members (
+      combo_id INTEGER NOT NULL REFERENCES course_combos(id) ON DELETE CASCADE,
+      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+      UNIQUE(combo_id, course_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS billing_packages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL CHECK(scope IN ('course','combo')),
+      course_id INTEGER REFERENCES courses(id),
+      combo_id INTEGER REFERENCES course_combos(id),
+      package_kind TEXT NOT NULL CHECK(package_kind IN ('subscription','renewal')),
+      duration_unit TEXT NOT NULL CHECK(duration_unit IN ('day','month','year')),
+      duration_count INTEGER NOT NULL DEFAULT 1,
+      fee_inr REAL NOT NULL DEFAULT 0,
+      discount_inr REAL NOT NULL DEFAULT 0,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      CHECK (
+        (scope = 'course' AND course_id IS NOT NULL AND combo_id IS NULL)
+        OR (scope = 'combo' AND combo_id IS NOT NULL AND course_id IS NULL)
+      )
+    );
+    CREATE INDEX IF NOT EXISTS idx_billing_pkg_course_kind ON billing_packages(course_id, package_kind, is_active);
+    CREATE INDEX IF NOT EXISTS idx_billing_pkg_combo_kind ON billing_packages(combo_id, package_kind, is_active);
+
+    CREATE TABLE IF NOT EXISTS course_access_grants (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+      source TEXT NOT NULL,
+      starts_at_ms INTEGER NOT NULL,
+      ends_at_ms INTEGER,
+      grace_ends_at_ms INTEGER,
+      billing_package_id INTEGER REFERENCES billing_packages(id),
+      batch_id INTEGER REFERENCES batches(id),
+      combo_id INTEGER REFERENCES course_combos(id),
+      razorpay_order_id TEXT,
+      payment_id TEXT,
+      revoked_at_ms INTEGER,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_access_grants_user_course ON course_access_grants(user_id, course_id);
+
+    CREATE TABLE IF NOT EXISTS razorpay_billing_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      razorpay_order_id TEXT NOT NULL UNIQUE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      order_kind TEXT NOT NULL CHECK(order_kind IN ('subscribe','renewal','combo')),
+      billing_package_id INTEGER NOT NULL REFERENCES billing_packages(id),
+      course_id INTEGER REFERENCES courses(id),
+      combo_id INTEGER REFERENCES course_combos(id),
+      amount_paise INTEGER NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      status TEXT NOT NULL DEFAULT 'created' CHECK(status IN ('created','paid','failed')),
+      payment_id TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_rp_bill_orders_payment ON razorpay_billing_orders(payment_id) WHERE payment_id IS NOT NULL;
   `);
 
   db.prepare('INSERT OR IGNORE INTO video_categories (name, slug) VALUES (?, ?)').run('English Grammar', 'english-grammar');
@@ -500,6 +572,73 @@ function ensureV1Tables(db) {
   migrateBatchesBatchNumber(db);
   migrateCourseLessonsSchema(db);
   migrateUsersTableCreatorRole(db);
+  migrateCourseEnrollmentsExpandSubscribe(db);
+  migrateBackfillCourseAccessGrants(db);
+}
+
+/** SQLite cannot ALTER CHECK on enrollment_type — rebuild table with subscribe. */
+function migrateCourseEnrollmentsExpandSubscribe(db) {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='course_enrollments'").get();
+  if (!row?.sql) return;
+  if (String(row.sql).includes("'subscribe'")) return;
+
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.exec(`
+      CREATE TABLE course_enrollments__sub_next (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+        enrollment_type TEXT NOT NULL CHECK(enrollment_type IN ('free','apply','purchase','subscribe')) DEFAULT 'free',
+        status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')) DEFAULT 'pending',
+        requested_at TEXT DEFAULT (datetime('now')),
+        approved_at TEXT,
+        approved_by INTEGER REFERENCES users(id),
+        notes TEXT,
+        batch_id INTEGER REFERENCES batches(id),
+        UNIQUE(user_id, course_id)
+      );
+    `);
+    db.exec(`
+      INSERT INTO course_enrollments__sub_next (id, user_id, course_id, enrollment_type, status, requested_at, approved_at, approved_by, notes, batch_id)
+      SELECT id, user_id, course_id, enrollment_type, status, requested_at, approved_at, approved_by, notes, batch_id
+      FROM course_enrollments;
+    `);
+    db.exec('DROP TABLE course_enrollments');
+    db.exec('ALTER TABLE course_enrollments__sub_next RENAME TO course_enrollments');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_course_enrollments_user ON course_enrollments(user_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_course_enrollments_course ON course_enrollments(course_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_course_enrollments_batch ON course_enrollments(batch_id)');
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+}
+
+function migrateBackfillCourseAccessGrants(db) {
+  const col = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='course_access_grants'").get();
+  if (!col) return;
+  const rows = db
+    .prepare(
+      `SELECT user_id, course_id, enrollment_type FROM course_enrollments
+       WHERE status = 'approved' AND enrollment_type IN ('free','purchase')`
+    )
+    .all();
+  const existsStmt = db.prepare(
+    `SELECT 1 FROM course_access_grants
+     WHERE user_id = ? AND course_id = ? AND source = ? AND revoked_at_ms IS NULL AND ends_at_ms IS NULL`
+  );
+  const ins = db.prepare(
+    `INSERT INTO course_access_grants (
+      user_id, course_id, source, starts_at_ms, ends_at_ms, grace_ends_at_ms,
+      billing_package_id, batch_id, combo_id, razorpay_order_id, payment_id, revoked_at_ms
+    ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)`
+  );
+  const nowMs = Date.now();
+  for (const r of rows) {
+    const src = r.enrollment_type === 'purchase' ? 'purchase' : 'free';
+    if (existsStmt.get(r.user_id, r.course_id, src)) continue;
+    ins.run(r.user_id, r.course_id, src, nowMs);
+  }
 }
 
 /** Unique batch number per session_type (group vs one_to_one). */

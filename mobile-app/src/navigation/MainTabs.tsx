@@ -8,6 +8,8 @@ import { appStackScreenOptions } from './stackHeaderOptions';
 
 import LandingHomeScreen from '../screens/LandingHomeScreen';
 import PublicCourseDetailScreen from '../screens/PublicCourseDetailScreen';
+import CoursePurchaseSummaryScreen from '../screens/CoursePurchaseSummaryScreen';
+import CourseSubscribePackagesScreen from '../screens/CourseSubscribePackagesScreen';
 import MyCoursesScreen from '../screens/MyCoursesScreen';
 import CourseCatalogScreen from '../screens/CourseCatalogScreen';
 import CourseDetailScreen from '../screens/CourseDetailScreen';
@@ -48,6 +50,14 @@ function HomeStackNavigator() {
         component={PublicCourseDetailScreen}
         options={({ route }: { route: { params?: { courseName?: string } } }) => ({
           title: route.params?.courseName || 'Course',
+        })}
+      />
+      <HomeStack.Screen name="CoursePurchaseSummary" component={CoursePurchaseSummaryScreen} options={{ title: 'Purchase' }} />
+      <HomeStack.Screen
+        name="CourseSubscribePackages"
+        component={CourseSubscribePackagesScreen}
+        options={({ route }: { route: { params?: { courseName?: string } } }) => ({
+          title: route.params?.courseName || 'Plans',
         })}
       />
     </HomeStack.Navigator>

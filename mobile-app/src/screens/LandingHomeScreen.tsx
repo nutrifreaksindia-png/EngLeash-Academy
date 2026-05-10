@@ -18,7 +18,6 @@ import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { API_BASE } from '../config';
-import { alertPurchaseError, purchaseCourseWithRazorpay } from '../payments/razorpayCoursePurchase';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -74,6 +73,7 @@ function primaryCta(typeRaw?: string) {
   const t = (typeRaw || 'free').toLowerCase();
   if (t === 'apply') return { label: 'Apply', kind: 'apply' as const };
   if (t === 'purchase') return { label: 'Purchase', kind: 'purchase' as const };
+  if (t === 'subscribe') return { label: 'Subscribe', kind: 'subscribe' as const };
   return { label: 'Join Free', kind: 'free' as const };
 }
 
@@ -91,12 +91,11 @@ export default function LandingHomeScreen({ navigation, route }: any) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [enrollingId, setEnrollingId] = useState<number | null>(null);
-  const [purchasingId, setPurchasingId] = useState<number | null>(null);
   const [applyCourse, setApplyCourse] = useState<PublicCourse | null>(null);
   const [openBatches, setOpenBatches] = useState<OpenBatch[]>([]);
   const [openBatchesLoading, setOpenBatchesLoading] = useState(false);
   const applyResumeKeyRef = useRef<string | null>(null);
-  const purchaseResumeKeyRef = useRef<string | null>(null);
+  const subscribeResumeKeyRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -158,65 +157,27 @@ export default function LandingHomeScreen({ navigation, route }: any) {
     }, [user, route.params?.applyAfterAuthCourseId, route.params?.applyAfterAuthCourseName, courses, navigation, openApplyModalForCourse])
   );
 
-  const runPurchaseForCourse = useCallback(
-    async (course: PublicCourse) => {
-      if (!user) return;
-      setPurchasingId(course.id);
-      try {
-        const ok = await purchaseCourseWithRazorpay({
-          courseId: course.id,
-          courseDisplayName: course.name,
-          userEmail: user.email,
-          userName: user.name,
-          userMobileDigits: user.mobile_number ?? undefined,
-        });
-        if (ok) {
-          Alert.alert('Success', 'Payment successful. You now have access to this course.');
-          refreshUser();
-        }
-      } catch (e: unknown) {
-        alertPurchaseError(e);
-      } finally {
-        setPurchasingId(null);
-      }
-    },
-    [user, refreshUser]
-  );
-
   useFocusEffect(
     useCallback(() => {
-      const rawId = route.params?.purchaseAfterAuthCourseId;
+      const rawId = route.params?.subscribeAfterAuthCourseId;
       if (!user || rawId == null) return;
 
       const id = Number(rawId);
-      const nameRaw = route.params?.purchaseAfterAuthCourseName;
-      const resumeKey = `purchase:${user.id}:${id}:${String(nameRaw || '')}`;
-      if (!Number.isFinite(id) || purchaseResumeKeyRef.current === resumeKey) return;
-      purchaseResumeKeyRef.current = resumeKey;
+      const nameRaw = route.params?.subscribeAfterAuthCourseName;
+      const resumeKey = `sub:${user.id}:${id}:${String(nameRaw || '')}`;
+      if (!Number.isFinite(id) || subscribeResumeKeyRef.current === resumeKey) return;
+      subscribeResumeKeyRef.current = resumeKey;
 
       navigation.setParams({
-        purchaseAfterAuthCourseId: undefined,
-        purchaseAfterAuthCourseName: undefined,
+        subscribeAfterAuthCourseId: undefined,
+        subscribeAfterAuthCourseName: undefined,
       });
 
-      const fromList = courses.find((c) => c.id === id);
-      const course: PublicCourse =
-        fromList ||
-        ({
-          id,
-          name: String(nameRaw || 'Course'),
-          enrollment_type: 'purchase',
-        } as PublicCourse);
-
-      void runPurchaseForCourse(course);
-    }, [
-      user,
-      route.params?.purchaseAfterAuthCourseId,
-      route.params?.purchaseAfterAuthCourseName,
-      courses,
-      navigation,
-      runPurchaseForCourse,
-    ])
+      navigation.navigate('CourseSubscribePackages', {
+        courseId: id,
+        courseName: String(nameRaw || 'Course'),
+      });
+    }, [user, route.params?.subscribeAfterAuthCourseId, route.params?.subscribeAfterAuthCourseName, navigation])
   );
 
   const enroll = async (course: PublicCourse, typeOverride?: string) => {
@@ -242,7 +203,7 @@ export default function LandingHomeScreen({ navigation, route }: any) {
   const onJoinFree = (course: PublicCourse) => {
     const t = (course.enrollment_type || 'free').toLowerCase();
     if (t !== 'free') {
-      Alert.alert('Join Free', 'This course is not a free-enrollment course. Try Apply or Purchase.');
+      Alert.alert('Join Free', 'This course is not a free-enrollment course. Try Apply, Subscribe, or Purchase.');
       return;
     }
     enroll(course, 'free');
@@ -277,7 +238,7 @@ export default function LandingHomeScreen({ navigation, route }: any) {
     }
   }
 
-  const onPurchase = async (course: PublicCourse) => {
+  const onPurchase = (course: PublicCourse) => {
     if (!user) {
       navigation.getParent()?.navigate?.('Account', {
         screen: 'Signup',
@@ -285,11 +246,36 @@ export default function LandingHomeScreen({ navigation, route }: any) {
           redirectAfterSignup: 'purchase',
           courseId: course.id,
           courseName: course.name,
+          courseFeeInr: course.fee_inr ?? 0,
+          courseDiscountInr: course.discount_inr ?? 0,
         },
       });
       return;
     }
-    await runPurchaseForCourse(course);
+    navigation.navigate('CoursePurchaseSummary', {
+      courseId: course.id,
+      courseName: course.name,
+      fee_inr: course.fee_inr ?? 0,
+      discount_inr: course.discount_inr ?? 0,
+    });
+  };
+
+  const onSubscribe = (course: PublicCourse) => {
+    if (!user) {
+      navigation.getParent()?.navigate?.('Account', {
+        screen: 'Signup',
+        params: {
+          redirectAfterSignup: 'subscribe',
+          courseId: course.id,
+          courseName: course.name,
+        },
+      });
+      return;
+    }
+    navigation.navigate('CourseSubscribePackages', {
+      courseId: course.id,
+      courseName: course.name,
+    });
   };
 
   const onPrimaryAction = (course: PublicCourse) => {
@@ -299,7 +285,11 @@ export default function LandingHomeScreen({ navigation, route }: any) {
       return;
     }
     if (cta.kind === 'purchase') {
-      void onPurchase(course);
+      onPurchase(course);
+      return;
+    }
+    if (cta.kind === 'subscribe') {
+      onSubscribe(course);
       return;
     }
     onJoinFree(course);
@@ -335,7 +325,7 @@ export default function LandingHomeScreen({ navigation, route }: any) {
             ))}
             <Text style={[styles.sectionLabel, { marginTop: 20 }]}>Courses</Text>
             <Text style={styles.hint}>
-              Browse offerings below. Apply opens sign-up if needed, then open batches. Purchase opens sign-up to pay.
+              Browse offerings below. Apply opens sign-up if needed. Subscribe and Purchase use a summary screen before secure payment.
             </Text>
           </View>
         }
@@ -378,10 +368,10 @@ export default function LandingHomeScreen({ navigation, route }: any) {
                 <TouchableOpacity
                   style={[styles.btnPrimary, type !== 'free' && primaryCta(item.enrollment_type).kind === 'free' && styles.btnMuted]}
                   onPress={() => onPrimaryAction(item)}
-                  disabled={enrollingId !== null || purchasingId !== null}
+                  disabled={enrollingId !== null}
                 >
                   <Text style={styles.btnPrimaryText}>
-                    {enrollingId === item.id || purchasingId === item.id ? '…' : primaryCta(item.enrollment_type).label}
+                    {enrollingId === item.id ? '…' : primaryCta(item.enrollment_type).label}
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity

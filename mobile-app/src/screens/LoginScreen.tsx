@@ -3,21 +3,34 @@ import { KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native';
 import LoginForm from '../components/LoginForm';
 import {
   navigateLandingResumeCourseAfterAuth,
+  navigatePurchaseSummaryAfterAuth,
   normalizeResumeCourseAuthParams,
-  type ResumeCourseAuthNavParams,
+  purchaseSummaryParamsFromRoute,
 } from '../navigation/resumeCourseAfterAuth';
 
 const BRAND_BLUE = '#1a237e';
 
 /** Stack login; used from Account funnel and Apply/Purchase “sign in instead” with resume params. */
 export default function LoginScreen({ navigation, route }: any) {
-  const resume: ResumeCourseAuthNavParams | null = normalizeResumeCourseAuthParams(route?.params);
-  const signupRouteParams = resume
-    ? { redirectAfterSignup: resume.redirectAfterSignup, courseId: resume.courseId, courseName: resume.courseName }
-    : undefined;
+  const r = route?.params || {};
+  const purchaseP = purchaseSummaryParamsFromRoute(r);
+  const resume = normalizeResumeCourseAuthParams(r);
+  const signupRouteParams =
+    purchaseP != null
+      ? {
+          redirectAfterSignup: 'purchase' as const,
+          courseId: purchaseP.courseId,
+          courseName: purchaseP.courseName,
+          courseFeeInr: purchaseP.fee_inr,
+          courseDiscountInr: purchaseP.discount_inr,
+        }
+      : resume != null
+        ? { redirectAfterSignup: resume.redirectAfterSignup, courseId: resume.courseId, courseName: resume.courseName }
+        : undefined;
 
   function handleLoggedIn() {
     const tabNav = navigation.getParent?.()?.getParent?.() ?? navigation.getParent?.();
+    if (navigatePurchaseSummaryAfterAuth(tabNav, purchaseP)) return;
     if (navigateLandingResumeCourseAfterAuth(tabNav, resume)) return;
     if (navigation.canGoBack?.()) {
       navigation.goBack();

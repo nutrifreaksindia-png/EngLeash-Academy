@@ -31,6 +31,7 @@ function enrollmentLabel(value) {
   const v = (value || 'free').toLowerCase();
   if (v === 'apply') return 'Apply';
   if (v === 'purchase') return 'Purchase';
+  if (v === 'subscribe') return 'Subscribe';
   return 'Join Free';
 }
 
@@ -713,7 +714,7 @@ export default function CoursesPage({
             <span className="fieldLabel" id="course-enroll-label">
               How students enroll
             </span>
-            <p className="fieldHint">Uses the exact labels Join Free, Apply, and Purchase in the app.</p>
+            <p className="fieldHint">Subscribe uses billing packages (web admin → Billing & combos). Apply and purchase use their own flows in the app.</p>
             <select
               id="course-enrollment"
               className="courseSelect"
@@ -724,6 +725,7 @@ export default function CoursesPage({
               <option value="free">Join Free</option>
               <option value="apply">Apply</option>
               <option value="purchase">Purchase</option>
+              <option value="subscribe">Subscribe</option>
             </select>
           </div>
 

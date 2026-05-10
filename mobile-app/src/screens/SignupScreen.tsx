@@ -4,7 +4,12 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { City, Country, State } from 'country-state-city';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { useAuth } from '../context/AuthContext';
-import { navigateLandingResumeCourseAfterAuth, normalizeResumeCourseAuthParams } from '../navigation/resumeCourseAfterAuth';
+import {
+  navigateLandingResumeCourseAfterAuth,
+  navigatePurchaseSummaryAfterAuth,
+  normalizeResumeCourseAuthParams,
+  purchaseSummaryParamsFromRoute,
+} from '../navigation/resumeCourseAfterAuth';
 
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
@@ -99,13 +104,15 @@ export default function SignupScreen({ navigation, route }: any) {
     setLoading(true);
     try {
       await signup(payload);
-      const resume = normalizeResumeCourseAuthParams(route?.params);
       Alert.alert('Welcome', 'Your account was created successfully.', [
         {
           text: 'OK',
           onPress: () => {
             const tabNav = navigation.getParent?.()?.getParent?.() ?? navigation.getParent?.();
-            if (navigateLandingResumeCourseAfterAuth(tabNav, resume)) return;
+            const purchaseP = purchaseSummaryParamsFromRoute(route?.params);
+            if (navigatePurchaseSummaryAfterAuth(tabNav, purchaseP)) return;
+            const landingResume = normalizeResumeCourseAuthParams(route?.params);
+            if (navigateLandingResumeCourseAfterAuth(tabNav, landingResume)) return;
             if (navigation?.canGoBack?.()) {
               navigation.goBack();
             } else {
@@ -392,12 +399,29 @@ export default function SignupScreen({ navigation, route }: any) {
       <TouchableOpacity
         style={styles.loginLinkBelow}
         onPress={() => {
-          const resume = normalizeResumeCourseAuthParams(route?.params);
-          const params =
+          const p = route?.params || {};
+          const purch = purchaseSummaryParamsFromRoute(p);
+          if (purch != null) {
+            navigation.navigate('Login', {
+              redirectAfterSignup: 'purchase',
+              courseId: p.courseId,
+              courseName: p.courseName,
+              courseFeeInr: (p as any).courseFeeInr,
+              courseDiscountInr: (p as any).courseDiscountInr,
+            });
+            return;
+          }
+          const resume = normalizeResumeCourseAuthParams(p);
+          navigation.navigate(
+            'Login',
             resume != null
-              ? { redirectAfterSignup: resume.redirectAfterSignup, courseId: resume.courseId, courseName: resume.courseName }
-              : undefined;
-          navigation.navigate('Login', params ?? {});
+              ? {
+                  redirectAfterSignup: resume.redirectAfterSignup,
+                  courseId: resume.courseId,
+                  courseName: resume.courseName,
+                }
+              : {}
+          );
         }}
       >
         <Text style={styles.loginLinkBelowText}>Already have an account? Sign in</Text>

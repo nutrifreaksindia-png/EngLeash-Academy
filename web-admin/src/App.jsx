@@ -17,6 +17,7 @@ import SettingsPage from './pages/SettingsPage';
 import StudyMaterialsPage from './pages/StudyMaterialsPage';
 import WorksheetsPage from './pages/WorksheetsPage';
 import AssignmentsPage from './pages/AssignmentsPage';
+import BillingPage from './pages/BillingPage';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
 
@@ -751,6 +752,70 @@ export default function App() {
     return Array.isArray(data?.batches) ? data.batches : [];
   }
 
+  async function fetchSubscribePackagesForCourse(courseId) {
+    return apiFetch(`/batch-manager/course/${courseId}/subscribe-packages`, token);
+  }
+
+  async function fetchBillingCombos() {
+    return apiFetch('/billing/combos', token);
+  }
+
+  async function saveBillingCombo(id, payload) {
+    const body = {
+      name: payload.name,
+      description: payload.description ?? null,
+      isActive: payload.isActive !== false,
+      courseIds: Array.isArray(payload.courseIds) ? payload.courseIds.map(Number).filter(Number.isFinite) : [],
+    };
+    if (id != null && id !== '') {
+      await apiFetch(`/billing/combos/${id}`, token, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      });
+      return { id };
+    }
+    const created = await apiFetch('/billing/combos', token, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    return created;
+  }
+
+  async function fetchCourseBillingPackages(courseId) {
+    return apiFetch(`/billing/admin/course/${courseId}/packages`, token);
+  }
+
+  async function createCourseBillingPackage(courseId, body) {
+    return apiFetch(`/billing/admin/course/${courseId}/packages`, token, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async function fetchComboBillingPackages(comboId) {
+    return apiFetch(`/billing/admin/combo/${comboId}/packages`, token);
+  }
+
+  async function createComboBillingPackage(comboId, body) {
+    return apiFetch(`/billing/admin/combo/${comboId}/packages`, token, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async function updateBillingPackage(packageId, body) {
+    return apiFetch(`/billing/admin/packages/${packageId}`, token, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async function deleteBillingPackage(packageId) {
+    await apiFetch(`/billing/admin/packages/${packageId}`, token, {
+      method: 'DELETE',
+    });
+  }
+
   async function approveApplication(applicationId, batchId) {
     await apiFetch(`/enrollments/applications/${applicationId}/approve`, token, {
       method: 'POST',
@@ -1216,6 +1281,7 @@ export default function App() {
         onUpdateBatch={updateBatch}
         courses={courses}
         batches={batches}
+        fetchSubscribePackagesForCourse={fetchSubscribePackagesForCourse}
         selectedBatchId={selectedBatchId}
         setSelectedBatchId={setSelectedBatchId}
         onStartBatch={startBatch}
@@ -1239,6 +1305,27 @@ export default function App() {
         onRefreshUsers={loadAll}
         onDeleteBatch={deleteBatch}
       />
+    );
+  } else if (currentPage === 'billing' && currentUser?.role === 'Admin') {
+    page = (
+      <BillingPage
+        courses={courses}
+        loadCombos={fetchBillingCombos}
+        saveCombo={saveBillingCombo}
+        loadCoursePackages={fetchCourseBillingPackages}
+        createCoursePackage={createCourseBillingPackage}
+        loadComboPackages={fetchComboBillingPackages}
+        createComboPackage={createComboBillingPackage}
+        updatePackage={updateBillingPackage}
+        deletePackage={deleteBillingPackage}
+        pushToast={pushToast}
+      />
+    );
+  } else if (currentPage === 'billing') {
+    page = (
+      <div className="stack" style={{ padding: '1rem 0' }}>
+        <p className="muted">Billing and combo management is available only to administrator accounts.</p>
+      </div>
     );
   } else if (currentPage === 'quizzes') {
     page = (
@@ -1362,6 +1449,7 @@ export default function App() {
                 onRefresh={loadAll}
                 onLogout={logout}
                 creatorMode={currentUser?.role === 'Creator'}
+                showBillingNav={currentUser?.role === 'Admin'}
               >
                 {page}
               </AdminShell>

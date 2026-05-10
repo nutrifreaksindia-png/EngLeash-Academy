@@ -5,7 +5,6 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import type { PublicCourse } from './LandingHomeScreen';
 import { API_BASE } from '../config';
-import { alertPurchaseError, purchaseCourseWithRazorpay } from '../payments/razorpayCoursePurchase';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -56,7 +55,14 @@ function primaryCta(typeRaw?: string) {
   const t = (typeRaw || 'free').toLowerCase();
   if (t === 'apply') return { label: 'Apply', kind: 'apply' as const };
   if (t === 'purchase') return { label: 'Purchase', kind: 'purchase' as const };
+  if (t === 'subscribe') return { label: 'Subscribe', kind: 'subscribe' as const };
   return { label: 'Join Free', kind: 'free' as const };
+}
+
+function formatModeLabel(m: string) {
+  const s = String(m).trim();
+  if (/^self-?paced$/i.test(s)) return 'Self';
+  return s;
 }
 
 export default function PublicCourseDetailScreen({ route, navigation }: any) {
@@ -140,28 +146,36 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
             redirectAfterSignup: 'purchase',
             courseId: course.id,
             courseName: course.name,
+            courseFeeInr: course.fee_inr ?? 0,
+            courseDiscountInr: course.discount_inr ?? 0,
           },
         });
         return;
       }
-      setBusy(true);
-      try {
-        const ok = await purchaseCourseWithRazorpay({
-          courseId: course.id,
-          courseDisplayName: course.name,
-          userEmail: user.email,
-          userName: user.name,
-          userMobileDigits: user.mobile_number ?? undefined,
+      navigation.navigate('CoursePurchaseSummary', {
+        courseId: course.id,
+        courseName: course.name,
+        fee_inr: course.fee_inr ?? 0,
+        discount_inr: course.discount_inr ?? 0,
+      });
+      return;
+    }
+    if (cta.kind === 'subscribe') {
+      if (!user) {
+        navigation.getParent()?.navigate?.('Account', {
+          screen: 'Signup',
+          params: {
+            redirectAfterSignup: 'subscribe',
+            courseId: course.id,
+            courseName: course.name,
+          },
         });
-        if (ok) {
-          Alert.alert('Success', 'Payment successful. You now have access to this course.');
-          refreshUser();
-        }
-      } catch (e: unknown) {
-        alertPurchaseError(e);
-      } finally {
-        setBusy(false);
+        return;
       }
+      navigation.navigate('CourseSubscribePackages', {
+        courseId: course.id,
+        courseName: course.name,
+      });
       return;
     }
     void enroll('free');
@@ -191,7 +205,7 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
 
         {modes.length > 0 ? (
           <Text style={styles.metaRow}>
-            <Text style={styles.metaLabel}>Mode:</Text> {modes.join(', ')}
+            <Text style={styles.metaLabel}>Mode:</Text> {modes.map(formatModeLabel).join(', ')}
           </Text>
         ) : null}
         {languages.length > 0 ? (
