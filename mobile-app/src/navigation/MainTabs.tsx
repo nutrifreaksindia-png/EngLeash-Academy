@@ -21,6 +21,7 @@ import WorksheetScreen from '../screens/WorksheetScreen';
 import WorksheetLibraryScreen from '../screens/WorksheetLibraryScreen';
 import StudyMaterialScreen from '../screens/StudyMaterialScreen';
 import AssignmentLibraryDetailScreen from '../screens/AssignmentLibraryDetailScreen';
+import LearnModeScreen from '../screens/LearnModeScreen';
 import AdminCourseManagerScreen from '../screens/AdminCourseManagerScreen';
 import LiveSessionsScreen from '../screens/LiveSessionsScreen';
 import LiveClassroomScreen from '../screens/LiveClassroomScreen';
@@ -67,7 +68,7 @@ function HomeStackNavigator() {
 function CoursesStackNavigator() {
   return (
     <CoursesStack.Navigator screenOptions={stackOpts} initialRouteName="MyCoursesList">
-      <CoursesStack.Screen name="MyCoursesList" component={MyCoursesScreen} options={{ title: 'My Courses' }} />
+      <CoursesStack.Screen name="MyCoursesList" component={MyCoursesScreen} options={{ title: '', headerShown: false }} />
       <CoursesStack.Screen name="CourseCatalog" component={CourseCatalogScreen} options={{ title: 'Course catalog' }} />
       <CoursesStack.Screen
         name="CourseDetail"
@@ -78,6 +79,11 @@ function CoursesStackNavigator() {
         name="LessonDetail"
         component={LessonDetailScreen}
         options={({ route }: { route: { params?: { lessonTitle?: string } } }) => ({ title: route.params?.lessonTitle || 'Lesson' })}
+      />
+      <CoursesStack.Screen
+        name="LearnMode"
+        component={LearnModeScreen}
+        options={{ headerShown: false, presentation: 'fullScreenModal' }}
       />
       <CoursesStack.Screen name="VideoPlayer" component={VideoPlayerScreen} options={{ title: 'Video', headerShown: false }} />
       <CoursesStack.Screen name="ClassNotes" component={ClassNotesScreen} options={{ title: 'Class notes' }} />
