@@ -533,7 +533,12 @@ router.delete('/:id(\\d+)', auth, requireRole('Admin'), async (req, res) => {
       /* eslint-enable no-await-in-loop */
     }
 
-    db.prepare('DELETE FROM batches WHERE id = ?').run(batchId);
+    /* course_enrollments.batch_id / course_access_grants.batch_id were added without ON DELETE CASCADE */
+    db.transaction(() => {
+      db.prepare('UPDATE course_enrollments SET batch_id = NULL WHERE batch_id = ?').run(batchId);
+      db.prepare('DELETE FROM course_access_grants WHERE batch_id = ?').run(batchId);
+      db.prepare('DELETE FROM batches WHERE id = ?').run(batchId);
+    })();
     res.status(204).end();
   } catch (e) {
     console.error('[batch-delete]', batchId, e);

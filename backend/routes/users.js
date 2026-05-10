@@ -17,6 +17,67 @@ function hasColumn(tableName, columnName) {
   }
 }
 
+function tableExists(name) {
+  try {
+    return !!db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND lower(name) = lower(?) LIMIT 1")
+      .get(String(name || ''));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rows that references users(id) without ON DELETE CASCADE will block deletes.
+ * Reassign FKs onto the deleting admin where NOT NULL required; nullable FKs cleared.
+ */
+function reassignUserOutboundReferences(deleteUserId, reassignUserId) {
+  if (!Number.isFinite(deleteUserId) || !Number.isFinite(reassignUserId) || deleteUserId === reassignUserId)
+    return;
+
+  db.prepare('UPDATE batches SET trainer_id = ? WHERE trainer_id = ?').run(reassignUserId, deleteUserId);
+  db.prepare('UPDATE batches SET created_by = ? WHERE created_by = ?').run(reassignUserId, deleteUserId);
+  db.prepare('UPDATE live_sessions SET created_by = ? WHERE created_by = ?').run(reassignUserId, deleteUserId);
+  db.prepare('UPDATE live_session_speakers SET promoted_by = ? WHERE promoted_by = ?').run(
+    reassignUserId,
+    deleteUserId,
+  );
+  db.prepare('UPDATE batch_session_attendance SET marked_by = ? WHERE marked_by = ?').run(
+    reassignUserId,
+    deleteUserId,
+  );
+  db.prepare('UPDATE quiz_bank SET created_by = ? WHERE created_by = ?').run(reassignUserId, deleteUserId);
+  db.prepare('UPDATE quiz_assignments SET created_by = ? WHERE created_by = ?').run(reassignUserId, deleteUserId);
+
+  db.prepare('UPDATE quiz_versions SET published_by = NULL WHERE published_by = ?').run(deleteUserId);
+  db.prepare('UPDATE batch_sessions SET cancelled_by = NULL WHERE cancelled_by = ?').run(deleteUserId);
+  db.prepare('UPDATE course_enrollments SET approved_by = NULL WHERE approved_by = ?').run(deleteUserId);
+  db.prepare('UPDATE holidays SET created_by = NULL WHERE created_by = ?').run(deleteUserId);
+  db.prepare('UPDATE lesson_library SET created_by = NULL WHERE created_by = ?').run(deleteUserId);
+  db.prepare('UPDATE batch_assignments SET created_by = NULL WHERE created_by = ?').run(deleteUserId);
+  db.prepare('UPDATE video_library SET created_by = NULL WHERE created_by = ?').run(deleteUserId);
+  db.prepare('UPDATE video_assignments SET created_by = NULL WHERE created_by = ?').run(deleteUserId);
+  db.prepare('UPDATE study_material_library SET created_by = NULL WHERE created_by = ?').run(deleteUserId);
+  db.prepare('UPDATE study_material_assignments SET created_by = NULL WHERE created_by = ?').run(deleteUserId);
+  db.prepare('UPDATE worksheet_library SET created_by = NULL WHERE created_by = ?').run(deleteUserId);
+  db.prepare('UPDATE worksheet_assignments SET created_by = NULL WHERE created_by = ?').run(deleteUserId);
+  db.prepare('UPDATE assignment_library SET created_by = NULL WHERE created_by = ?').run(deleteUserId);
+
+  try {
+    db.prepare('UPDATE live_session_logs SET user_id = NULL WHERE user_id = ?').run(deleteUserId);
+  } catch (_) {
+    /* column may vary in legacy DB */
+  }
+
+  if (tableExists('quiz_attempts')) {
+    try {
+      db.prepare('DELETE FROM quiz_attempts WHERE user_id = ?').run(deleteUserId);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+}
+
 function extractSpacesKeyFromUrl(url) {
   const raw = String(url || '').trim();
   if (!raw) return '';
@@ -491,13 +552,9 @@ router.delete('/:id', auth, requireRole('Admin'), async (req, res) => {
     }
   }
 
-  const batchTrainer = db.prepare('SELECT id FROM batches WHERE trainer_id = ? LIMIT 1').get(id);
-  const batchCoach = db.prepare('SELECT batch_id FROM batch_trainers WHERE trainer_id = ? LIMIT 1').get(id);
-  if (batchTrainer || batchCoach) {
-    return res.status(409).json({
-      error:
-        'This user is attached to batches as trainer. Remove them from batches (or delete the batches), then retry.',
-    });
+  const reassignedAdminId = Number(req.user.id);
+  if (!Number.isFinite(reassignedAdminId)) {
+    return res.status(400).json({ error: 'Invalid acting user' });
   }
 
   try {
@@ -508,14 +565,21 @@ router.delete('/:id', auth, requireRole('Admin'), async (req, res) => {
         /* best-effort */
       }
     }
-    const r = db.prepare('DELETE FROM users WHERE id = ?').run(id);
-    if (r.changes === 0) return res.status(404).json({ error: 'User not found' });
+    const runDelete = db.transaction(() => {
+      reassignUserOutboundReferences(id, reassignedAdminId);
+      /* batch_trainers.trainer_id has ON DELETE CASCADE; batches.trainer_id must be rewritten first */
+      db.prepare('DELETE FROM batch_trainers WHERE trainer_id = ?').run(id);
+      const r = db.prepare('DELETE FROM users WHERE id = ?').run(id);
+      return r.changes;
+    });
+    const changes = runDelete();
+    if (changes === 0) return res.status(404).json({ error: 'User not found' });
     res.status(204).end();
   } catch (e) {
     if (e && String(e.code || '').includes('SQLITE_CONSTRAINT')) {
+      console.error('[user-delete] constraint after cleanup', id, e);
       return res.status(409).json({
-        error:
-          'Database blocked delete (constraints). Remove enrollments/batch links/other references for this account, then retry.',
+        error: `Still blocked by database rules: ${String(e.message || 'constraint')} If this persists, describe the role and recent activity for this account.`,
       });
     }
     console.error('[user-delete]', id, e);

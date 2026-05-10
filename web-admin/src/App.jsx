@@ -43,6 +43,13 @@ const CREATOR_ALLOWED_PAGES = new Set([
   'lessons',
 ]);
 
+function readableHttpError(raw, fallbackStatus) {
+  if (typeof raw === 'string' && raw.trim()) return raw.trim();
+  if (raw != null && typeof raw !== 'object' && String(raw).trim()) return String(raw).trim();
+  if (fallbackStatus != null) return `Request failed (HTTP ${fallbackStatus})`;
+  return 'Request failed';
+}
+
 async function apiFetch(path, token, options = {}) {
   const res = await fetch(`${API_BASE}/api${path}`, {
     ...options,
@@ -53,7 +60,10 @@ async function apiFetch(path, token, options = {}) {
     },
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || 'Request failed');
+  if (!res.ok) {
+    const fromBody = readableHttpError(data?.error ?? data?.message, res.status);
+    throw new Error(fromBody);
+  }
   return data;
 }
 
@@ -62,7 +72,11 @@ async function apiFetchSafe(path, token, options = {}) {
     const data = await apiFetch(path, token, options);
     return { ok: true, data };
   } catch (error) {
-    return { ok: false, error: error.message || 'Request failed' };
+    const msg =
+      typeof error?.message === 'string' && error.message.trim()
+        ? error.message.trim()
+        : 'Request failed';
+    return { ok: false, error: msg };
   }
 }
 
@@ -694,8 +708,12 @@ export default function App() {
       await loadAll();
       pushToast('User deleted', 'success');
     } catch (err) {
-      setError(err.message);
-      pushToast(err.message, 'error');
+      const msg =
+        typeof err?.message === 'string' && err.message.trim()
+          ? err.message.trim()
+          : 'Could not delete user';
+      setError(msg);
+      pushToast(msg, 'error');
       throw err;
     }
   }
