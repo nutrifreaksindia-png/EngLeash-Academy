@@ -137,6 +137,7 @@ const worksheetRoutes = require('./routes/worksheets');
 const assignmentRoutes = require('./routes/assignments');
 const { router: paymentRoutes, razorpayWebhookHandler } = require('./routes/payments');
 const billingPackageRoutes = require('./routes/billingPackages');
+const subscriptionRoutes = require('./routes/subscriptions');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -166,6 +167,7 @@ app.use('/api/worksheets', worksheetRoutes);
 app.use('/api/assignments', assignmentRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/billing', billingPackageRoutes);
+app.use('/api/subscriptions', subscriptionRoutes);
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 app.get('/api/health/details', (req, res) => {

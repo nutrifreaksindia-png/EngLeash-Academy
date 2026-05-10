@@ -18,6 +18,7 @@ import StudyMaterialsPage from './pages/StudyMaterialsPage';
 import WorksheetsPage from './pages/WorksheetsPage';
 import AssignmentsPage from './pages/AssignmentsPage';
 import BillingPage from './pages/BillingPage';
+import SubscriptionsPage from './pages/SubscriptionsPage';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
 
@@ -646,28 +647,22 @@ export default function App() {
     }
   }
 
-  async function createBatch(e) {
-    e.preventDefault();
-    const formEl = e.currentTarget;
-    const form = new FormData(formEl);
+  async function createBatch(payload) {
     try {
-      const trainerRaw = form.get('trainerId');
-      const trainers =
-        trainerRaw && String(trainerRaw).trim() !== '' ? [Number(trainerRaw)] : undefined;
       await apiFetch('/batch-manager', token, {
         method: 'POST',
         body: JSON.stringify({
-          title: form.get('title'),
-          batchType: form.get('batchType'),
-          batchNumber: Number(form.get('batchNumber')),
-          courseId: form.get('courseId') ? Number(form.get('courseId')) : undefined,
-          plannedStartDate: form.get('plannedStartDate') || undefined,
-          durationDays: form.get('durationDays') ? Number(form.get('durationDays')) : undefined,
-          notes: form.get('notes') || undefined,
-          trainers,
+          title: payload.title,
+          batchType: payload.batchType,
+          batchNumber: Number(payload.batchNumber),
+          courseId: payload.courseId,
+          plannedStartDate: payload.plannedStartDate,
+          durationDays: payload.durationDays,
+          notes: payload.notes,
+          trainers: payload.trainers,
+          subscriptionPackageId: payload.subscriptionPackageId,
         }),
       });
-      formEl.reset();
       await loadAll();
       setMessage('Batch created');
       pushToast('Batch created', 'success');
@@ -677,6 +672,11 @@ export default function App() {
       pushToast(err.message, 'error');
       return false;
     }
+  }
+
+  async function fetchAdminSubscriptions() {
+    const data = await apiFetch('/subscriptions/admin', token);
+    return Array.isArray(data?.subscriptions) ? data.subscriptions : [];
   }
 
   async function updateBatch(batchId, payload) {
@@ -1343,6 +1343,8 @@ export default function App() {
         loadLessonComposition={loadLessonComposition}
       />
     );
+  } else if (currentPage === 'subscriptions' && currentUser?.role === 'Admin') {
+    page = <SubscriptionsPage loadSubscriptions={fetchAdminSubscriptions} />;
   } else if (currentPage === 'batches') {
     page = (
       <BatchesPage
@@ -1521,6 +1523,7 @@ export default function App() {
                 onLogout={logout}
                 creatorMode={currentUser?.role === 'Creator'}
                 showBillingNav={currentUser?.role === 'Admin'}
+                showSubscriptionsNav={currentUser?.role === 'Admin'}
               >
                 {page}
               </AdminShell>

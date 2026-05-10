@@ -3,7 +3,7 @@ const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
 const upload = require('../upload');
 const { syncCourseLessonSlots } = require('../lib/syncCourseLessonSlots');
-const { userHasCourseAccess } = require('../lib/courseAccess');
+const { learnerHasCourseAccess } = require('../lib/courseAccess');
 const { myCourseScheduleHint } = require('../lib/dayWiseProgress');
 const { isSpacesConfigured, deleteObjectsUnderPrefix } = require('../services/spaces');
 
@@ -20,26 +20,27 @@ router.get('/', auth, (req, res) => {
     ).all();
     return res.json(courses);
   }
-  let courses = db.prepare(`
+  const uid = req.user.id;
+  const courses = db.prepare(`
     SELECT c.id, c.name, c.description, c.image_url, c.sort_order, c.is_published, c.created_at,
            c.highlights, c.specifications_html, c.duration_days, c.lesson_schedule_json, c.modes_json, c.languages_json,
            c.fee_inr, c.discount_inr, c.course_status, c.enrollment_type, c.progression_type
     FROM courses c
-    INNER JOIN course_enrollments e ON e.course_id = c.id AND e.user_id = ? AND e.status = 'approved'
     WHERE c.is_published = 1 AND COALESCE(c.course_status, 'Active') = 'Active'
+      AND (
+        EXISTS (
+          SELECT 1 FROM course_enrollments ce
+          WHERE ce.course_id = c.id AND ce.user_id = ? AND ce.status = 'approved'
+        )
+        OR EXISTS (SELECT 1 FROM enrollments e WHERE e.course_id = c.id AND e.user_id = ?)
+        OR EXISTS (
+          SELECT 1 FROM batch_members bm
+          INNER JOIN batches b ON b.id = bm.batch_id AND b.course_id = c.id AND b.course_id IS NOT NULL
+          WHERE bm.student_id = ?
+        )
+      )
     ORDER BY c.sort_order, c.id
-  `).all(req.user.id);
-  if (courses.length === 0) {
-    courses = db.prepare(`
-      SELECT c.id, c.name, c.description, c.image_url, c.sort_order, c.is_published, c.created_at,
-             c.highlights, c.specifications_html, c.duration_days, c.lesson_schedule_json, c.modes_json, c.languages_json,
-             c.fee_inr, c.discount_inr, c.course_status, c.enrollment_type, c.progression_type
-      FROM courses c
-      INNER JOIN enrollments e ON e.course_id = c.id AND e.user_id = ?
-      WHERE c.is_published = 1 AND COALESCE(c.course_status, 'Active') = 'Active'
-      ORDER BY c.sort_order, c.id
-    `).all(req.user.id);
-  }
+  `).all(uid, uid, uid);
   const learner =
     req.user.role === 'Student' || req.user.role === 'Lab'
       ? (c) => ({
@@ -56,12 +57,35 @@ router.get('/catalog', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), 
             fee_inr, discount_inr, course_status, enrollment_type, progression_type
      FROM courses WHERE is_published = 1 AND COALESCE(course_status, 'Active') = 'Active' ORDER BY sort_order, id`
   ).all();
-  let enrolledRows = db.prepare('SELECT course_id, status FROM course_enrollments WHERE user_id = ?').all(req.user.id);
+  const uid = req.user.id;
+  let enrolledRows = db.prepare('SELECT course_id, status FROM course_enrollments WHERE user_id = ?').all(uid);
   if (enrolledRows.length === 0) {
-    enrolledRows = db.prepare("SELECT course_id, 'approved' AS status FROM enrollments WHERE user_id = ?").all(req.user.id);
+    enrolledRows = db.prepare("SELECT course_id, 'approved' AS status FROM enrollments WHERE user_id = ?").all(uid);
   }
   const enrollmentByCourse = new Map(enrolledRows.map((r) => [r.course_id, r.status]));
-  res.json(courses.map(c => ({ ...c, enrollmentStatus: enrollmentByCourse.get(c.id) || null, enrolled: enrollmentByCourse.get(c.id) === 'approved' })));
+  const batchCourseRows = db
+    .prepare(
+      `
+    SELECT DISTINCT b.course_id AS course_id
+    FROM batch_members bm
+    INNER JOIN batches b ON b.id = bm.batch_id AND b.course_id IS NOT NULL
+    WHERE bm.student_id = ?
+  `,
+    )
+    .all(uid);
+  for (const r of batchCourseRows) {
+    if (r.course_id == null) continue;
+    const prev = enrollmentByCourse.get(r.course_id);
+    if (!prev || prev !== 'approved') enrollmentByCourse.set(r.course_id, 'approved');
+  }
+  const now = Date.now();
+  res.json(
+    courses.map((c) => ({
+      ...c,
+      enrollmentStatus: enrollmentByCourse.get(c.id) || null,
+      enrolled: !!(enrollmentByCourse.get(c.id) === 'approved' || learnerHasCourseAccess(uid, c.id, now)),
+    })),
+  );
 });
 
 /** Published catalog for marketing / mobile landing (no auth). */
@@ -95,10 +119,7 @@ router.get('/:id', auth, (req, res) => {
   `).get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Course not found' });
   if (req.user.role !== 'Admin') {
-    const enrolled =
-      db.prepare("SELECT 1 FROM course_enrollments WHERE user_id = ? AND course_id = ? AND status = 'approved'").get(req.user.id, c.id)
-      || db.prepare('SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?').get(req.user.id, c.id);
-    const access = !!(enrolled || userHasCourseAccess(req.user.id, c.id));
+    const access = learnerHasCourseAccess(req.user.id, c.id);
     if (!access) return res.status(403).json({ error: 'Not enrolled in this course' });
   }
   res.json(c);

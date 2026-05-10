@@ -1,32 +1,35 @@
 import React from 'react';
 
-const NAV_SECTIONS = [
+function navStudentsBatches(showSubscriptionsNav) {
+  const items = [
+    { id: 'students', label: 'Students' },
+    { id: 'batches', label: 'Batches' },
+    { id: 'approvals', label: 'Pending Applications' },
+  ];
+  if (showSubscriptionsNav) items.splice(2, 0, { id: 'subscriptions', label: 'Subscriptions' });
+  return items;
+}
+
+const NAV_SECTIONS_BASE = [
   {
     collapseKey: 'studentsBatches',
     title: 'Students & Batches',
-    items: [
-      { id: 'students', label: 'Students' },
-      { id: 'batches', label: 'Batches' },
-      { id: 'approvals', label: 'Pending Applications' },
-    ],
+    getItems: ({ showSubscriptionsNav }) => navStudentsBatches(showSubscriptionsNav),
   },
   {
     collapseKey: 'otherUsers',
     title: 'Other Users',
-    items: [{ id: 'other-users', label: 'Directory' }],
+    getItems: () => [{ id: 'other-users', label: 'Directory' }],
   },
   {
     collapseKey: 'lessonsCourses',
     title: 'Lessons & Courses',
-    items: [
-      { id: 'lessons', label: 'Lessons' },
-      { id: 'courses', label: 'Courses' },
-    ],
+    getItems: ({ lessonsCoursesItems }) => lessonsCoursesItems,
   },
   {
     collapseKey: 'library',
     title: 'Library',
-    items: [
+    getItems: () => [
       { id: 'videos', label: 'Videos' },
       { id: 'study-materials', label: 'Study Materials' },
       { id: 'worksheets', label: 'Worksheets' },
@@ -44,6 +47,7 @@ export default function AdminShell({
   children,
   creatorMode = false,
   showBillingNav = false,
+  showSubscriptionsNav = false,
 }) {
   const lessonsCoursesItems = React.useMemo(() => {
     const base = [
@@ -54,11 +58,19 @@ export default function AdminShell({
     return base;
   }, [showBillingNav]);
 
+  const navCtx = { showSubscriptionsNav, lessonsCoursesItems };
   const navSections = creatorMode
-    ? NAV_SECTIONS.filter((s) => s.collapseKey === 'library' || s.collapseKey === 'lessonsCourses').map((s) =>
-        s.collapseKey === 'lessonsCourses' ? { ...s, items: lessonsCoursesItems.filter((i) => i.id !== 'billing') } : s
-      )
-    : NAV_SECTIONS.map((s) => (s.collapseKey === 'lessonsCourses' ? { ...s, items: lessonsCoursesItems } : s));
+    ? NAV_SECTIONS_BASE.filter((s) => s.collapseKey === 'library' || s.collapseKey === 'lessonsCourses').map((s) => ({
+        ...s,
+        items:
+          s.collapseKey === 'lessonsCourses'
+            ? lessonsCoursesItems.filter((i) => i.id !== 'billing')
+            : s.getItems(navCtx),
+      }))
+    : NAV_SECTIONS_BASE.map((s) => ({
+        ...s,
+        items: s.collapseKey === 'lessonsCourses' ? lessonsCoursesItems : s.getItems(navCtx),
+      }));
   const [collapsed, setCollapsed] = React.useState({
     studentsBatches: true,
     otherUsers: true,

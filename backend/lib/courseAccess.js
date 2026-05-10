@@ -38,6 +38,34 @@ function startOfDayFromYmd(ymd) {
 /**
  * Effective access includes lifetime (ends_at_ms null) OR now in [starts_at_ms, grace_ends_at_ms].
  */
+/**
+ * Primary learner entitlement: formal enrollment rows, timed/lifetime grants, or membership in any batch tied to this course.
+ * Used across courses list, lesson access, quizzes, etc.
+ */
+function learnerHasCourseAccess(userId, courseId, nowMs = Date.now()) {
+  const uid = Number(userId);
+  const cid = Number(courseId);
+  if (!Number.isFinite(uid) || !Number.isFinite(cid)) return false;
+
+  const enrolled =
+    db
+      .prepare("SELECT 1 FROM course_enrollments WHERE user_id = ? AND course_id = ? AND status = 'approved'")
+      .get(uid, cid)
+    || db.prepare('SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?').get(uid, cid);
+  if (enrolled) return true;
+
+  if (userHasCourseAccess(uid, cid, nowMs)) return true;
+
+  const batchRow = db
+    .prepare(
+      `SELECT 1 FROM batch_members bm
+       INNER JOIN batches b ON b.id = bm.batch_id AND b.course_id = ?
+       WHERE bm.student_id = ?`,
+    )
+    .get(cid, uid);
+  return !!batchRow;
+}
+
 function userHasCourseAccess(userId, courseId, nowMs = Date.now()) {
   const rows = db
     .prepare(
@@ -220,6 +248,32 @@ function loadComboCourses(comboId) {
 }
 
 /** Batch path: subscription package on batch, no payment. */
+/** Non-subscribe courses: batch membership implies full access; record grant + approved enrollment for My Courses / subscriptions. */
+function grantNonSubscribeBatchCourseAccess(batchId, userId) {
+  const batch = db.prepare('SELECT id, course_id FROM batches WHERE id = ?').get(batchId);
+  if (!batch?.course_id) return;
+  const course = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(batch.course_id);
+  if (!course) return;
+  if (String(course.enrollment_type || '').toLowerCase() === 'subscribe') return;
+
+  upsertLifetimeGrant(userId, batch.course_id, 'batch_course');
+  const ts = new Date().toISOString();
+  const cid = Number(batch.course_id);
+  const existing = db.prepare('SELECT id, status FROM course_enrollments WHERE user_id = ? AND course_id = ?').get(userId, cid);
+  if (!existing) {
+    db.prepare(
+      `INSERT INTO course_enrollments (user_id, course_id, enrollment_type, status, requested_at, approved_at, approved_by)
+       VALUES (?, ?, 'free', 'approved', ?, ?, NULL)`,
+    ).run(userId, cid, ts, ts);
+  } else if (existing.status !== 'approved') {
+    db.prepare(
+      `UPDATE course_enrollments SET enrollment_type = 'free', status = 'approved', approved_at = ?, approved_by = NULL, notes = NULL
+       WHERE id = ?`,
+    ).run(ts, existing.id);
+  }
+  db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(userId, cid);
+}
+
 function grantBatchSubscriptionAccess(batchId, userId) {
   const dup = db
     .prepare(
@@ -287,6 +341,7 @@ module.exports = {
   GRACE_MS,
   packageDurationMs,
   packageAmountPaise,
+  learnerHasCourseAccess,
   userHasCourseAccess,
   latestSubscriptionEndMs,
   userEligibleForRenewal,
@@ -298,6 +353,7 @@ module.exports = {
   loadBillingPackage,
   loadComboCourses,
   grantBatchSubscriptionAccess,
+  grantNonSubscribeBatchCourseAccess,
   upsertLifetimeGrant,
   startOfDayFromYmd,
   hasActiveSubscribeWindow,

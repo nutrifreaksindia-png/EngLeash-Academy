@@ -163,6 +163,11 @@ export default function BatchesPage({
   const [subPkgLoading, setSubPkgLoading] = React.useState(false);
   const [editSubPackageId, setEditSubPackageId] = React.useState('');
 
+  const [createModalCourseId, setCreateModalCourseId] = React.useState('');
+  const [createModalSubPkgId, setCreateModalSubPkgId] = React.useState('');
+  const [createSubPkgOptions, setCreateSubPkgOptions] = React.useState([]);
+  const [createSubPkgLoading, setCreateSubPkgLoading] = React.useState(false);
+
   const [assignments, setAssignments] = React.useState([]);
   const [assignLoading, setAssignLoading] = React.useState(false);
   const [newAssignTitle, setNewAssignTitle] = React.useState('');
@@ -241,6 +246,37 @@ export default function BatchesPage({
       cancelled = true;
     };
   }, [modal, coursePickId, courses, fetchSubscribePackagesForCourse]);
+
+  React.useEffect(() => {
+    if (!createModalOpen || !createModalCourseId || !fetchSubscribePackagesForCourse) {
+      setCreateSubPkgOptions([]);
+      setCreateSubPkgLoading(false);
+      return undefined;
+    }
+    const meta = (courses || []).find((c) => String(c.id) === String(createModalCourseId));
+    if (!meta || String(meta.enrollment_type || '').toLowerCase() !== 'subscribe') {
+      setCreateSubPkgOptions([]);
+      setCreateSubPkgLoading(false);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      setCreateSubPkgLoading(true);
+      try {
+        const data = await fetchSubscribePackagesForCourse(Number(createModalCourseId));
+        if (cancelled) return;
+        const opts = (data?.packages || []).filter((p) => p.is_active);
+        setCreateSubPkgOptions(opts);
+      } catch {
+        if (!cancelled) setCreateSubPkgOptions([]);
+      } finally {
+        if (!cancelled) setCreateSubPkgLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [createModalOpen, createModalCourseId, courses, fetchSubscribePackagesForCourse]);
 
   function toggleSchedDay(day) {
     setSchedDays((prev) => (prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day]));
@@ -371,9 +407,52 @@ export default function BatchesPage({
     };
   }, [recordingPreview?.url]);
 
-  async function handleCreateSubmit(e) {
-    const ok = await onCreateBatch(e);
-    if (ok) setCreateModalOpen(false);
+  async function submitCreateBatch(e) {
+    e.preventDefault();
+    const formEl = e.currentTarget;
+    const fd = new FormData(formEl);
+    const cidNum =
+      createModalCourseId.trim() !== '' && Number.isFinite(Number(createModalCourseId))
+        ? Number(createModalCourseId)
+        : undefined;
+    const cmeta =
+      cidNum != null ? (courses || []).find((x) => Number(x.id) === cidNum) : null;
+    const isSubscribe =
+      cmeta && String(cmeta.enrollment_type || '').toLowerCase() === 'subscribe';
+    if (isSubscribe) {
+      const pid = Number(createModalSubPkgId);
+      if (!Number.isFinite(pid)) {
+        window.alert(
+          'Choose a subscription package for this Subscribe course, or create packages under Billing & combos.',
+        );
+        return;
+      }
+    }
+    const trainerRaw = fd.get('trainerId');
+    const trainers =
+      trainerRaw && String(trainerRaw).trim() !== '' ? [Number(trainerRaw)] : undefined;
+
+    const ok = await onCreateBatch({
+      title: String(fd.get('title') || '').trim(),
+      batchType: String(fd.get('batchType') || 'group'),
+      batchNumber: Number(fd.get('batchNumber')),
+      courseId: cidNum,
+      plannedStartDate: String(fd.get('plannedStartDate') || '').trim() || undefined,
+      durationDays:
+        fd.get('durationDays') != null && String(fd.get('durationDays')).trim() !== ''
+          ? Number(fd.get('durationDays'))
+          : undefined,
+      notes: String(fd.get('notes') || '').trim() || undefined,
+      trainers,
+      subscriptionPackageId: isSubscribe ? Number(createModalSubPkgId) : undefined,
+    });
+    if (ok) {
+      formEl.reset();
+      setCreateModalCourseId('');
+      setCreateModalSubPkgId('');
+      setCreateSubPkgOptions([]);
+      setCreateModalOpen(false);
+    }
   }
 
   async function handleSaveSchedule() {
@@ -1021,8 +1100,18 @@ export default function BatchesPage({
         ) : null}
       </Modal>
 
-      <Modal open={createModalOpen} title="Create batch" onClose={() => setCreateModalOpen(false)} variant="modal">
-        <form onSubmit={handleCreateSubmit} className="formGrid batchCreateForm batchModalBody">
+      <Modal
+        open={createModalOpen}
+        title="Create batch"
+        onClose={() => {
+          setCreateModalOpen(false);
+          setCreateModalCourseId('');
+          setCreateModalSubPkgId('');
+          setCreateSubPkgOptions([]);
+        }}
+        variant="modal"
+      >
+        <form onSubmit={submitCreateBatch} className="formGrid batchCreateForm batchModalBody">
           <label className="batchCreateLabel">
             Batch number *
             <input name="batchNumber" type="number" min={1} required placeholder="e.g. 101" />
@@ -1062,6 +1151,53 @@ export default function BatchesPage({
               ))}
             </select>
           </label>
+          <label className="batchCreateLabel batchCreateSpan2">
+            Course (optional — link syllabus & subscriptions)
+            <select
+              value={createModalCourseId}
+              onChange={(event) => {
+                setCreateModalCourseId(event.target.value);
+                setCreateModalSubPkgId('');
+              }}
+            >
+              <option value="">— None —</option>
+              {(courses || []).map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                  {String(c.enrollment_type || '').toLowerCase() === 'subscribe' ? ' (Subscribe)' : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          {(() => {
+            const meta = (courses || []).find((c) => String(c.id) === String(createModalCourseId));
+            const isSub = meta && String(meta.enrollment_type || '').toLowerCase() === 'subscribe';
+            if (!isSub) return null;
+            return (
+              <label className="batchCreateLabel batchCreateSpan2">
+                Subscription package (required for Subscribe courses)
+                <select
+                  value={createModalSubPkgId}
+                  onChange={(event) => setCreateModalSubPkgId(event.target.value)}
+                  disabled={createSubPkgLoading}
+                >
+                  <option value="">— Select package —</option>
+                  {createSubPkgOptions.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {packageOptionLabel(p)}
+                    </option>
+                  ))}
+                </select>
+                {createSubPkgLoading ? (
+                  <span className="muted fieldHint">Loading packages…</span>
+                ) : createSubPkgOptions.length === 0 ? (
+                  <span className="muted fieldHint">
+                    No active subscription packages for this course. Add them under Billing &amp; combos → Course packages.
+                  </span>
+                ) : null}
+              </label>
+            );
+          })()}
           <label className="batchCreateLabel batchCreateSpan2">
             Notes (optional)
             <textarea name="notes" placeholder="Internal notes" rows={2} />

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import { useFocusEffect } from '@react-navigation/native';
@@ -24,6 +24,19 @@ import { api } from '../api/client';
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
 
+function formatSubsDate(iso?: string | null) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return d.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
 export default function AccountScreen({ navigation }: any) {
   const { user, logout, refreshUser } = useAuth();
   const insets = useSafeAreaInsets();
@@ -33,6 +46,9 @@ export default function AccountScreen({ navigation }: any) {
   const [serverPhotoUrl, setServerPhotoUrl] = useState('');
   const [photoVersion, setPhotoVersion] = useState(0);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  const [subscriptions, setSubscriptions] = useState<any[]>([]);
+  const [subsLoading, setSubsLoading] = useState(false);
+
   const [form, setForm] = useState({
     name: '',
     mobileNumber: '',
@@ -105,6 +121,28 @@ export default function AccountScreen({ navigation }: any) {
     userAny.mobile_number,
     userAny.name,
   ]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!user) return undefined;
+      let cancelled = false;
+      setSubsLoading(true);
+      api
+        .get('/subscriptions/my')
+        .then((rows) => {
+          if (!cancelled) setSubscriptions(Array.isArray(rows) ? rows : []);
+        })
+        .catch(() => {
+          if (!cancelled) setSubscriptions([]);
+        })
+        .finally(() => {
+          if (!cancelled) setSubsLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [user?.id]),
+  );
 
   useEffect(() => {
     if (!user) return;
@@ -267,6 +305,47 @@ export default function AccountScreen({ navigation }: any) {
             <View style={styles.progressTrack}>
               <View style={[styles.progressFill, { width: `${profileCompletion}%` }]} />
             </View>
+          </View>
+
+          <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>Subscriptions & access</Text>
+            {subsLoading ? (
+              <ActivityIndicator style={styles.spaceTop} color={BRAND_RED} />
+            ) : subscriptions.length === 0 ? (
+              <Text style={styles.value}>No subscription or access grants on file.</Text>
+            ) : (
+              subscriptions.map((s, idx) => (
+                <View key={s.id} style={[styles.subCard, idx > 0 ? styles.subCardSpaced : null]}>
+                  <Text style={styles.subCourse}>{s.courseName || `Course #${s.courseId}`}</Text>
+                  <Text style={styles.subMeta}>{s.sourceLabel || s.source}</Text>
+                  {(s.durationUnit || s.durationCount != null) && !s.isLifetime ? (
+                    <Text style={styles.subDetail}>
+                      Plan:{' '}
+                      {String(s.durationUnit || '').toLowerCase() === 'day'
+                        ? `${s.durationCount} day(s)`
+                        : String(s.durationUnit || '').toLowerCase() === 'year'
+                          ? `${s.durationCount} year(s)`
+                          : `${s.durationCount} mo`}{' '}
+                      · {String(s.packageKind || '') || 'subscription'}
+                    </Text>
+                  ) : null}
+                  {s.batchTitle ? (
+                    <Text style={styles.subDetail}>Batch: {s.batchTitle}</Text>
+                  ) : null}
+                  <Text style={styles.subDates}>
+                    {s.isLifetime
+                      ? 'Full access · no end date'
+                      : `${formatSubsDate(s.startsAtIso)} → ends ${formatSubsDate(s.endsAtIso)}`}
+                  </Text>
+                  {!s.isLifetime ? (
+                    <Text style={styles.subfine}>Grace until {formatSubsDate(s.graceEndsAtIso)}</Text>
+                  ) : null}
+                  {s.razorpayOrderId ? (
+                    <Text style={styles.subfine}>Order: {s.razorpayOrderId}</Text>
+                  ) : null}
+                </View>
+              ))
+            )}
           </View>
 
           <View style={styles.sectionCard}>
@@ -514,4 +593,17 @@ const styles = StyleSheet.create({
   loginScroll: { padding: 20, paddingTop: 12 },
   signInTitle: { fontSize: 26, fontWeight: '800', color: '#fff', marginBottom: 8 },
   signInSub: { fontSize: 15, color: '#e8eaf6', marginBottom: 20, lineHeight: 22 },
+  subCard: {
+    borderWidth: 1,
+    borderColor: '#e8ecf6',
+    borderRadius: 12,
+    padding: 12,
+    backgroundColor: '#f8fafc',
+  },
+  subCardSpaced: { marginTop: 12 },
+  subCourse: { fontSize: 16, fontWeight: '700', color: BRAND_BLUE },
+  subMeta: { fontSize: 13, fontWeight: '600', color: '#475569', marginTop: 4 },
+  subDetail: { fontSize: 13, color: '#64748b', marginTop: 4, lineHeight: 18 },
+  subDates: { fontSize: 12, color: '#334155', marginTop: 6, lineHeight: 18 },
+  subfine: { fontSize: 11, color: '#94a3b8', marginTop: 4 },
 });

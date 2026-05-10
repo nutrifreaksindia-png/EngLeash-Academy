@@ -7,7 +7,7 @@ const { ensureLiveSessionsForBatch, combineDateTime } = require('../services/ens
 const liveRecording = require('../services/liveRecording');
 
 const router = express.Router();
-const { grantBatchSubscriptionAccess } = require('../lib/courseAccess');
+const { grantBatchSubscriptionAccess, grantNonSubscribeBatchCourseAccess } = require('../lib/courseAccess');
 
 function subscriptionPackageRequired(courseIdNum, subscriptionPackageId) {
   if (courseIdNum == null || !Number.isFinite(courseIdNum)) return { ok: true, pkgId: null };
@@ -623,6 +623,11 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
         /* best-effort; admin can fix */
       }
     }
+    try {
+      grantNonSubscribeBatchCourseAccess(batchId, uid);
+    } catch (_) {
+      /* best-effort */
+    }
   });
   const trainerAttach = trainerCandidates.length > 0 ? trainerCandidates : [trainerId];
   trainerAttach.forEach((tid) => {
@@ -886,6 +891,11 @@ router.post('/:id/members', auth, requireRole('Admin', 'Trainer'), (req, res) =>
     } catch (_) {
       /* best-effort */
     }
+  }
+  try {
+    grantNonSubscribeBatchCourseAccess(batchId, studentId);
+  } catch (_) {
+    /* best-effort */
   }
   res.status(201).json({ ok: true });
 });

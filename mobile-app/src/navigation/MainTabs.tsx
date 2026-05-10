@@ -1,5 +1,6 @@
 import React from 'react';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { getFocusedRouteNameFromRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -174,9 +175,20 @@ export default function MainTabNavigator() {
       <Tab.Screen
         name="MyCourses"
         component={CoursesStackNavigator}
-        options={{
-          tabBarLabel: 'My Courses',
-          tabBarIcon: tabBarIcon('school', 'school-outline'),
+        options={({ route }) => {
+          const focused = getFocusedRouteNameFromRoute(route) ?? 'MyCoursesList';
+          const immersive = focused === 'LearnMode';
+          return {
+            tabBarLabel: 'My Courses',
+            tabBarIcon: tabBarIcon('school', 'school-outline'),
+            tabBarStyle: immersive
+              ? { display: 'none' }
+              : {
+                  paddingTop: 4,
+                  paddingBottom: Math.max(insets.bottom, 8),
+                  height: 58 + Math.max(insets.bottom, 8),
+                },
+          };
         }}
         listeners={({ navigation }) => ({
           tabPress: (e) => {

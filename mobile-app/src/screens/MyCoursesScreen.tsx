@@ -11,8 +11,8 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api } from '../api/client';
+import { BrandedTopBar } from '../components/BrandedTopBar';
 import { useAuth } from '../context/AuthContext';
-import { joinOpensAtLabel, userMayJoinLiveSession } from '../utils/liveJoinWindow';
 import {
   allLessonsCompleted,
   computeCourseProgressPercent,
@@ -39,20 +39,16 @@ type CourseEnriched = Course & {
   lessonAction: 'start' | 'resume' | 'restart';
 };
 
-type TodaySession = {
-  id: number;
-  batch_id: number;
-  session_day: number;
-  lesson_title?: string;
-  batch_title?: string;
-  batch_name?: string;
-  starts_at?: string;
-  status?: string;
-  live_session_id?: number | null;
-  live_status?: string | null;
-  live_starts_at?: string | null;
-  live_ends_at?: string | null;
-};
+function fallbackEnriched(c: Course): CourseEnriched {
+  return {
+    ...c,
+    lessonIds: [],
+    progressPercent: 0,
+    primaryLessonId: null,
+    primaryLessonTitle: '',
+    lessonAction: 'start',
+  };
+}
 
 async function enrichCourse(userId: number, c: Course): Promise<CourseEnriched> {
   let lessonsRaw: LessonRow[];
@@ -68,7 +64,7 @@ async function enrichCourse(userId: number, c: Course): Promise<CourseEnriched> 
   );
   const lessonIds = sorted.map((l) => l.id);
 
-  let progressPercent = await computeCourseProgressPercent(userId, c.id, sorted);
+  const progressPercent = await computeCourseProgressPercent(userId, c.id, sorted);
 
   let primaryLessonId: number | null = sorted[0]?.id ?? null;
   let primaryLessonTitle = sorted[0]?.title?.trim() || 'Current lesson';
@@ -121,7 +117,6 @@ export default function MyCoursesScreen({ navigation }: any) {
   const { user } = useAuth();
   const insets = useSafeAreaInsets();
   const [courses, setCourses] = useState<CourseEnriched[]>([]);
-  const [todaySessions, setTodaySessions] = useState<TodaySession[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -130,23 +125,18 @@ export default function MyCoursesScreen({ navigation }: any) {
     try {
       const data = await api.get('/courses');
       const rows = Array.isArray(data) ? data : [];
-      const enriched = await Promise.all(rows.map((c: Course) => enrichCourse(user.id, c)));
+      const enriched = await Promise.all(
+        rows.map(async (c: Course) => {
+          try {
+            return await enrichCourse(user.id, c);
+          } catch {
+            return fallbackEnriched(c);
+          }
+        }),
+      );
       setCourses(enriched);
-
-      const wantsToday = user.role === 'Student' || user.role === 'Lab' || user.role === 'Trainer';
-      if (wantsToday) {
-        try {
-          const todayRows = await api.get('/batch-manager/my/today');
-          setTodaySessions(Array.isArray(todayRows) ? todayRows : []);
-        } catch {
-          setTodaySessions([]);
-        }
-      } else {
-        setTodaySessions([]);
-      }
     } catch {
       setCourses([]);
-      setTodaySessions([]);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -162,8 +152,9 @@ export default function MyCoursesScreen({ navigation }: any) {
 
   if (!user) {
     return (
-      <View style={[styles.container, { paddingTop: insets.top + 16, paddingBottom: insets.bottom }]}>
-        <View style={styles.centered}>
+      <View style={styles.shell}>
+        <BrandedTopBar />
+        <View style={[styles.centered, { paddingBottom: insets.bottom }]}>
           <Text style={styles.guestHint}>Open My Account to sign in.</Text>
         </View>
       </View>
@@ -172,7 +163,8 @@ export default function MyCoursesScreen({ navigation }: any) {
 
   if (loading) {
     return (
-      <View style={[styles.container, { paddingTop: insets.top + 24 }]}>
+      <View style={styles.shell}>
+        <BrandedTopBar />
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={BRAND_RED} />
         </View>
@@ -180,90 +172,21 @@ export default function MyCoursesScreen({ navigation }: any) {
     );
   }
 
+  const scheduleFabBottom = 20 + insets.bottom;
+  const manageFabBottom = user.role === 'Admin' ? 82 + insets.bottom : scheduleFabBottom;
+
   return (
-    <View style={[styles.container, { paddingBottom: insets.bottom }]}>
-      {user.role === 'Student' || user.role === 'Lab' || user.role === 'Trainer' ? (
-        <View style={[styles.todayBox, { marginTop: Math.max(insets.top, 10) }]}>
-          <Text style={styles.todayTitle}>{user.role === 'Trainer' ? 'Today’s classes' : 'Today’s lesson shortcut'}</Text>
-          {todaySessions.length === 0 ? (
-            <Text style={styles.todaySub}>No scheduled session today.</Text>
-          ) : (
-            todaySessions.map((s) => {
-              const title = `Day ${s.session_day}: ${s.lesson_title || 'Session'}`;
-              const liveStarts = s.live_starts_at || '';
-              const liveEnds = s.live_ends_at || '';
-              let canJoin = false;
-              if (s.live_session_id && s.status !== 'cancelled' && s.live_status) {
-                if (!liveStarts || !liveEnds) {
-                  canJoin =
-                    (user.role === 'Admin' || user.role === 'Trainer') &&
-                    (s.live_status === 'scheduled' || s.live_status === 'live');
-                } else {
-                  canJoin = userMayJoinLiveSession({
-                    userRole: user.role,
-                    liveStatus: s.live_status,
-                    startsAt: liveStarts,
-                    endsAt: liveEnds,
-                  });
-                }
-              }
-              const showWaitHint =
-                !canJoin &&
-                (user.role === 'Student' || user.role === 'Lab') &&
-                s.live_session_id &&
-                s.live_status === 'scheduled' &&
-                Boolean(liveStarts);
-              return (
-                <View key={s.id} style={styles.todayRow}>
-                  <View style={styles.todayTextCol}>
-                    <Text style={styles.todayLesson}>{title}</Text>
-                    <Text style={styles.todayBatch}>{s.batch_title || s.batch_name}</Text>
-                    {s.status === 'cancelled' ? (
-                      <Text style={styles.todayCancelled}>Cancelled</Text>
-                    ) : null}
-                    {showWaitHint ? (
-                      <Text style={styles.todayHint}>{joinOpensAtLabel(liveStarts)}</Text>
-                    ) : null}
-                  </View>
-                  {canJoin ? (
-                    <TouchableOpacity
-                      style={styles.todayJoinBtn}
-                      onPress={() =>
-                        navigation.getParent()?.getParent()?.navigate('MySessions', {
-                          screen: 'LiveClassroom',
-                          params: { liveSessionId: s.live_session_id!, title },
-                        })
-                      }
-                    >
-                      <Text style={styles.todayJoinText}>Join live</Text>
-                    </TouchableOpacity>
-                  ) : (
-                    <TouchableOpacity
-                      style={styles.todayBrowseBtn}
-                      onPress={() =>
-                        navigation.getParent()?.getParent()?.navigate('MySessions', {
-                          screen: 'LiveSessions',
-                        })
-                      }
-                    >
-                      <Text style={styles.todayBrowseText}>Sessions</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-              );
-            })
-          )}
-        </View>
-      ) : (
-        <View style={{ marginTop: Math.max(insets.top, 10) }} />
-      )}
+    <View style={[styles.shell, { paddingBottom: insets.bottom }]}>
+      <BrandedTopBar />
       <FlatList
         style={styles.listFlex}
         data={courses}
         keyExtractor={(item) => String(item.id)}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); void load(); }} />}
-        contentContainerStyle={[styles.list, { paddingBottom: 200 + insets.bottom }]}
-        ListEmptyComponent={<Text style={styles.empty}>No enrolled courses. Browse the catalog to enroll.</Text>}
+        contentContainerStyle={[styles.list, { paddingBottom: 100 + insets.bottom }]}
+        ListEmptyComponent={
+          <Text style={styles.empty}>No enrolled courses yet. Explore and enroll from the Home tab.</Text>
+        }
         renderItem={({ item }) => {
           const ctaLabel =
             item.lessonAction === 'resume'
@@ -331,21 +254,9 @@ export default function MyCoursesScreen({ navigation }: any) {
           );
         }}
       />
-      <TouchableOpacity
-        style={[styles.catalogBtn, { bottom: 16 + insets.bottom }]}
-        onPress={() => navigation.navigate('CourseCatalog')}
-      >
-        <Text style={styles.catalogBtnText}>Browse course catalog</Text>
-      </TouchableOpacity>
-      <TouchableOpacity
-        style={[styles.liveBtn, { bottom: 70 + insets.bottom }]}
-        onPress={() => navigation.getParent()?.getParent()?.navigate('MySessions', { screen: 'LiveSessions' })}
-      >
-        <Text style={styles.liveBtnText}>Join live classes</Text>
-      </TouchableOpacity>
       {user.role === 'Trainer' || user.role === 'Admin' ? (
         <TouchableOpacity
-          style={[styles.scheduleBtn, { bottom: 124 + insets.bottom }]}
+          style={[styles.scheduleBtn, { bottom: scheduleFabBottom }]}
           onPress={() => navigation.getParent()?.getParent()?.navigate('MySessions', { screen: 'LiveSchedule' })}
         >
           <Text style={styles.scheduleBtnText}>Schedule live</Text>
@@ -353,7 +264,7 @@ export default function MyCoursesScreen({ navigation }: any) {
       ) : null}
       {user.role === 'Admin' ? (
         <TouchableOpacity
-          style={[styles.manageBtn, { bottom: 178 + insets.bottom }]}
+          style={[styles.manageBtn, { bottom: manageFabBottom }]}
           onPress={() => navigation.navigate('AdminCourseManager')}
         >
           <Text style={styles.manageBtnText}>Manage courses</Text>
@@ -364,56 +275,11 @@ export default function MyCoursesScreen({ navigation }: any) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#edf1fa' },
+  shell: { flex: 1, backgroundColor: '#edf1fa' },
   listFlex: { flex: 1 },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
   guestHint: { color: '#64748b', textAlign: 'center', fontSize: 17 },
   list: { padding: 18, paddingTop: 12, gap: 14 },
-  todayBox: {
-    marginHorizontal: 18,
-    marginBottom: 4,
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: '#dfe7f8',
-    shadowColor: BRAND_BLUE,
-    shadowOpacity: 0.08,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
-  },
-  todayTitle: { fontSize: 15, fontWeight: '700', color: BRAND_BLUE, marginBottom: 10 },
-  todaySub: { color: '#64748b', fontSize: 14 },
-  todayRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#e8edf5',
-    paddingTop: 10,
-    marginTop: 8,
-  },
-  todayTextCol: { flex: 1, paddingRight: 12 },
-  todayLesson: { color: '#0f172a', fontWeight: '700', fontSize: 15 },
-  todayBatch: { color: '#64748b', fontSize: 13, marginTop: 4 },
-  todayCancelled: { color: '#94a3b8', fontSize: 12, marginTop: 4 },
-  todayHint: { color: '#64748b', fontSize: 11, marginTop: 4, fontStyle: 'italic' },
-  todayJoinBtn: {
-    backgroundColor: BRAND_RED,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 12,
-  },
-  todayJoinText: { color: '#fff', fontWeight: '700', fontSize: 14 },
-  todayBrowseBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: BRAND_BLUE,
-  },
-  todayBrowseText: { color: BRAND_BLUE, fontWeight: '600', fontSize: 13 },
   empty: { color: '#64748b', textAlign: 'center', paddingVertical: 36, fontSize: 15 },
   card: {
     backgroundColor: '#fff',
@@ -493,33 +359,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
   },
   outlineBtnText: { color: BRAND_BLUE, fontWeight: '600', fontSize: 14 },
-  catalogBtn: {
-    position: 'absolute',
-    bottom: 24,
-    left: 18,
-    right: 18,
-    backgroundColor: BRAND_BLUE,
-    borderRadius: 14,
-    paddingVertical: 15,
-    alignItems: 'center',
-  },
-  catalogBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
-  liveBtn: {
-    position: 'absolute',
-    left: 18,
-    right: 18,
-    borderRadius: 14,
-    paddingVertical: 12,
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: BRAND_BLUE,
-    backgroundColor: '#fff',
-  },
-  liveBtnText: {
-    color: BRAND_BLUE,
-    fontSize: 15,
-    fontWeight: '700',
-  },
   scheduleBtn: {
     position: 'absolute',
     left: 18,

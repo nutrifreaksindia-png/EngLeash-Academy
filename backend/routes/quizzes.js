@@ -7,22 +7,20 @@ const {
   stripCreatorFields,
   stripRows,
 } = require('../lib/libraryScope');
+const { learnerHasCourseAccess } = require('../lib/courseAccess');
 
 const router = express.Router();
 
-function canAccessLesson(db, userId, role, lessonId) {
-  const lesson = db.prepare('SELECT course_id FROM lessons WHERE id = ?').get(lessonId);
+function canAccessLesson(database, userId, role, lessonId) {
+  const lesson = database.prepare('SELECT course_id FROM lessons WHERE id = ?').get(lessonId);
   if (!lesson) return false;
   if (role === 'Admin') return true;
-  const e = db.prepare('SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?').get(userId, lesson.course_id);
-  return !!e;
+  return learnerHasCourseAccess(userId, lesson.course_id);
 }
 
-function canAccessCourse(db, userId, role, courseId) {
+function canAccessCourse(database, userId, role, courseId) {
   if (role === 'Admin') return true;
-  const e = db.prepare("SELECT 1 FROM course_enrollments WHERE user_id = ? AND course_id = ? AND status = 'approved'").get(userId, courseId)
-    || db.prepare('SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?').get(userId, courseId);
-  return !!e;
+  return learnerHasCourseAccess(userId, courseId);
 }
 
 function normalizeText(s) {
