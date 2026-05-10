@@ -46,6 +46,10 @@ const CREATOR_ALLOWED_PAGES = new Set([
 function readableHttpError(raw, fallbackStatus) {
   if (typeof raw === 'string' && raw.trim()) return raw.trim();
   if (raw != null && typeof raw !== 'object' && String(raw).trim()) return String(raw).trim();
+  if (raw != null && typeof raw === 'object') {
+    const inner = raw.detail ?? raw.reason ?? raw.title ?? raw.err;
+    if (typeof inner === 'string' && inner.trim()) return inner.trim();
+  }
   if (fallbackStatus != null) return `Request failed (HTTP ${fallbackStatus})`;
   return 'Request failed';
 }
@@ -196,8 +200,10 @@ export default function App() {
   const authReady = useMemo(() => Boolean(token), [token]);
 
   function pushToast(text, type = 'info') {
+    let label = text == null ? '' : String(text).trim();
+    if (!label && type === 'error') label = 'Something went wrong. Check your connection or try again.';
     const id = `${Date.now()}-${Math.random()}`;
-    setToasts((prev) => [...prev, { id, text, type }]);
+    setToasts((prev) => [...prev, { id, text: label, type }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 2600);

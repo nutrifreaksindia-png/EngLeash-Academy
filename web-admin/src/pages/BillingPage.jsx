@@ -36,6 +36,14 @@ function toastErrMessage(err, fallback) {
   return m || fallback;
 }
 
+/** Empty <select> value is ''; Number('') is 0 and would load id 0 from the API. */
+function selectedEntityId(raw) {
+  if (raw === '' || raw == null) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return n;
+}
+
 const emptyPackageForm = {
   packageKind: 'subscription',
   durationUnit: 'month',
@@ -116,8 +124,8 @@ export default function BillingPage({
   }, [courseBillingId, courseOptions]);
 
   async function reloadCoursePackages() {
-    const id = Number(courseBillingId);
-    if (!Number.isFinite(id)) {
+    const id = selectedEntityId(courseBillingId);
+    if (id == null) {
       setCoursePkgs([]);
       return;
     }
@@ -139,8 +147,8 @@ export default function BillingPage({
   }, [courseBillingId]);
 
   async function reloadComboPackages() {
-    const id = Number(comboBillingId);
-    if (!Number.isFinite(id)) {
+    const id = selectedEntityId(comboBillingId);
+    if (id == null) {
       setComboPkgs([]);
       return;
     }

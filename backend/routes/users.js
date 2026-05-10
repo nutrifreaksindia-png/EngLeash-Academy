@@ -31,6 +31,52 @@ function tableExists(name) {
  * Rows that references users(id) without ON DELETE CASCADE will block deletes.
  * Reassign FKs onto the deleting admin where NOT NULL required; nullable FKs cleared.
  */
+/**
+ * Remove rows that tie this user_id to domains that may lack ON DELETE CASCADE
+ * (especially legacy `enrollments`; also live/session rows).
+ */
+function deleteUserScopedRows(userId) {
+  if (!Number.isFinite(userId)) return;
+
+  if (tableExists('enrollments')) {
+    try {
+      db.prepare('DELETE FROM enrollments WHERE user_id = ?').run(userId);
+    } catch (e) {
+      console.warn('[user-delete] enrollments', e.message);
+    }
+  }
+
+  const tryRun = (label, sql, ...params) => {
+    try {
+      db.prepare(sql).run(...params);
+    } catch (e) {
+      console.warn(`[user-delete] ${label}`, e.message);
+    }
+  };
+
+  tryRun('batch_members', 'DELETE FROM batch_members WHERE student_id = ?', userId);
+  tryRun('batch_trainers', 'DELETE FROM batch_trainers WHERE trainer_id = ?', userId);
+  tryRun('assignment_submissions', 'DELETE FROM assignment_submissions WHERE student_id = ?', userId);
+  tryRun('batch_session_attendance', 'DELETE FROM batch_session_attendance WHERE student_id = ?', userId);
+  tryRun('_course_enrollments', 'DELETE FROM course_enrollments WHERE user_id = ?', userId);
+  tryRun('quiz_attempts_v2', 'DELETE FROM quiz_attempts_v2 WHERE user_id = ?', userId);
+  tryRun('razorpay_course_orders', 'DELETE FROM razorpay_course_orders WHERE user_id = ?', userId);
+  tryRun('razorpay_billing_orders', 'DELETE FROM razorpay_billing_orders WHERE user_id = ?', userId);
+  tryRun('course_access_grants', 'DELETE FROM course_access_grants WHERE user_id = ?', userId);
+
+  tryRun('live_session_participants', 'DELETE FROM live_session_participants WHERE user_id = ?', userId);
+  tryRun('live_session_hands', 'DELETE FROM live_session_hands WHERE user_id = ?', userId);
+  tryRun('live_session_speakers', 'DELETE FROM live_session_speakers WHERE user_id = ?', userId);
+  tryRun('live_chat_messages', 'DELETE FROM live_chat_messages WHERE user_id = ?', userId);
+  tryRun('live_reactions', 'DELETE FROM live_reactions WHERE user_id = ?', userId);
+  tryRun('live_session_logs', 'DELETE FROM live_session_logs WHERE user_id = ?', userId);
+  tryRun('sessions_tokens', 'DELETE FROM sessions WHERE user_id = ?', userId);
+
+  if (tableExists('quiz_attempts')) {
+    tryRun('quiz_attempts_legacy', 'DELETE FROM quiz_attempts WHERE user_id = ?', userId);
+  }
+}
+
 function reassignUserOutboundReferences(deleteUserId, reassignUserId) {
   if (!Number.isFinite(deleteUserId) || !Number.isFinite(reassignUserId) || deleteUserId === reassignUserId)
     return;
@@ -567,7 +613,8 @@ router.delete('/:id', auth, requireRole('Admin'), async (req, res) => {
     }
     const runDelete = db.transaction(() => {
       reassignUserOutboundReferences(id, reassignedAdminId);
-      /* batch_trainers.trainer_id has ON DELETE CASCADE; batches.trainer_id must be rewritten first */
+      deleteUserScopedRows(id);
+      /* Co-trainers: safe even if FK already cascades */
       db.prepare('DELETE FROM batch_trainers WHERE trainer_id = ?').run(id);
       const r = db.prepare('DELETE FROM users WHERE id = ?').run(id);
       return r.changes;
