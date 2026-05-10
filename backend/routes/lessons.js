@@ -11,6 +11,7 @@ const {
 } = require('../lib/libraryScope');
 const { syncCourseLessonSlots } = require('../lib/syncCourseLessonSlots');
 const { userHasCourseAccess } = require('../lib/courseAccess');
+const { maxUnlockedLessonDay, lessonDayNumberForCourse } = require('../lib/dayWiseProgress');
 
 const router = express.Router();
 const baseUrl = process.env.STORAGE_URL || process.env.API_URL || '';
@@ -271,8 +272,17 @@ router.get('/course/:courseId/schedule', auth, requireRole('Admin', 'Trainer', '
 
 router.get('/course/:courseId', auth, (req, res) => {
   const { courseId } = req.params;
+  const cid = Number(courseId);
+  if (!Number.isFinite(cid)) return res.status(400).json({ error: 'Invalid course id' });
   if (!canAccessCourse(db, req.user.id, req.user.role, courseId)) {
     return res.status(403).json({ error: 'Not enrolled in this course' });
+  }
+  const staffBypass = ['Admin', 'Trainer', 'Creator'].includes(req.user.role);
+  const courseRow = db.prepare('SELECT progression_type FROM courses WHERE id = ?').get(cid);
+  const pt = String(courseRow?.progression_type || 'unlock_all').toLowerCase();
+  let maxDay = null;
+  if (!staffBypass && pt === 'day_wise') {
+    maxDay = maxUnlockedLessonDay(req.user.id, cid);
   }
   const mapped = db.prepare(`
     SELECT cl.id, cl.course_id, ll.id AS lesson_id, ll.title, cl.day_number AS sort_order, ll.video_url
@@ -280,22 +290,52 @@ router.get('/course/:courseId', auth, (req, res) => {
     JOIN lesson_library ll ON ll.id = cl.lesson_id
     WHERE cl.course_id = ?
     ORDER BY cl.day_number, cl.sequence_in_day, cl.id
-  `).all(courseId);
-  const lessons = mapped.length
-    ? mapped.map((m) => ({ id: m.lesson_id, map_id: m.id, course_id: m.course_id, title: m.title, sort_order: m.sort_order, video_url: m.video_url }))
-    : db.prepare(
-        'SELECT id, course_id, title, sort_order, video_url FROM lessons WHERE course_id = ? ORDER BY sort_order, id'
-      ).all(courseId);
+  `).all(cid);
+  let rows = mapped;
+  if (maxDay != null && Number.isFinite(maxDay)) {
+    rows = mapped.filter((m) => Number(m.sort_order) <= maxDay);
+  }
+  const lessons = rows.length
+    ? rows.map((m) => ({
+        id: m.lesson_id,
+        map_id: m.id,
+        course_id: m.course_id,
+        title: m.title,
+        sort_order: m.sort_order,
+        video_url: m.video_url,
+      }))
+    : db
+        .prepare('SELECT id, course_id, title, sort_order, video_url FROM lessons WHERE course_id = ? ORDER BY sort_order, id')
+        .all(cid);
   res.json(lessons);
 });
 
 router.get('/:id', auth, (req, res) => {
+  const courseIdParam = req.query.courseId != null && req.query.courseId !== '' ? Number(req.query.courseId) : null;
   let lesson = db.prepare(
     'SELECT id, course_id, title, sort_order, video_url FROM lessons WHERE id = ?'
   ).get(req.params.id);
   let fromLibrary = false;
   if (!lesson) {
-    const mapped = db.prepare(`
+    if (courseIdParam != null && Number.isFinite(courseIdParam)) {
+      const mappedOne = db
+        .prepare(
+          `
+      SELECT cl.course_id, ll.id, ll.title, cl.day_number AS sort_order, ll.video_url, ll.study_material_html, ll.worksheet_html, ll.worksheet_answer_key_html
+      FROM lesson_library ll
+      JOIN course_lessons cl ON cl.lesson_id = ll.id
+      WHERE ll.id = ? AND cl.course_id = ?
+      LIMIT 1
+    `,
+        )
+        .get(req.params.id, courseIdParam);
+      if (mappedOne) {
+        lesson = mappedOne;
+        fromLibrary = true;
+      }
+    }
+    if (!lesson) {
+      const mapped = db.prepare(`
       SELECT cl.course_id, ll.id, ll.title, cl.day_number AS sort_order, ll.video_url, ll.study_material_html, ll.worksheet_html, ll.worksheet_answer_key_html
       FROM lesson_library ll
       JOIN course_lessons cl ON cl.lesson_id = ll.id
@@ -303,14 +343,27 @@ router.get('/:id', auth, (req, res) => {
       ORDER BY cl.day_number ASC
       LIMIT 1
     `).get(req.params.id);
-    if (mapped) {
-      lesson = mapped;
-      fromLibrary = true;
+      if (mapped) {
+        lesson = mapped;
+        fromLibrary = true;
+      }
     }
   }
   if (!lesson) return res.status(404).json({ error: 'Lesson not found' });
   if (!canAccessCourse(db, req.user.id, req.user.role, lesson.course_id)) {
     return res.status(403).json({ error: 'Not enrolled in this course' });
+  }
+  const staffBypass = ['Admin', 'Trainer', 'Creator'].includes(req.user.role);
+  if (!staffBypass && fromLibrary) {
+    const cRow = db.prepare('SELECT progression_type FROM courses WHERE id = ?').get(lesson.course_id);
+    const pt = String(cRow?.progression_type || 'unlock_all').toLowerCase();
+    if (pt === 'day_wise') {
+      const ln = lessonDayNumberForCourse(lesson.course_id, Number(req.params.id));
+      const maxD = maxUnlockedLessonDay(req.user.id, lesson.course_id);
+      if (ln != null && ln > maxD) {
+        return res.status(403).json({ error: 'This lesson is not available until its class day (day-wise course).' });
+      }
+    }
   }
   const notes = db.prepare('SELECT id, title, file_path FROM class_notes WHERE lesson_id = ?').all(lesson.id);
   const worksheets = db.prepare('SELECT id, title, file_path FROM worksheets WHERE lesson_id = ?').all(lesson.id);

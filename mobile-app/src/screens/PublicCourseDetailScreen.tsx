@@ -61,7 +61,7 @@ function primaryCta(typeRaw?: string) {
 
 function formatModeLabel(m: string) {
   const s = String(m).trim();
-  if (/^self-?paced$/i.test(s)) return 'Self';
+  if (/^self-?paced$/i.test(s) || s === 'Self') return 'Self';
   return s;
 }
 

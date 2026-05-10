@@ -18,7 +18,7 @@ import { joinOpensAtLabel, userMayJoinLiveSession } from '../utils/liveJoinWindo
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
 
-type Course = { id: number; name: string; description?: string };
+type Course = { id: number; name: string; description?: string; my_schedule_hint?: string | null };
 type Batch = { id: number; title?: string; name?: string; batch_status?: string; course_name?: string };
 type TodaySession = {
   id: number;
@@ -215,6 +215,9 @@ export default function MyCoursesScreen({ navigation }: any) {
             onPress={() => navigation.navigate('CourseDetail', { courseId: item.id, courseName: item.name })}
           >
             <Text style={styles.cardTitle}>{item.name}</Text>
+            {item.my_schedule_hint ? (
+              <Text style={styles.cardScheduleHint}>{item.my_schedule_hint}</Text>
+            ) : null}
             {item.description ? <Text style={styles.cardDesc} numberOfLines={2}>{item.description}</Text> : null}
           </TouchableOpacity>
         )}
@@ -319,6 +322,7 @@ const styles = StyleSheet.create({
     borderLeftColor: BRAND_RED,
   },
   cardTitle: { fontSize: 17, fontWeight: '600', color: '#333' },
+  cardScheduleHint: { fontSize: 13, color: BRAND_BLUE, marginTop: 6, fontWeight: '600' },
   cardDesc: { fontSize: 14, color: '#666', marginTop: 4 },
   catalogBtn: {
     position: 'absolute',

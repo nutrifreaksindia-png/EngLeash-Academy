@@ -4,6 +4,7 @@ const { auth, requireRole } = require('../middleware/auth');
 const upload = require('../upload');
 const { syncCourseLessonSlots } = require('../lib/syncCourseLessonSlots');
 const { userHasCourseAccess } = require('../lib/courseAccess');
+const { myCourseScheduleHint } = require('../lib/dayWiseProgress');
 const { isSpacesConfigured, deleteObjectsUnderPrefix } = require('../services/spaces');
 
 const router = express.Router();
@@ -39,7 +40,14 @@ router.get('/', auth, (req, res) => {
       ORDER BY c.sort_order, c.id
     `).all(req.user.id);
   }
-  res.json(courses);
+  const learner =
+    req.user.role === 'Student' || req.user.role === 'Lab'
+      ? (c) => ({
+          ...c,
+          my_schedule_hint: myCourseScheduleHint(req.user.id, c),
+        })
+      : (c) => c;
+  res.json(courses.map(learner));
 });
 
 router.get('/catalog', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), (req, res) => {

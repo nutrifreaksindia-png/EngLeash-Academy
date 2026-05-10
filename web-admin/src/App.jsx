@@ -523,6 +523,7 @@ export default function App() {
           discountInr: Number(payload.discountInr || 0),
           courseStatus: payload.courseStatus,
           enrollmentType: payload.enrollmentType,
+          progressionType: payload.progressionType === 'day_wise' ? 'day_wise' : 'unlock_all',
           is_published: payload.isPublished === false ? 0 : 1,
         }),
       });
@@ -555,6 +556,7 @@ export default function App() {
           discountInr: Number(payload.discountInr || 0),
           courseStatus: payload.courseStatus,
           enrollmentType: payload.enrollmentType,
+          progressionType: payload.progressionType === 'day_wise' ? 'day_wise' : 'unlock_all',
           is_published: payload.isPublished === false ? 0 : 1,
         }),
       });

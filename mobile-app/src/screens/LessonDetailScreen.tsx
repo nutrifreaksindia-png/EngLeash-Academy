@@ -42,16 +42,21 @@ type LessonData = {
 };
 
 export default function LessonDetailScreen({ route, navigation }: any) {
-  const { lessonId, lessonTitle } = route.params;
+  const { lessonId, lessonTitle, courseId } = route.params;
   const [data, setData] = useState<LessonData | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.get(`/lessons/${lessonId}`)
+    const q =
+      courseId != null && courseId !== ''
+        ? `?courseId=${encodeURIComponent(String(courseId))}`
+        : '';
+    api
+      .get(`/lessons/${lessonId}${q}`)
       .then(setData)
       .catch(() => setData(null))
       .finally(() => setLoading(false));
-  }, [lessonId]);
+  }, [lessonId, courseId]);
 
   if (loading) {
     return (

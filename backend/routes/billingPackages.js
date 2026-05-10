@@ -22,23 +22,39 @@ router.get('/combos', auth, requireRole('Admin'), (req, res) => {
 });
 
 router.post('/combos', auth, requireRole('Admin'), (req, res) => {
-  const { name, description, isActive, courseIds } = req.body || {};
-  if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
-  const tx = db.transaction(() => {
-    const r = db
-      .prepare('INSERT INTO course_combos (name, description, is_active) VALUES (?, ?, ?)')
-      .run(name.trim(), description || null, isActive === false ? 0 : 1);
-    const id = r.lastInsertRowid;
-    const ins = db.prepare('INSERT OR IGNORE INTO course_combo_members (combo_id, course_id) VALUES (?, ?)');
-    (Array.isArray(courseIds) ? courseIds : []).forEach((cid) => {
-      const n = Number(cid);
-      if (Number.isFinite(n)) ins.run(id, n);
+  try {
+    const { name, description, isActive, courseIds } = req.body || {};
+    if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
+    const desc =
+      description == null || description === ''
+        ? null
+        : typeof description === 'string'
+          ? description
+          : String(description);
+    const courseCheck = db.prepare('SELECT id FROM courses WHERE id = ?');
+    const validCourseIds = (Array.isArray(courseIds) ? courseIds : [])
+      .map((x) => Number(x))
+      .filter((n) => Number.isFinite(n) && n > 0 && courseCheck.get(n));
+
+    const tx = db.transaction(() => {
+      const r = db
+        .prepare('INSERT INTO course_combos (name, description, is_active) VALUES (?, ?, ?)')
+        .run(name.trim(), desc, isActive === false ? 0 : 1);
+      const rawId = r.lastInsertRowid;
+      const id = typeof rawId === 'bigint' ? Number(rawId) : Number(rawId);
+      if (!Number.isFinite(id) || id < 1) throw new Error('Insert did not return a valid combo id');
+      const ins = db.prepare('INSERT OR IGNORE INTO course_combo_members (combo_id, course_id) VALUES (?, ?)');
+      validCourseIds.forEach((cid) => ins.run(id, cid));
+      return id;
     });
-    return id;
-  });
-  const id = tx();
-  const row = db.prepare('SELECT * FROM course_combos WHERE id = ?').get(id);
-  res.status(201).json(row);
+    const id = tx();
+    const row = db.prepare('SELECT * FROM course_combos WHERE id = ?').get(id);
+    if (!row) return res.status(500).json({ error: 'Combo was created but could not be reloaded.' });
+    res.status(201).json(row);
+  } catch (e) {
+    console.error('[billing] POST /combos', e);
+    res.status(500).json({ error: e.message || 'Could not create combo' });
+  }
 });
 
 router.put('/combos/:id', auth, requireRole('Admin'), (req, res) => {

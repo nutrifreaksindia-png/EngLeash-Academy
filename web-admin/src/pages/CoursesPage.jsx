@@ -4,7 +4,7 @@ import Modal from '../components/Modal';
 import RichTextField from '../components/RichTextField';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
-const MODE_OPTIONS = ['Regular', 'Online', 'Self-paced'];
+const MODE_OPTIONS = ['Regular', 'Online', 'Self'];
 const LANGUAGE_OPTIONS = ['Tamil', 'English', 'Bilingual (Tamil & English)'];
 
 const emptyForm = {
@@ -25,6 +25,8 @@ const emptyForm = {
   isPublished: true,
   coverBlob: null,
   coverPreviewUrl: '',
+  /** Curriculum: day_wise = calendar unlock; unlock_all = self-paced access to all lessons in period */
+  progressionType: 'unlock_all',
 };
 
 function enrollmentLabel(value) {
@@ -70,6 +72,28 @@ function selectedOptionsFromJson(json, orderedOptions) {
       .filter(Boolean);
   }
   return orderedOptions.filter((o) => raw.includes(o));
+}
+
+/** Modes in DB may still say "Self-paced"; treat as delivery mode "Self". */
+function modesFromCourseJson(json) {
+  if (!json) return ['Regular'];
+  let raw = [];
+  try {
+    const a = JSON.parse(json);
+    if (Array.isArray(a)) raw = a.map((x) => String(x).trim()).filter(Boolean);
+  } catch (_) {
+    raw = String(json)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  raw = raw.map((s) => (/^self-?paced$/i.test(s) ? 'Self' : s));
+  const picked = MODE_OPTIONS.filter((o) => raw.includes(o));
+  return picked.length ? picked : ['Regular'];
+}
+
+function progressionLabel(pt) {
+  return String(pt || '').toLowerCase() === 'day_wise' ? 'Day-wise' : 'Self-paced (all lessons in access period)';
 }
 
 function resolveCoverPreviewUrl(url) {
@@ -176,10 +200,8 @@ export default function CoursesPage({
       highlightPoints: parseHighlightPoints(c.highlights),
       specificationsHtml: c.specifications_html || '',
       durationDays: c.duration_days || 30,
-      modes: (() => {
-        const m = selectedOptionsFromJson(c.modes_json, MODE_OPTIONS);
-        return m.length ? m : ['Regular'];
-      })(),
+      modes: modesFromCourseJson(c.modes_json),
+      progressionType: String(c.progression_type || '').toLowerCase() === 'day_wise' ? 'day_wise' : 'unlock_all',
       languages: (() => {
         const l = selectedOptionsFromJson(c.languages_json, LANGUAGE_OPTIONS);
         return l.length ? l : ['English'];
@@ -218,10 +240,7 @@ export default function CoursesPage({
       highlightPoints: parseHighlightPoints(c.highlights),
       specificationsHtml: c.specifications_html || '',
       durationDays: c.duration_days || 30,
-      modes: (() => {
-        const m = selectedOptionsFromJson(c.modes_json, MODE_OPTIONS);
-        return m.length ? m : ['Regular'];
-      })(),
+      modes: modesFromCourseJson(c.modes_json),
       languages: (() => {
         const l = selectedOptionsFromJson(c.languages_json, LANGUAGE_OPTIONS);
         return l.length ? l : ['English'];
@@ -233,6 +252,7 @@ export default function CoursesPage({
       isPublished: c.is_published !== 0 && c.is_published !== false,
       coverBlob: null,
       coverPreviewUrl: resolveCoverPreviewUrl(c.image_url),
+      progressionType: String(c.progression_type || '').toLowerCase() === 'day_wise' ? 'day_wise' : 'unlock_all',
     });
   }
 
@@ -455,6 +475,8 @@ export default function CoursesPage({
             <section className="courseViewBlock courseViewBlockMeta">
               <h3 className="courseViewLabel">Course details</h3>
               <dl className="courseViewMetaGrid">
+                <dt>Lesson access</dt>
+                <dd>{progressionLabel(viewCourse.progression_type)}</dd>
                 <dt>Duration</dt>
                 <dd>{viewCourse.duration_days || 1} days</dd>
                 <dt>Fee</dt>
@@ -650,10 +672,32 @@ export default function CoursesPage({
           </div>
 
           <div className="courseFormField">
+            <label className="fieldLabel" htmlFor="course-progression">
+              Lesson access (curriculum)
+            </label>
+            <p className="fieldHint">
+              <strong>Day-wise</strong> unlocks lessons along the class calendar (today + past sessions; upcoming days
+              hidden). <strong>Self-paced</strong> here means all lessons are available during the student&apos;s access
+              period — separate from delivery mode &quot;Self&quot; below.
+            </p>
+            <select
+              id="course-progression"
+              className="courseSelect"
+              value={form.progressionType}
+              onChange={(e) => setForm({ ...form, progressionType: e.target.value })}
+            >
+              <option value="day_wise">Day-wise (follow class calendar)</option>
+              <option value="unlock_all">Self-paced (all lessons during access period)</option>
+            </select>
+          </div>
+
+          <div className="courseFormField">
             <label className="fieldLabel" htmlFor="course-mode">
               Mode
             </label>
-            <p className="fieldHint">Multiselect: hold Ctrl (Windows) or ⌘ (Mac) and click to choose more than one.</p>
+            <p className="fieldHint">
+              Delivery style: Regular, Online, or Self (study alone). Multiselect: Ctrl (Windows) or ⌘ (Mac)+click.
+            </p>
             <select
               id="course-mode"
               className="courseSelect courseSelectMulti"
