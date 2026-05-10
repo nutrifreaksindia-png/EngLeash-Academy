@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useMemo, useState } from 'react';
 import SectionCard from '../components/SectionCard';
 import Modal from '../components/Modal';
 
@@ -29,6 +29,11 @@ function activeBadge(isActive) {
   ) : (
     <span className="badge inactive">Off</span>
   );
+}
+
+function toastErrMessage(err, fallback) {
+  const m = err && typeof err.message === 'string' ? err.message.trim() : '';
+  return m || fallback;
 }
 
 const emptyPackageForm = {
@@ -71,21 +76,30 @@ export default function BillingPage({
   const [pkgModalTarget, setPkgModalTarget] = useState(null);
   const [pkgForm, setPkgForm] = useState(emptyPackageForm);
 
-  const refreshCombos = useCallback(async () => {
+  const loadCombosRef = React.useRef(loadCombos);
+  const pushToastRef = React.useRef(pushToast);
+  React.useEffect(() => {
+    loadCombosRef.current = loadCombos;
+    pushToastRef.current = pushToast;
+  });
+
+  async function refreshCombos() {
     try {
       setBusy(true);
-      const rows = await loadCombos();
+      const rows = await loadCombosRef.current();
       setCombos(Array.isArray(rows) ? rows : []);
     } catch (e) {
-      pushToast(e.message || 'Could not load combos', 'error');
+      pushToastRef.current(toastErrMessage(e, 'Could not load combos'), 'error');
     } finally {
       setBusy(false);
     }
-  }, [loadCombos, pushToast]);
+  }
 
+  // Mount once: unstable loadCombos/pushToast from App would otherwise change every toast and retrigger a deps-based effect.
   React.useEffect(() => {
     void refreshCombos();
-  }, [refreshCombos]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const courseOptions = useMemo(
     () =>
@@ -111,7 +125,7 @@ export default function BillingPage({
       const rows = await loadCoursePackages(id);
       setCoursePkgs(Array.isArray(rows) ? rows : []);
     } catch (e) {
-      pushToast(e.message || 'Could not load packages', 'error');
+      pushToast(toastErrMessage(e, 'Could not load packages'), 'error');
       setCoursePkgs([]);
     } finally {
       setBusy(false);
@@ -134,7 +148,7 @@ export default function BillingPage({
       const rows = await loadComboPackages(id);
       setComboPkgs(Array.isArray(rows) ? rows : []);
     } catch (e) {
-      pushToast(e.message || 'Could not load combo packages', 'error');
+      pushToast(toastErrMessage(e, 'Could not load combo packages'), 'error');
       setComboPkgs([]);
     } finally {
       setBusy(false);
