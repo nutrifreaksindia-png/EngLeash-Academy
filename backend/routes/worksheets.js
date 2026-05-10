@@ -3,7 +3,7 @@ const multer = require('multer');
 const db = require('../db');
 const uploadMemory = require('../uploadMemory');
 const { auth, requireRole } = require('../middleware/auth');
-const { isSpacesConfigured, uploadToSpaces } = require('../services/spaces');
+const { isSpacesConfigured, uploadToSpaces, deleteObjectsUnderPrefix } = require('../services/spaces');
 const {
   canMutateLibraryByCreatedBy,
   canViewWorksheet,
@@ -167,11 +167,18 @@ router.put('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) 
   }
 });
 
-router.delete('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+router.delete('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), async (req, res) => {
   const id = Number(req.params.id);
   const row = db.prepare('SELECT * FROM worksheet_library WHERE id = ?').get(id);
   if (!row) return res.status(404).json({ error: 'Worksheet not found' });
   if (!canMutateLibraryByCreatedBy(req.user, row)) return res.status(403).json({ error: 'Forbidden' });
+  if (isSpacesConfigured()) {
+    try {
+      await deleteObjectsUnderPrefix(`pre-recorded/worksheets/worksheet-${id}/`);
+    } catch (e) {
+      console.error('[worksheet-delete] Spaces', id, e);
+    }
+  }
   db.prepare('DELETE FROM worksheet_library WHERE id = ?').run(id);
   res.status(204).end();
 });

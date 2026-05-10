@@ -410,14 +410,19 @@ export default function BatchesPage({
   async function handleDeleteBatchFromRow(b, evt) {
     evt.stopPropagation();
     if (!onDeleteBatch) return;
-    if (
-      !window.confirm(
-        `Delete batch "${b.title || b.name}"? This cannot be undone. Started batches cannot be deleted.`
-      )
-    ) {
+    const started = isBatchStarted(b);
+    if (started) {
+      if (
+        !window.confirm(
+          `DELETE started batch "${b.title || b.name}" completely?\n\nThis removes scheduled sessions, attendance, batch assignments, uploaded assignment files, and live session recordings in cloud storage (Spaces). This cannot be undone.`,
+        )
+      ) {
+        return;
+      }
+    } else if (!window.confirm(`Delete draft batch "${b.title || b.name}"? This cannot be undone.`)) {
       return;
     }
-    const ok = await onDeleteBatch(b.id);
+    const ok = await onDeleteBatch(b.id, { full: started });
     if (ok) {
       if (expandedId === b.id) setExpandedId(null);
       if (modalBatch?.id === b.id) closeModal();
@@ -631,8 +636,11 @@ export default function BatchesPage({
                       <button
                         type="button"
                         className="dangerBtn batchRowActionBtn"
-                        disabled={isBatchStarted(b)}
-                        title={isBatchStarted(b) ? 'Cannot delete a started batch' : 'Delete batch'}
+                        title={
+                          isBatchStarted(b)
+                            ? 'Delete batch and all related classroom + cloud recording data'
+                            : 'Delete draft batch'
+                        }
                         onClick={(e) => handleDeleteBatchFromRow(b, e)}
                       >
                         Delete

@@ -3,7 +3,7 @@ const path = require('path');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
 const uploadMemory = require('../uploadMemory');
-const { isSpacesConfigured, uploadLessonTemplateVideoToSpaces } = require('../services/spaces');
+const { isSpacesConfigured, uploadLessonTemplateVideoToSpaces, deleteObjectsUnderPrefix } = require('../services/spaces');
 const {
   canViewStudyMaterial,
   canViewWorksheet,
@@ -553,14 +553,36 @@ router.post('/library/:id/video', auth, requireRole('Admin', 'Trainer'), uploadM
   }
 });
 
-router.delete('/library/:id', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.delete('/library/:id', auth, requireRole('Admin', 'Trainer'), async (req, res) => {
   const id = Number(req.params.id);
-  db.prepare("DELETE FROM video_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(id);
-  db.prepare("DELETE FROM study_material_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(id);
-  db.prepare("DELETE FROM worksheet_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(id);
-  db.prepare("DELETE FROM quiz_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(id);
-  db.prepare('DELETE FROM lesson_library WHERE id = ?').run(id);
-  res.status(204).end();
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  try {
+    db.prepare(
+      `DELETE FROM quiz_attempts_v2 WHERE assignment_id IN (
+        SELECT id FROM quiz_assignments WHERE scope_type = 'lesson' AND scope_id = ?
+      )`,
+    ).run(id);
+    db.prepare("DELETE FROM video_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(id);
+    db.prepare("DELETE FROM study_material_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(id);
+    db.prepare("DELETE FROM worksheet_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(id);
+    db.prepare("DELETE FROM quiz_assignments WHERE scope_type = 'lesson' AND scope_id = ?").run(id);
+    db.prepare('DELETE FROM lesson_library_items WHERE lesson_id = ?').run(id);
+
+    if (isSpacesConfigured()) {
+      try {
+        await deleteObjectsUnderPrefix(`pre-recorded/course-library/lesson-template-${id}/`);
+      } catch (e) {
+        console.error('[lesson-library-delete] Spaces template', id, e);
+      }
+    }
+
+    db.prepare('DELETE FROM lesson_library WHERE id = ?').run(id);
+    res.status(204).end();
+  } catch (e) {
+    console.error('[lesson-library-delete]', id, e);
+    res.status(500).json({ error: e.message || 'Delete failed' });
+  }
 });
 
 /** Assign or clear the lesson template for a fixed day slot (day count comes from course duration). */

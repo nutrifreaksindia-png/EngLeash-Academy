@@ -305,6 +305,18 @@ export default function CoursesPage({
     setViewCourse(null);
   }
 
+  async function handleRowDeleteCourse(c) {
+    if (!onDeleteCourse) return;
+    if (
+      !window.confirm(
+        `Delete "${c.name}"?\n\nThis removes enrollment and billing ties, clears the lesson-day schedule mapping, deletes combo membership for this course, and removes course pre-recorded files from cloud storage. This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    await onDeleteCourse(c.id);
+  }
+
   async function onScheduleLessonChange(row, event) {
     if (!scheduleCourse) return;
     const raw = event.target.value;
@@ -372,6 +384,13 @@ export default function CoursesPage({
                       </button>
                       <button className="secondaryBtn courseQuickAction" type="button" onClick={() => openLessonSchedule(c)}>
                         Lesson schedule
+                      </button>
+                      <button
+                        className="dangerBtn courseQuickAction"
+                        type="button"
+                        onClick={() => void handleRowDeleteCourse(c)}
+                      >
+                        Delete
                       </button>
                     </div>
                   </td>

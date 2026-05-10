@@ -476,4 +476,51 @@ router.put('/:id', auth, requireRole('Admin'), (req, res) => {
   res.json(user);
 });
 
+router.delete('/:id', auth, requireRole('Admin'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+  if (id === req.user.id) return res.status(400).json({ error: 'You cannot delete the account you are logged in as.' });
+
+  const target = db.prepare('SELECT id, role FROM users WHERE id = ?').get(id);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+
+  if (target.role === 'Admin') {
+    const adminCount = db.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'Admin'").get()?.c ?? 0;
+    if (Number(adminCount) <= 1) {
+      return res.status(400).json({ error: 'Cannot delete the last administrator account.' });
+    }
+  }
+
+  const batchTrainer = db.prepare('SELECT id FROM batches WHERE trainer_id = ? LIMIT 1').get(id);
+  const batchCoach = db.prepare('SELECT batch_id FROM batch_trainers WHERE trainer_id = ? LIMIT 1').get(id);
+  if (batchTrainer || batchCoach) {
+    return res.status(409).json({
+      error:
+        'This user is attached to batches as trainer. Remove them from batches (or delete the batches), then retry.',
+    });
+  }
+
+  try {
+    if (isSpacesConfigured()) {
+      try {
+        await deleteObjectsUnderPrefix(`profiles/user-${id}/`);
+      } catch (_) {
+        /* best-effort */
+      }
+    }
+    const r = db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    if (r.changes === 0) return res.status(404).json({ error: 'User not found' });
+    res.status(204).end();
+  } catch (e) {
+    if (e && String(e.code || '').includes('SQLITE_CONSTRAINT')) {
+      return res.status(409).json({
+        error:
+          'Database blocked delete (constraints). Remove enrollments/batch links/other references for this account, then retry.',
+      });
+    }
+    console.error('[user-delete]', id, e);
+    res.status(500).json({ error: e.message || 'Could not delete user' });
+  }
+});
+
 module.exports = router;

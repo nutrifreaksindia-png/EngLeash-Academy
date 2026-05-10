@@ -56,6 +56,7 @@ export default function BillingPage({
   createComboPackage,
   updatePackage,
   deletePackage,
+  deleteCombo,
   pushToast = () => {},
 }) {
   const [combos, setCombos] = useState([]);
@@ -283,6 +284,30 @@ export default function BillingPage({
     }
   }
 
+  async function handleDeleteCombo(row) {
+    if (!deleteCombo) return;
+    if (
+      !window.confirm(
+        `Delete combo "${row.name}"? Billing orders, combo packages, course access grants, and member links will be cleared. This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      setBusy(true);
+      await deleteCombo(row.id);
+      if (String(comboBillingId) === String(row.id)) {
+        setComboBillingId('');
+        setComboPkgs([]);
+      }
+      await refreshCombos();
+    } catch (_err) {
+      /* toast from parent */
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="stack">
       <SectionCard
@@ -419,7 +444,17 @@ export default function BillingPage({
                       }}
                     >
                       Manage packages
-                    </button>
+                    </button>{' '}
+                    {deleteCombo ? (
+                      <button
+                        type="button"
+                        className="dangerBtn"
+                        disabled={busy}
+                        onClick={() => void handleDeleteCombo(c)}
+                      >
+                        Delete
+                      </button>
+                    ) : null}
                   </td>
                 </tr>
               ))}

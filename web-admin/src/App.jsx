@@ -673,16 +673,55 @@ export default function App() {
     }
   }
 
-  async function deleteBatch(batchId) {
+  async function deleteBatch(batchId, options = {}) {
+    const full = Boolean(options.full);
     try {
-      await apiFetch(`/batch-manager/${batchId}`, token, { method: 'DELETE' });
+      const qs = full ? '?full=1' : '';
+      await apiFetch(`/batch-manager/${batchId}${qs}`, token, { method: 'DELETE' });
       await loadAll();
-      pushToast('Batch deleted', 'success');
+      pushToast(full ? 'Batch and related cloud data deleted' : 'Batch deleted', 'success');
       return true;
     } catch (err) {
       setError(err.message);
       pushToast(err.message, 'error');
       return false;
+    }
+  }
+
+  async function deleteUser(userId) {
+    try {
+      await apiFetch(`/users/${userId}`, token, { method: 'DELETE' });
+      await loadAll();
+      pushToast('User deleted', 'success');
+    } catch (err) {
+      setError(err.message);
+      pushToast(err.message, 'error');
+      throw err;
+    }
+  }
+
+  async function deleteHolidayByDate(dateStr) {
+    try {
+      await apiFetch(`/batch-manager/holidays/${encodeURIComponent(dateStr)}`, token, {
+        method: 'DELETE',
+      });
+      await loadAll();
+      pushToast('Holiday removed', 'success');
+    } catch (err) {
+      setError(err.message);
+      pushToast(err.message, 'error');
+    }
+  }
+
+  async function deleteBillingCombo(comboId) {
+    try {
+      await apiFetch(`/billing/combos/${comboId}`, token, { method: 'DELETE' });
+      await loadAll();
+      pushToast('Combo deleted', 'success');
+    } catch (err) {
+      setError(err.message);
+      pushToast(err.message, 'error');
+      throw err;
     }
   }
 
@@ -1221,6 +1260,8 @@ export default function App() {
         onCreateUser={createUser}
         onUpdateUser={updateUser}
         onGetUserDetails={getUserDetails}
+        canDangerDelete={currentUser?.role === 'Admin'}
+        onDeleteUser={deleteUser}
       />
     );
   } else if (currentPage === 'other-users') {
@@ -1234,6 +1275,8 @@ export default function App() {
         onCreateUser={createUser}
         onUpdateUser={updateUser}
         onGetUserDetails={getUserDetails}
+        canDangerDelete={currentUser?.role === 'Admin'}
+        onDeleteUser={deleteUser}
       />
     );
   } else if (currentPage === 'approvals') {
@@ -1318,6 +1361,7 @@ export default function App() {
         createComboPackage={createComboBillingPackage}
         updatePackage={updateBillingPackage}
         deletePackage={deleteBillingPackage}
+        deleteCombo={deleteBillingCombo}
         pushToast={pushToast}
       />
     );
@@ -1388,6 +1432,7 @@ export default function App() {
         holidays={holidays}
         categories={videoCategories}
         onAddHoliday={addHoliday}
+        onDeleteHoliday={deleteHolidayByDate}
         onCreateCategory={createVideoCategory}
         onDeleteCategory={deleteVideoCategory}
       />

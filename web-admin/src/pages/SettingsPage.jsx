@@ -5,6 +5,7 @@ export default function SettingsPage({
   holidays,
   categories,
   onAddHoliday,
+  onDeleteHoliday,
   onCreateCategory,
   onDeleteCategory,
 }) {
@@ -55,12 +56,32 @@ export default function SettingsPage({
         </form>
         <div className="tableWrap">
           <table>
-            <thead><tr><th>Date</th><th>Reason</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Reason</th>
+                {onDeleteHoliday ? <th aria-label="Remove" /> : null}
+              </tr>
+            </thead>
             <tbody>
               {(holidays || []).map((h) => (
                 <tr key={h.id}>
                   <td>{h.holiday_date}</td>
                   <td>{h.reason || '-'}</td>
+                  {onDeleteHoliday ? (
+                    <td>
+                      <button
+                        type="button"
+                        className="dangerBtn"
+                        onClick={() => {
+                          if (!window.confirm(`Remove holiday ${h.holiday_date}?`)) return;
+                          void onDeleteHoliday(h.holiday_date);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>

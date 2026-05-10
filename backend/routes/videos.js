@@ -3,7 +3,7 @@ const db = require('../db');
 const multer = require('multer');
 const uploadMemory = require('../uploadMemory');
 const { auth, requireRole } = require('../middleware/auth');
-const { isSpacesConfigured, uploadToSpaces } = require('../services/spaces');
+const { isSpacesConfigured, uploadToSpaces, deleteObjectsUnderPrefix } = require('../services/spaces');
 const { canMutateLibraryByCreatedBy, stripCreatorFields, stripRows } = require('../lib/libraryScope');
 
 const router = express.Router();
@@ -126,11 +126,39 @@ router.put('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) 
   res.json(stripCreatorFields(req.user, updated));
 });
 
-router.delete('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+router.delete('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), async (req, res) => {
   const id = Number(req.params.id);
-  const row = db.prepare('SELECT * FROM video_library WHERE id = ?').get(id);
+  const row = db.prepare(`
+    SELECT v.*, c.slug AS category_slug
+    FROM video_library v
+    LEFT JOIN video_categories c ON c.id = v.category_id
+    WHERE v.id = ?
+  `).get(id);
   if (!row) return res.status(404).json({ error: 'Video not found' });
   if (!canMutateLibraryByCreatedBy(req.user, row)) return res.status(403).json({ error: 'Forbidden' });
+
+  if (isSpacesConfigured()) {
+    const slug = String(row.category_slug || 'uncategorized').replace(/[^a-z0-9-]+/gi, '-');
+    const prefixes = [`pre-recorded/${slug}/video-library/video-${id}/`];
+    if (row.storage_key) {
+      const k = String(row.storage_key).replace(/^\/+/, '');
+      const dir = k.includes('/') ? k.replace(/[^/]+$/, '') : '';
+      if (dir) prefixes.unshift(dir);
+    }
+    const seen = new Set();
+    /* eslint-disable no-await-in-loop */
+    for (const p of prefixes) {
+      if (!p || seen.has(p)) continue;
+      seen.add(p);
+      try {
+        await deleteObjectsUnderPrefix(p);
+      } catch (e) {
+        console.error('[video-delete] Spaces', p, e);
+      }
+    }
+    /* eslint-enable no-await-in-loop */
+  }
+
   db.prepare('DELETE FROM video_library WHERE id = ?').run(id);
   res.status(204).end();
 });

@@ -63,6 +63,22 @@ router.put('/combos/:id', auth, requireRole('Admin'), (req, res) => {
   res.json(db.prepare('SELECT * FROM course_combos WHERE id = ?').get(id));
 });
 
+router.delete('/combos/:id', auth, requireRole('Admin'), (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid combo id' });
+  const row = db.prepare('SELECT id FROM course_combos WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Combo not found' });
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM razorpay_billing_orders WHERE combo_id = ?').run(id);
+    db.prepare('DELETE FROM course_access_grants WHERE combo_id = ?').run(id);
+    db.prepare("DELETE FROM billing_packages WHERE scope = 'combo' AND combo_id = ?").run(id);
+    db.prepare('DELETE FROM course_combo_members WHERE combo_id = ?').run(id);
+    db.prepare('DELETE FROM course_combos WHERE id = ?').run(id);
+  });
+  tx();
+  res.status(204).end();
+});
+
 router.get('/admin/course/:courseId/packages', auth, requireRole('Admin'), (req, res) => {
   const courseId = Number(req.params.courseId);
   if (!Number.isFinite(courseId)) return res.status(400).json({ error: 'Invalid course id' });

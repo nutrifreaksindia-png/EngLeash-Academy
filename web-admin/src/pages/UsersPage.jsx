@@ -33,6 +33,8 @@ export default function UsersPage({
   onCreateUser,
   onUpdateUser,
   onGetUserDetails,
+  onDeleteUser,
+  canDangerDelete = false,
   users,
   variant = 'other-users',
   title = 'Users',
@@ -459,6 +461,27 @@ export default function UsersPage({
                     >
                       Edit
                     </button>
+                    {canDangerDelete && onDeleteUser ? (
+                      <button
+                        type="button"
+                        className="dangerBtn"
+                        style={{ marginLeft: 8 }}
+                        title="Permanently remove this account"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (
+                            !window.confirm(
+                              `DELETE user ${u.email || u.id} (${u.role || '?'}).\nThis cannot be undone.`,
+                            )
+                          ) {
+                            return;
+                          }
+                          void onDeleteUser(u.id).catch(() => {});
+                        }}
+                      >
+                        Delete
+                      </button>
+                    ) : null}
                   </td>
                 </tr>
               );
@@ -522,7 +545,34 @@ export default function UsersPage({
                 <h3 style={{ margin: 0 }}>{viewStudent.name || 'Student'}</h3>
                 <p className="muted" style={{ marginTop: 4 }}>{viewStudent.email || '-'}</p>
               </div>
-              <button className="secondaryBtn" onClick={() => openEdit(viewStudent)}>Edit profile</button>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <button className="secondaryBtn" type="button" onClick={() => openEdit(viewStudent)}>
+                  Edit profile
+                </button>
+                {canDangerDelete && onDeleteUser ? (
+                  <button
+                    className="dangerBtn"
+                    type="button"
+                    onClick={() => {
+                      if (
+                        !window.confirm(
+                          `DELETE ${viewStudent.email} permanently? This removes enrollments and session data for this account.`,
+                        )
+                      ) {
+                        return;
+                      }
+                      void onDeleteUser(viewStudent.id)
+                        .then(() => {
+                          setViewOpen(false);
+                          setViewStudent(null);
+                        })
+                        .catch(() => {});
+                    }}
+                  >
+                    Delete user
+                  </button>
+                ) : null}
+              </div>
             </div>
             <div className="formGrid">
               <div><strong>Mobile</strong><p className="muted">{viewStudent.mobile_number || '-'}</p></div>

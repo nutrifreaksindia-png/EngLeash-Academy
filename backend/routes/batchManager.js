@@ -2,7 +2,7 @@ const express = require('express');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
 const uploadMemory = require('../uploadMemory');
-const { isSpacesConfigured, uploadToSpaces } = require('../services/spaces');
+const { isSpacesConfigured, uploadToSpaces, deleteObjectsUnderPrefix } = require('../services/spaces');
 const { ensureLiveSessionsForBatch, combineDateTime } = require('../services/ensureLiveSessionsForBatch');
 const liveRecording = require('../services/liveRecording');
 
@@ -486,15 +486,59 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   res.json(updated);
 });
 
-router.delete('/:id(\\d+)', auth, requireRole('Admin'), (req, res) => {
+router.delete('/:id(\\d+)', auth, requireRole('Admin'), async (req, res) => {
   const batchId = Number(req.params.id);
   const batch = db.prepare('SELECT id, batch_status FROM batches WHERE id = ?').get(batchId);
   if (!batch) return res.status(404).json({ error: 'Batch not found' });
-  if (batch.batch_status === 'started') {
-    return res.status(409).json({ error: 'Cannot delete a started batch' });
+
+  const wantFull =
+    req.query.full === '1' ||
+    req.query.full === 'true' ||
+    String(req.body?.confirmFullDelete || '').toLowerCase() === 'true';
+
+  if (batch.batch_status === 'started' && !wantFull) {
+    return res.status(409).json({
+      error:
+        'Started batches need a full delete. In web admin choose “Delete batch completely”, or call DELETE /batch-manager/:id?full=1 (removes Spaces recordings and all related rows).',
+    });
   }
-  db.prepare('DELETE FROM batches WHERE id = ?').run(batchId);
-  res.status(204).end();
+
+  try {
+    const prefixRows = db
+      .prepare(
+        `SELECT DISTINCT storage_prefix FROM live_session_recordings WHERE batch_id = ? AND storage_prefix IS NOT NULL`,
+      )
+      .all(batchId);
+    const prefixes = prefixRows.map((r) => String(r.storage_prefix || '').replace(/^\/+/, '')).filter(Boolean);
+
+    if (isSpacesConfigured()) {
+      /* eslint-disable no-await-in-loop */
+      for (const p of prefixes) {
+        try {
+          await deleteObjectsUnderPrefix(p);
+        } catch (e) {
+          console.error('[batch-delete] Spaces prefix', p, e);
+        }
+      }
+      try {
+        await deleteObjectsUnderPrefix(`live-recordings/live-session-recordings/batch-${batchId}/`);
+      } catch (e) {
+        console.error('[batch-delete] Spaces batch recordings root', e);
+      }
+      try {
+        await deleteObjectsUnderPrefix(`live-recordings/assignments/batch-${batchId}/`);
+      } catch (e) {
+        console.error('[batch-delete] Spaces assignment uploads', e);
+      }
+      /* eslint-enable no-await-in-loop */
+    }
+
+    db.prepare('DELETE FROM batches WHERE id = ?').run(batchId);
+    res.status(204).end();
+  } catch (e) {
+    console.error('[batch-delete]', batchId, e);
+    res.status(500).json({ error: e.message || 'Batch delete failed' });
+  }
 });
 
 router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {

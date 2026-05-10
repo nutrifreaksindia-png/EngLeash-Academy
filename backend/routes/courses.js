@@ -4,6 +4,7 @@ const { auth, requireRole } = require('../middleware/auth');
 const upload = require('../upload');
 const { syncCourseLessonSlots } = require('../lib/syncCourseLessonSlots');
 const { userHasCourseAccess } = require('../lib/courseAccess');
+const { isSpacesConfigured, deleteObjectsUnderPrefix } = require('../services/spaces');
 
 const router = express.Router();
 
@@ -205,8 +206,46 @@ router.post('/:id/cover', auth, requireRole('Admin'), upload.single('file'), (re
   res.json({ ...updated, imageUrl: `${process.env.API_URL || ''}${rel}` });
 });
 
-router.delete('/:id', auth, requireRole('Admin'), (req, res) => {
-  db.prepare('DELETE FROM courses WHERE id = ?').run(req.params.id);
+router.delete('/:id', auth, requireRole('Admin'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+  const course = db.prepare('SELECT id FROM courses WHERE id = ?').get(id);
+  if (!course) return res.status(404).json({ error: 'Course not found' });
+
+  if (isSpacesConfigured()) {
+    try {
+      await deleteObjectsUnderPrefix(`pre-recorded/course-${id}/`);
+    } catch (e) {
+      console.error('[course-delete] Spaces prerecorded', id, e);
+    }
+  }
+
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM razorpay_billing_orders WHERE course_id = ?').run(id);
+    db.prepare('DELETE FROM course_access_grants WHERE course_id = ?').run(id);
+    db.prepare('DELETE FROM razorpay_course_orders WHERE course_id = ?').run(id);
+    db.prepare('DELETE FROM course_enrollments WHERE course_id = ?').run(id);
+    db.prepare('DELETE FROM enrollments WHERE course_id = ?').run(id);
+    db.prepare(
+      `DELETE FROM quiz_attempts_v2 WHERE assignment_id IN (
+        SELECT id FROM quiz_assignments WHERE scope_type = 'course' AND scope_id = ?
+      )`,
+    ).run(id);
+    db.prepare("DELETE FROM quiz_assignments WHERE scope_type = 'course' AND scope_id = ?").run(id);
+    db.prepare("DELETE FROM video_assignments WHERE scope_type = 'course' AND scope_id = ?").run(id);
+    db.prepare("DELETE FROM study_material_assignments WHERE scope_type = 'course' AND scope_id = ?").run(id);
+    db.prepare("DELETE FROM worksheet_assignments WHERE scope_type = 'course' AND scope_id = ?").run(id);
+    try {
+      db.prepare('UPDATE batches SET course_id = NULL, subscription_package_id = NULL WHERE course_id = ?').run(id);
+    } catch (_) {
+      db.prepare('UPDATE batches SET course_id = NULL WHERE course_id = ?').run(id);
+    }
+    db.prepare("DELETE FROM billing_packages WHERE scope = 'course' AND course_id = ?").run(id);
+    db.prepare('DELETE FROM course_combo_members WHERE course_id = ?').run(id);
+    db.prepare('DELETE FROM course_lessons WHERE course_id = ?').run(id);
+    db.prepare('DELETE FROM courses WHERE id = ?').run(id);
+  });
+  tx();
   res.status(204).send();
 });
 
