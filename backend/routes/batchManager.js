@@ -7,7 +7,11 @@ const { ensureLiveSessionsForBatch, combineDateTime } = require('../services/ens
 const liveRecording = require('../services/liveRecording');
 
 const router = express.Router();
-const { syncBatchMemberCourseAccess, syncAllBatchMembersCourseAccess } = require('../lib/courseAccess');
+const {
+  syncBatchMemberCourseAccess,
+  syncAllBatchMembersCourseAccess,
+  removeBatchStudentAccess,
+} = require('../lib/courseAccess');
 
 function normalizeBatchCoursesInput(body) {
   const rows = [];
@@ -1065,6 +1069,11 @@ router.post('/:id/members', auth, requireRole('Admin', 'Trainer'), (req, res) =>
 router.delete('/:id/members/:studentId', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const batchId = Number(req.params.id);
   const studentId = Number(req.params.studentId);
+  try {
+    removeBatchStudentAccess(batchId, studentId);
+  } catch (e) {
+    console.error('removeBatchStudentAccess', batchId, studentId, e);
+  }
   db.prepare('DELETE FROM batch_members WHERE batch_id = ? AND student_id = ?').run(batchId, studentId);
   res.status(204).end();
 });

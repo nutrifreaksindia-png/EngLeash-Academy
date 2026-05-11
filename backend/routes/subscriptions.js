@@ -1,6 +1,7 @@
 const express = require('express');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
+const { revokeAccessGrantById } = require('../lib/courseAccess');
 
 const router = express.Router();
 
@@ -153,14 +154,11 @@ router.delete('/admin/grants/:grantId', auth, requireRole('Admin'), (req, res) =
   if (!Number.isFinite(grantId)) {
     return res.status(400).json({ error: 'Invalid grant id' });
   }
-  const row = db
-    .prepare('SELECT id FROM course_access_grants WHERE id = ? AND revoked_at_ms IS NULL')
-    .get(grantId);
-  if (!row) {
-    return res.status(404).json({ error: 'Grant not found or already revoked' });
+  const result = revokeAccessGrantById(grantId);
+  if (!result.ok) {
+    const code = result.error === 'Grant not found or already revoked' ? 404 : 400;
+    return res.status(code).json({ error: result.error || 'Could not revoke grant' });
   }
-  const now = Date.now();
-  db.prepare('UPDATE course_access_grants SET revoked_at_ms = ? WHERE id = ?').run(now, grantId);
   res.status(204).end();
 });
 

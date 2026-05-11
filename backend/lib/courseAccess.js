@@ -36,23 +36,13 @@ function startOfDayFromYmd(ymd) {
 }
 
 /**
- * Effective access includes lifetime (ends_at_ms null) OR now in [starts_at_ms, grace_ends_at_ms].
+ * Access from non-revoked grants (timed or lifetime) or qualifying batch roster for this course.
+ * Does not use course_enrollments / enrollments tables — use to decide if approved enrollment is still justified.
  */
-/**
- * Primary learner entitlement: formal enrollment rows, timed/lifetime grants, or membership in any batch tied to this course.
- * Used across courses list, lesson access, quizzes, etc.
- */
-function learnerHasCourseAccess(userId, courseId, nowMs = Date.now()) {
+function entitlementFromGrantsOrBatchMembership(userId, courseId, nowMs = Date.now()) {
   const uid = Number(userId);
   const cid = Number(courseId);
   if (!Number.isFinite(uid) || !Number.isFinite(cid)) return false;
-
-  const enrolled =
-    db
-      .prepare("SELECT 1 FROM course_enrollments WHERE user_id = ? AND course_id = ? AND status = 'approved'")
-      .get(uid, cid)
-    || db.prepare('SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?').get(uid, cid);
-  if (enrolled) return true;
 
   if (userHasCourseAccess(uid, cid, nowMs)) return true;
 
@@ -78,6 +68,121 @@ function learnerHasCourseAccess(userId, courseId, nowMs = Date.now()) {
     )
     .get(cid, uid);
   return !!batchRow;
+}
+
+/**
+ * If the user no longer has grant/batch-based entitlement, clear approved enrollment so My Courses and APIs stay consistent.
+ */
+function clearStaleEnrollmentIfNoAccess(userId, courseId, nowMs = Date.now()) {
+  const uid = Number(userId);
+  const cid = Number(courseId);
+  if (!Number.isFinite(uid) || !Number.isFinite(cid)) return;
+  if (entitlementFromGrantsOrBatchMembership(uid, cid, nowMs)) return;
+  db.prepare(
+    `UPDATE course_enrollments
+     SET status = 'rejected', approved_at = NULL, approved_by = NULL
+     WHERE user_id = ? AND course_id = ? AND status = 'approved'`,
+  ).run(uid, cid);
+  db.prepare('DELETE FROM enrollments WHERE user_id = ? AND course_id = ?').run(uid, cid);
+}
+
+/**
+ * Revoke one grant row by id and sync enrollments when nothing else grants access.
+ * @returns {{ ok: boolean, error?: string }}
+ */
+function revokeAccessGrantById(grantId) {
+  const gid = Number(grantId);
+  if (!Number.isFinite(gid)) return { ok: false, error: 'Invalid grant id' };
+  const row = db
+    .prepare('SELECT id, user_id, course_id FROM course_access_grants WHERE id = ? AND revoked_at_ms IS NULL')
+    .get(gid);
+  if (!row) return { ok: false, error: 'Grant not found or already revoked' };
+  const now = Date.now();
+  db.prepare('UPDATE course_access_grants SET revoked_at_ms = ? WHERE id = ?').run(now, row.id);
+  clearStaleEnrollmentIfNoAccess(row.user_id, row.course_id, now);
+  return { ok: true };
+}
+
+/**
+ * True if the student is on another batch (not excludeBatchId) that includes this course.
+ */
+function batchMemberElsewhereForCourse(userId, courseId, excludeBatchId) {
+  const uid = Number(userId);
+  const cid = Number(courseId);
+  const xbid = Number(excludeBatchId);
+  if (!Number.isFinite(uid) || !Number.isFinite(cid) || !Number.isFinite(xbid)) return false;
+  const o = db
+    .prepare(
+      `SELECT 1 FROM batch_members bm
+       INNER JOIN batches b ON b.id = bm.batch_id
+       WHERE bm.student_id = ?
+         AND b.id != ?
+         AND (
+           EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = b.id AND bc.course_id = ?)
+           OR (
+             NOT EXISTS (SELECT 1 FROM batch_courses bx WHERE bx.batch_id = b.id)
+             AND b.course_id IS NOT NULL
+             AND b.course_id = ?
+           )
+         )
+       LIMIT 1`,
+    )
+    .get(uid, xbid, cid, cid);
+  return !!o;
+}
+
+/**
+ * After removing a student from a batch: revoke grants from this batch and batch_course rows when they have no other batch for that course; sync enrollments.
+ * Call before deleting the batch_members row (membership elsewhere is still visible in SQL).
+ */
+function removeBatchStudentAccess(batchId, studentId) {
+  const bid = Number(batchId);
+  const uid = Number(studentId);
+  if (!Number.isFinite(bid) || !Number.isFinite(uid)) return;
+
+  const now = Date.now();
+  db.prepare(
+    `UPDATE course_access_grants SET revoked_at_ms = ?
+     WHERE batch_id = ? AND user_id = ? AND revoked_at_ms IS NULL`,
+  ).run(now, bid, uid);
+
+  let courseIds = db.prepare('SELECT course_id FROM batch_courses WHERE batch_id = ? ORDER BY sort_order, id').all(bid).map((r) => Number(r.course_id));
+
+  const bRow = db.prepare('SELECT course_id FROM batches WHERE id = ?').get(bid);
+  const primaryCid = bRow?.course_id != null ? Number(bRow.course_id) : null;
+  if (Number.isFinite(primaryCid) && !courseIds.includes(primaryCid)) {
+    courseIds.push(primaryCid);
+  }
+  courseIds = [...new Set(courseIds.filter((x) => Number.isFinite(x)))];
+
+  for (const cid of courseIds) {
+    if (!batchMemberElsewhereForCourse(uid, cid, bid)) {
+      db.prepare(
+        `UPDATE course_access_grants SET revoked_at_ms = ?
+         WHERE user_id = ? AND course_id = ? AND source = 'batch_course' AND revoked_at_ms IS NULL`,
+      ).run(now, uid, cid);
+    }
+    clearStaleEnrollmentIfNoAccess(uid, cid, now);
+  }
+}
+
+/**
+ * Primary learner entitlement: formal enrollment rows, timed/lifetime grants, or membership in any batch tied to this course.
+ * Used across courses list, lesson access, quizzes, etc.
+ */
+function learnerHasCourseAccess(userId, courseId, nowMs = Date.now()) {
+  const uid = Number(userId);
+  const cid = Number(courseId);
+  if (!Number.isFinite(uid) || !Number.isFinite(cid)) return false;
+
+  const enrolled =
+    db
+      .prepare("SELECT 1 FROM course_enrollments WHERE user_id = ? AND course_id = ? AND status = 'approved'")
+      .get(uid, cid)
+    || db.prepare('SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?').get(uid, cid);
+  if (enrolled) return true;
+
+  return entitlementFromGrantsOrBatchMembership(uid, cid, nowMs);
 }
 
 function userHasCourseAccess(userId, courseId, nowMs = Date.now()) {
@@ -492,6 +597,10 @@ module.exports = {
   packageDurationMs,
   packageAmountPaise,
   learnerHasCourseAccess,
+  entitlementFromGrantsOrBatchMembership,
+  clearStaleEnrollmentIfNoAccess,
+  revokeAccessGrantById,
+  removeBatchStudentAccess,
   userHasCourseAccess,
   latestSubscriptionEndMs,
   userEligibleForRenewal,
