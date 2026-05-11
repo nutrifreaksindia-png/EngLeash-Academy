@@ -36,38 +36,15 @@ function startOfDayFromYmd(ymd) {
 }
 
 /**
- * Access from non-revoked grants (timed or lifetime) or qualifying batch roster for this course.
+ * Access from non-revoked grants only.
+ * Batch membership/start-state may cause grant creation, but never bypasses grant-based entitlement.
  * Does not use course_enrollments / enrollments tables — use to decide if approved enrollment is still justified.
  */
 function entitlementFromGrantsOrBatchMembership(userId, courseId, nowMs = Date.now()) {
   const uid = Number(userId);
   const cid = Number(courseId);
   if (!Number.isFinite(uid) || !Number.isFinite(cid)) return false;
-
-  if (userHasCourseAccess(uid, cid, nowMs)) return true;
-
-  const batchRow = db
-    .prepare(
-      `SELECT 1 FROM batch_members bm
-       INNER JOIN batches b ON b.id = bm.batch_id
-       INNER JOIN courses co ON co.id = ?
-       WHERE bm.student_id = ?
-         AND (
-           EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = b.id AND bc.course_id = co.id)
-           OR (
-             NOT EXISTS (SELECT 1 FROM batch_courses bx WHERE bx.batch_id = b.id)
-             AND b.course_id IS NOT NULL
-             AND b.course_id = co.id
-           )
-         )
-         AND (
-           LOWER(COALESCE(co.enrollment_type, 'free')) IN ('free', 'purchase')
-           OR LOWER(COALESCE(b.batch_status, '')) = 'started'
-           OR (b.actual_start_date IS NOT NULL AND LENGTH(TRIM(b.actual_start_date)) > 0)
-         )`,
-    )
-    .get(cid, uid);
-  return !!batchRow;
+  return userHasCourseAccess(uid, cid, nowMs);
 }
 
 /**
