@@ -177,32 +177,14 @@ function purgeAllMembersAccessForDeletingBatch(batchId) {
 }
 
 /**
- * Primary learner entitlement: formal enrollment rows, timed/lifetime grants, or membership in any batch tied to this course.
- * Subscribe / Apply: approved enrollment alone does not unlock access (admin-approved applications, batch roster, etc.)
- * until grants exist or the batch has actually started — matches deferred batch sync.
+ * Primary learner entitlement.
+ * Access comes only from grants or qualifying batch membership/state, never from enrollment workflow rows.
  */
 function learnerHasCourseAccess(userId, courseId, nowMs = Date.now()) {
   const uid = Number(userId);
   const cid = Number(courseId);
   if (!Number.isFinite(uid) || !Number.isFinite(cid)) return false;
-
-  const courseRow = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(cid);
-  const et = String(courseRow?.enrollment_type || 'free').toLowerCase();
-
-  const enrolled =
-    db
-      .prepare("SELECT 1 FROM course_enrollments WHERE user_id = ? AND course_id = ? AND status = 'approved'")
-      .get(uid, cid)
-    || db.prepare('SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?').get(uid, cid);
-
-  const entitlement = entitlementFromGrantsOrBatchMembership(uid, cid, nowMs);
-
-  if (et === 'subscribe' || et === 'apply') {
-    return entitlement;
-  }
-
-  if (enrolled) return true;
-  return entitlement;
+  return entitlementFromGrantsOrBatchMembership(uid, cid, nowMs);
 }
 
 function userHasCourseAccess(userId, courseId, nowMs = Date.now()) {
@@ -303,22 +285,30 @@ function insertGrant({
   );
 }
 
-function upsertSubscribeEnrollment(userId, courseId) {
-  const ts = new Date().toISOString();
+function syncLegacyEnrollmentMirror(userId, courseId) {
+  db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(userId, courseId);
+}
+
+function upsertApprovedEnrollment(userId, courseId, enrollmentType, approvedAtIso = null) {
+  const ts = approvedAtIso || new Date().toISOString();
   const existing = db.prepare('SELECT id, status FROM course_enrollments WHERE user_id = ? AND course_id = ?').get(userId, courseId);
   if (!existing) {
     db.prepare(
       `INSERT INTO course_enrollments (user_id, course_id, enrollment_type, status, requested_at, approved_at, approved_by)
-       VALUES (?, ?, 'subscribe', 'approved', ?, ?, NULL)`
-    ).run(userId, courseId, ts, ts);
-  } else if (existing.status !== 'approved' || String(existing.enrollment_type || '') !== 'subscribe') {
+       VALUES (?, ?, ?, 'approved', ?, ?, NULL)`
+    ).run(userId, courseId, enrollmentType, ts, ts);
+  } else {
     db.prepare(
       `UPDATE course_enrollments
-       SET enrollment_type = 'subscribe', status = 'approved', approved_at = ?, approved_by = NULL, notes = NULL
+       SET enrollment_type = ?, status = 'approved', approved_at = ?, approved_by = NULL, notes = NULL
        WHERE id = ?`
-    ).run(ts, existing.id);
+    ).run(enrollmentType, ts, existing.id);
   }
-  db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(userId, courseId);
+}
+
+function upsertSubscribeEnrollment(userId, courseId) {
+  upsertApprovedEnrollment(userId, courseId, 'subscribe');
+  syncLegacyEnrollmentMirror(userId, courseId);
 }
 
 /** Direct subscribe or combo: create grants from package duration. startMs defaults to now. */
@@ -332,6 +322,8 @@ function applyPackageGrantsForPayment({
   batchId = null,
   comboId = null,
   courseIds,
+  workflowEnrollmentType = 'subscribe',
+  mirrorLegacyEnrollment = true,
 }) {
   const dur = packageDurationMs(pkg);
   if (dur <= 0) throw new Error('Invalid package duration');
@@ -353,7 +345,10 @@ function applyPackageGrantsForPayment({
       razorpayOrderId,
       paymentId,
     });
-    upsertSubscribeEnrollment(userId, cid);
+    upsertApprovedEnrollment(userId, cid, workflowEnrollmentType, new Date(st).toISOString());
+    if (mirrorLegacyEnrollment) {
+      syncLegacyEnrollmentMirror(userId, cid);
+    }
   }
 }
 
@@ -441,39 +436,16 @@ function grantNonSubscribeBatchCourseForSingleCourse(userId, courseId, options =
       paymentId: null,
     });
     const ts = new Date(accessStartMs).toISOString();
-    const existing = db.prepare('SELECT id, status FROM course_enrollments WHERE user_id = ? AND course_id = ?').get(userId, cid);
-    if (!existing) {
-      db.prepare(
-        `INSERT INTO course_enrollments (user_id, course_id, enrollment_type, status, requested_at, approved_at, approved_by)
-         VALUES (?, ?, 'free', 'approved', ?, ?, NULL)`,
-      ).run(userId, cid, ts, ts);
-    } else if (existing.status !== 'approved') {
-      db.prepare(
-        `UPDATE course_enrollments SET enrollment_type = 'free', status = 'approved', approved_at = ?, approved_by = NULL, notes = NULL
-         WHERE id = ?`,
-      ).run(ts, existing.id);
-    }
-    db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(userId, cid);
+    upsertApprovedEnrollment(userId, cid, 'apply', ts);
+    syncLegacyEnrollmentMirror(userId, cid);
     return;
   }
 
   if (et !== 'free' && et !== 'purchase') return;
 
   upsertLifetimeGrant(userId, cid, 'batch_course');
-  const ts = new Date().toISOString();
-  const existing = db.prepare('SELECT id, status FROM course_enrollments WHERE user_id = ? AND course_id = ?').get(userId, cid);
-  if (!existing) {
-    db.prepare(
-      `INSERT INTO course_enrollments (user_id, course_id, enrollment_type, status, requested_at, approved_at, approved_by)
-       VALUES (?, ?, 'free', 'approved', ?, ?, NULL)`,
-    ).run(userId, cid, ts, ts);
-  } else if (existing.status !== 'approved') {
-    db.prepare(
-      `UPDATE course_enrollments SET enrollment_type = 'free', status = 'approved', approved_at = ?, approved_by = NULL, notes = NULL
-       WHERE id = ?`,
-    ).run(ts, existing.id);
-  }
-  db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(userId, cid);
+  upsertApprovedEnrollment(userId, cid, et === 'purchase' ? 'purchase' : 'free');
+  syncLegacyEnrollmentMirror(userId, cid);
 }
 
 /**
@@ -546,6 +518,7 @@ function syncBatchMemberCourseAccess(batchId, userId) {
                 batchId: bid,
                 comboId: null,
                 courseIds: [cid],
+                workflowEnrollmentType: isApply ? 'apply' : 'subscribe',
               });
               appliedPkg = true;
             }
@@ -560,6 +533,7 @@ function syncBatchMemberCourseAccess(batchId, userId) {
               batchId: bid,
               comboId: null,
               courseIds: [cid],
+              workflowEnrollmentType: et === 'purchase' ? 'purchase' : 'free',
             });
             appliedPkg = true;
           }

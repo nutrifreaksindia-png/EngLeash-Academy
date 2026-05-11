@@ -46,18 +46,8 @@ function maxUnlockedLessonDay(userId, courseId) {
        WHERE user_id = ? AND course_id = ? AND revoked_at_ms IS NULL`,
     )
     .get(userId, courseId);
-  const enr = db
-    .prepare(
-      `SELECT COALESCE(approved_at, requested_at) AS t
-       FROM course_enrollments WHERE user_id = ? AND course_id = ? AND status = 'approved'`,
-    )
-    .get(userId, courseId);
   let startMs = grant && grant.st != null ? Number(grant.st) : null;
-  if (startMs == null && enr?.t) {
-    const parsed = Date.parse(String(enr.t));
-    startMs = Number.isFinite(parsed) ? parsed : Date.now();
-  }
-  if (startMs == null) startMs = Date.now();
+  if (startMs == null) return 0;
   const elapsedDays = Math.floor((Date.now() - startMs) / 86400000) + 1;
   return Math.max(0, Math.min(dur, elapsedDays));
 }

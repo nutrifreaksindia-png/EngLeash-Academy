@@ -6,6 +6,7 @@ const { auth, requireRole } = require('../middleware/auth');
 const upload = require('../upload');
 const uploadMemory = require('../uploadMemory');
 const { isSpacesConfigured, uploadLessonVideoToSpaces } = require('../services/spaces');
+const { learnerHasCourseAccess } = require('../lib/courseAccess');
 
 const router = express.Router();
 const baseUrl = process.env.STORAGE_URL || process.env.API_URL || '';
@@ -14,8 +15,7 @@ function canAccessLesson(db, userId, role, lessonId) {
   const lesson = db.prepare('SELECT course_id FROM lessons WHERE id = ?').get(lessonId);
   if (!lesson) return false;
   if (role === 'Admin') return true;
-  const e = db.prepare('SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?').get(userId, lesson.course_id);
-  return !!e;
+  return learnerHasCourseAccess(userId, lesson.course_id);
 }
 
 router.post('/lesson/:lessonId/notes', auth, requireRole('Admin'), upload.single('file'), (req, res) => {
