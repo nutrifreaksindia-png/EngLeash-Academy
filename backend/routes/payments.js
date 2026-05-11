@@ -1,7 +1,8 @@
 const express = require('express');
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const db = require('../db');
-const { auth, requireRole } = require('../middleware/auth');
+const { auth, requireRole, JWT_SECRET } = require('../middleware/auth');
 const {
   packageAmountPaise,
   userHasCourseAccess,
@@ -13,6 +14,16 @@ const {
   loadComboCourses,
   upsertLifetimeGrant,
 } = require('../lib/courseAccess');
+const {
+  ensurePaymentLedgerForCourseOrder,
+  ensurePaymentLedgerForBillingOrder,
+  getInvoiceBundleByPaymentId,
+  getPaymentRecordById,
+  getPaymentRecordForUser,
+  listPaymentRecordsForAdmin,
+  listPaymentRecordsForUser,
+} = require('../lib/paymentRecords');
+const { streamInvoicePdf } = require('../lib/invoicePdf');
 
 const router = express.Router();
 
@@ -32,8 +43,88 @@ function amountPaiseFromCourse(course) {
   return Math.round(inr * 100);
 }
 
+function paymentPaidAtIso(gatewayPayment) {
+  const createdAtSec = Number(gatewayPayment?.created_at);
+  if (Number.isFinite(createdAtSec) && createdAtSec > 0) {
+    return new Date(createdAtSec * 1000).toISOString();
+  }
+  return new Date().toISOString();
+}
+
+function signInvoiceAccessToken(payload) {
+  return jwt.sign(
+    {
+      type: 'invoice_download',
+      scope: payload.scope,
+      paymentId: Number(payload.paymentId),
+      userId: payload.userId != null ? Number(payload.userId) : undefined,
+      role: payload.role || undefined,
+    },
+    JWT_SECRET,
+    { expiresIn: '15m' },
+  );
+}
+
+function buildInvoiceDownloadUrl(req, scope, paymentId, token) {
+  const base = `${req.protocol}://${req.get('host')}`;
+  return `${base}/api/payments/${scope}/${paymentId}/invoice?access_token=${encodeURIComponent(token)}`;
+}
+
+function authOrInvoiceToken(scope) {
+  return (req, res, next) => {
+    const signedToken = String(req.query?.access_token || '').trim();
+    if (signedToken) {
+      try {
+        const payload = jwt.verify(signedToken, JWT_SECRET);
+        if (payload?.type !== 'invoice_download') {
+          return res.status(401).json({ error: 'Invalid invoice token' });
+        }
+        if (payload?.scope !== scope) {
+          return res.status(403).json({ error: 'Invoice token scope mismatch' });
+        }
+        if (Number(payload?.paymentId) !== Number(req.params.paymentId)) {
+          return res.status(403).json({ error: 'Invoice token does not match this payment' });
+        }
+        req.invoiceToken = payload;
+        return next();
+      } catch {
+        return res.status(401).json({ error: 'Invoice token expired or invalid' });
+      }
+    }
+    return auth(req, res, next);
+  };
+}
+
+function invoiceBundleForStudent(req) {
+  const paymentId = Number(req.params.paymentId);
+  if (!Number.isFinite(paymentId)) return null;
+  const bundle = getInvoiceBundleByPaymentId(paymentId);
+  if (!bundle) return null;
+  if (req.user) {
+    return Number(bundle.payment.userId) === Number(req.user.id) ? bundle : null;
+  }
+  if (req.invoiceToken) {
+    return Number(req.invoiceToken.userId) === Number(bundle.payment.userId) ? bundle : null;
+  }
+  return null;
+}
+
+function invoiceBundleForAdmin(req) {
+  const paymentId = Number(req.params.paymentId);
+  if (!Number.isFinite(paymentId)) return null;
+  const bundle = getInvoiceBundleByPaymentId(paymentId);
+  if (!bundle) return null;
+  if (req.user) {
+    return ['Admin', 'Creator', 'Trainer'].includes(String(req.user.role || '')) ? bundle : null;
+  }
+  if (req.invoiceToken) {
+    return ['Admin', 'Creator', 'Trainer'].includes(String(req.invoiceToken.role || '')) ? bundle : null;
+  }
+  return null;
+}
+
 /** Approve purchase and sync legacy enrollments table. Idempotent. */
-function fulfillCoursePurchase(userId, courseId) {
+function fulfillCoursePurchase(userId, courseId, paymentContext = {}) {
   const ts = new Date().toISOString();
   const existing = db.prepare('SELECT id, status FROM course_enrollments WHERE user_id = ? AND course_id = ?').get(userId, courseId);
   if (!existing) {
@@ -50,14 +141,24 @@ function fulfillCoursePurchase(userId, courseId) {
   }
   db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(userId, courseId);
   db.transaction(() => {
-    upsertLifetimeGrant(userId, courseId, 'purchase');
+    upsertLifetimeGrant(userId, courseId, 'purchase', {
+      razorpayOrderId: paymentContext.razorpayOrderId || null,
+      paymentId: paymentContext.paymentId || null,
+    });
   })();
 }
 
-function tryMarkBillingOrderPaid(razorpayOrderId, paymentId, amountPaiseFromPayment) {
+function tryMarkBillingOrderPaid(razorpayOrderId, paymentId, amountPaiseFromPayment, paidAtIso = new Date().toISOString()) {
   const row = db.prepare('SELECT * FROM razorpay_billing_orders WHERE razorpay_order_id = ?').get(razorpayOrderId);
   if (!row) return { ok: false, reason: 'unknown_order' };
-  if (row.status === 'paid') return { ok: true, duplicate: true };
+  if (row.status === 'paid') {
+    const payment = ensurePaymentLedgerForBillingOrder({
+      orderRow: row,
+      paymentId: row.payment_id || paymentId,
+      paidAtIso,
+    });
+    return { ok: true, duplicate: true, payment };
+  }
 
   if (Number(row.amount_paise) !== Number(amountPaiseFromPayment)) return { ok: false, reason: 'amount_mismatch' };
 
@@ -88,6 +189,11 @@ function tryMarkBillingOrderPaid(razorpayOrderId, paymentId, amountPaiseFromPaym
         comboId: null,
         courseIds: [Number(row.course_id)],
       });
+      ensurePaymentLedgerForBillingOrder({
+        orderRow: { ...row, payment_id: paymentId },
+        paymentId,
+        paidAtIso,
+      });
       return true;
     }
 
@@ -99,6 +205,11 @@ function tryMarkBillingOrderPaid(razorpayOrderId, paymentId, amountPaiseFromPaym
         razorpayOrderId,
         paymentId,
         nowMs: Date.now(),
+      });
+      ensurePaymentLedgerForBillingOrder({
+        orderRow: { ...row, payment_id: paymentId },
+        paymentId,
+        paidAtIso,
       });
       return true;
     }
@@ -132,6 +243,11 @@ function tryMarkBillingOrderPaid(razorpayOrderId, paymentId, amountPaiseFromPaym
           });
         }
       }
+      ensurePaymentLedgerForBillingOrder({
+        orderRow: { ...row, payment_id: paymentId },
+        paymentId,
+        paidAtIso,
+      });
       return true;
     }
 
@@ -147,10 +263,17 @@ function tryMarkBillingOrderPaid(razorpayOrderId, paymentId, amountPaiseFromPaym
   }
 }
 
-function tryMarkOrderPaidAndFulfill(razorpayOrderId, paymentId, amountPaiseFromPayment) {
+function tryMarkOrderPaidAndFulfill(razorpayOrderId, paymentId, amountPaiseFromPayment, paidAtIso = new Date().toISOString()) {
   const row = db.prepare('SELECT * FROM razorpay_course_orders WHERE razorpay_order_id = ?').get(razorpayOrderId);
   if (!row) return { ok: false, reason: 'unknown_order' };
-  if (row.status === 'paid') return { ok: true, duplicate: true, user_id: row.user_id, course_id: row.course_id };
+  if (row.status === 'paid') {
+    const payment = ensurePaymentLedgerForCourseOrder({
+      orderRow: row,
+      paymentId: row.payment_id || paymentId,
+      paidAtIso,
+    });
+    return { ok: true, duplicate: true, user_id: row.user_id, course_id: row.course_id, payment };
+  }
   if (Number(row.amount_paise) !== Number(amountPaiseFromPayment)) return { ok: false, reason: 'amount_mismatch' };
 
   const tx = db.transaction(() => {
@@ -160,13 +283,23 @@ function tryMarkOrderPaidAndFulfill(razorpayOrderId, paymentId, amountPaiseFromP
       WHERE razorpay_order_id = ? AND status = 'created'
     `).run(paymentId, razorpayOrderId);
     if (u.changes === 0) return false;
-    fulfillCoursePurchase(row.user_id, row.course_id);
-    return true;
+    fulfillCoursePurchase(row.user_id, row.course_id, {
+      razorpayOrderId,
+      paymentId,
+    });
+    const payment = ensurePaymentLedgerForCourseOrder({
+      orderRow: { ...row, payment_id: paymentId },
+      paymentId,
+      paidAtIso,
+    });
+    return payment;
   });
 
   try {
-    const applied = tx();
-    return applied ? { ok: true, user_id: row.user_id, course_id: row.course_id } : { ok: true, duplicate: true };
+    const payment = tx();
+    return payment
+      ? { ok: true, user_id: row.user_id, course_id: row.course_id, payment }
+      : { ok: true, duplicate: true };
   } catch (e) {
     if (String(e.message || '').includes('UNIQUE')) {
       return { ok: true, duplicate: true };
@@ -183,6 +316,71 @@ function verifyPaymentSignature(orderId, paymentId, signature) {
   const b = Buffer.from(String(signature), 'utf8');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
+
+router.get('/my', auth, requireRole('Student', 'Lab', 'Trainer', 'Admin'), (req, res) => {
+  res.json(listPaymentRecordsForUser(req.user.id));
+});
+
+router.get('/my/:paymentId(\\d+)', auth, requireRole('Student', 'Lab', 'Trainer', 'Admin'), (req, res) => {
+  const payment = getPaymentRecordForUser(req.user.id, Number(req.params.paymentId));
+  if (!payment) return res.status(404).json({ error: 'Payment not found' });
+  res.json(payment);
+});
+
+router.get('/my/:paymentId(\\d+)/invoice-link', auth, requireRole('Student', 'Lab', 'Trainer', 'Admin'), (req, res) => {
+  const payment = getPaymentRecordForUser(req.user.id, Number(req.params.paymentId));
+  if (!payment || !payment.hasInvoice) return res.status(404).json({ error: 'Invoice not found' });
+  const token = signInvoiceAccessToken({
+    scope: 'my',
+    paymentId: payment.id,
+    userId: req.user.id,
+  });
+  res.json({
+    invoiceNumber: payment.invoiceNumber,
+    url: buildInvoiceDownloadUrl(req, 'my', payment.id, token),
+  });
+});
+
+router.get('/my/:paymentId(\\d+)/invoice', authOrInvoiceToken('my'), (req, res) => {
+  const bundle = invoiceBundleForStudent(req);
+  if (!bundle) return res.status(404).json({ error: 'Invoice not found' });
+  streamInvoicePdf(res, bundle);
+});
+
+router.get('/admin', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
+  res.json(
+    listPaymentRecordsForAdmin({
+      search: req.query?.search || '',
+      paymentKind: req.query?.paymentKind || '',
+    }),
+  );
+});
+
+router.get('/admin/:paymentId(\\d+)', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
+  const payment = getPaymentRecordById(Number(req.params.paymentId));
+  if (!payment) return res.status(404).json({ error: 'Payment not found' });
+  res.json(payment);
+});
+
+router.get('/admin/:paymentId(\\d+)/invoice-link', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
+  const payment = getPaymentRecordById(Number(req.params.paymentId));
+  if (!payment || !payment.hasInvoice) return res.status(404).json({ error: 'Invoice not found' });
+  const token = signInvoiceAccessToken({
+    scope: 'admin',
+    paymentId: payment.id,
+    role: req.user.role,
+  });
+  res.json({
+    invoiceNumber: payment.invoiceNumber,
+    url: buildInvoiceDownloadUrl(req, 'admin', payment.id, token),
+  });
+});
+
+router.get('/admin/:paymentId(\\d+)/invoice', authOrInvoiceToken('admin'), (req, res) => {
+  const bundle = invoiceBundleForAdmin(req);
+  if (!bundle) return res.status(404).json({ error: 'Invoice not found' });
+  streamInvoicePdf(res, bundle);
+});
 
 /** POST JSON body — mounted after express.json() */
 /** One-time payment for subscription / renewal / combo package (no Razorpay Subscriptions API). */
@@ -384,28 +582,30 @@ router.post('/razorpay/verify', auth, requireRole('Student', 'Lab', 'Trainer', '
   if (Number(row.user_id) !== Number(req.user.id)) return res.status(403).json({ error: 'Order does not belong to this account' });
 
   let amountFromGateway = row.amount_paise;
+  let paidAtIso = new Date().toISOString();
   if (clientPkg) {
     try {
       const pay = await clientPkg.instance.payments.fetch(paymentId);
       amountFromGateway = Number(pay.amount);
+      paidAtIso = paymentPaidAtIso(pay);
     } catch (_) {
       /* use stored order amount */
     }
   }
 
   if (courseRow) {
-    const result = tryMarkOrderPaidAndFulfill(orderId, paymentId, amountFromGateway);
+    const result = tryMarkOrderPaidAndFulfill(orderId, paymentId, amountFromGateway, paidAtIso);
     if (!result.ok && result.reason === 'amount_mismatch') {
       return res.status(400).json({ error: 'Paid amount did not match the order' });
     }
-    return res.json({ ok: true, duplicate: !!result.duplicate, kind: 'purchase' });
+    return res.json({ ok: true, duplicate: !!result.duplicate, kind: 'purchase', payment: result.payment || null });
   }
 
-  const br = tryMarkBillingOrderPaid(orderId, paymentId, amountFromGateway);
+  const br = tryMarkBillingOrderPaid(orderId, paymentId, amountFromGateway, paidAtIso);
   if (!br.ok && br.reason === 'amount_mismatch') {
     return res.status(400).json({ error: 'Paid amount did not match the order' });
   }
-  res.json({ ok: true, duplicate: !!br.duplicate, kind: 'billing' });
+  res.json({ ok: true, duplicate: !!br.duplicate, kind: 'billing', payment: br.payment || null });
 });
 
 /** Raw JSON body — use express.raw only for this handler (see server.js). */
@@ -437,9 +637,10 @@ function razorpayWebhookHandler(req, res) {
       if (payEntity?.order_id && payEntity.id != null && payEntity.amount != null) {
         const oid = payEntity.order_id;
         const amt = Number(payEntity.amount);
-        const r1 = tryMarkOrderPaidAndFulfill(oid, payEntity.id, amt);
+        const paidAtIso = paymentPaidAtIso(payEntity);
+        const r1 = tryMarkOrderPaidAndFulfill(oid, payEntity.id, amt, paidAtIso);
         if (!r1.ok && r1.reason === 'unknown_order') {
-          tryMarkBillingOrderPaid(oid, payEntity.id, amt);
+          tryMarkBillingOrderPaid(oid, payEntity.id, amt, paidAtIso);
         }
       }
     }

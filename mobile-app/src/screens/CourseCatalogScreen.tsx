@@ -12,7 +12,6 @@ import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 
 const BRAND_RED = '#c41e3a';
-const BRAND_BLUE = '#1a237e';
 
 type Course = { id: number; name: string; description?: string; enrolled: boolean };
 
@@ -35,6 +34,13 @@ export default function CourseCatalogScreen({ navigation }: any) {
   useEffect(() => {
     load();
   }, []);
+
+  const goToCourse = (course: Course) => {
+    navigation.navigate('MyCoursesList', {
+      focusCourseId: course.id,
+      focusCourseName: course.name,
+    });
+  };
 
   const enroll = async (courseId: number) => {
     setEnrollingId(courseId);
@@ -89,8 +95,13 @@ export default function CourseCatalogScreen({ navigation }: any) {
                 )}
               </TouchableOpacity>
             ) : (
-              <View style={styles.enrolledBadge}>
-                <Text style={styles.enrolledText}>Enrolled</Text>
+              <View style={styles.activeWrap}>
+                <View style={styles.enrolledBadge}>
+                  <Text style={styles.enrolledText}>Active</Text>
+                </View>
+                <TouchableOpacity style={styles.enrollBtn} onPress={() => goToCourse(item)}>
+                  <Text style={styles.enrollBtnText}>Go to Course</Text>
+                </TouchableOpacity>
               </View>
             )}
           </View>
@@ -114,6 +125,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   cardContent: { flex: 1 },
+  activeWrap: { alignItems: 'flex-end', gap: 8 },
   cardTitle: { fontSize: 17, fontWeight: '600', color: '#333' },
   cardDesc: { fontSize: 14, color: '#666', marginTop: 4 },
   enrollBtn: { backgroundColor: BRAND_RED, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 8 },

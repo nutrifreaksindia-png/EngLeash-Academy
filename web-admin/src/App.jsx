@@ -18,6 +18,7 @@ import StudyMaterialsPage from './pages/StudyMaterialsPage';
 import WorksheetsPage from './pages/WorksheetsPage';
 import AssignmentsPage from './pages/AssignmentsPage';
 import BillingPage from './pages/BillingPage';
+import PaymentsPage from './pages/PaymentsPage';
 import SubscriptionsPage from './pages/SubscriptionsPage';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
@@ -678,6 +679,22 @@ export default function App() {
   async function fetchAdminSubscriptions() {
     const data = await apiFetch('/subscriptions/admin', token);
     return Array.isArray(data?.subscriptions) ? data.subscriptions : [];
+  }
+
+  async function fetchAdminPayments(filters = {}) {
+    const params = new URLSearchParams();
+    if (filters.search) params.set('search', String(filters.search));
+    if (filters.paymentKind) params.set('paymentKind', String(filters.paymentKind));
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    const data = await apiFetch(`/payments/admin${suffix}`, token);
+    return Array.isArray(data) ? data : [];
+  }
+
+  async function openAdminInvoice(paymentId) {
+    const data = await apiFetch(`/payments/admin/${paymentId}/invoice-link`, token);
+    const url = String(data?.url || '').trim();
+    if (!url) throw new Error('Invoice link not available');
+    window.open(url, '_blank', 'noopener,noreferrer');
   }
 
   async function deleteSubscriptionGrant(grantId) {
@@ -1411,10 +1428,24 @@ export default function App() {
         pushToast={pushToast}
       />
     );
+  } else if (currentPage === 'payments' && currentUser?.role === 'Admin') {
+    page = (
+      <PaymentsPage
+        loadPayments={fetchAdminPayments}
+        openInvoice={openAdminInvoice}
+        pushToast={pushToast}
+      />
+    );
   } else if (currentPage === 'billing') {
     page = (
       <div className="stack" style={{ padding: '1rem 0' }}>
         <p className="muted">Billing and combo management is available only to administrator accounts.</p>
+      </div>
+    );
+  } else if (currentPage === 'payments') {
+    page = (
+      <div className="stack" style={{ padding: '1rem 0' }}>
+        <p className="muted">Payments and invoice access is available only to administrator accounts.</p>
       </div>
     );
   } else if (currentPage === 'quizzes') {
@@ -1541,6 +1572,7 @@ export default function App() {
                 onLogout={logout}
                 creatorMode={currentUser?.role === 'Creator'}
                 showBillingNav={currentUser?.role === 'Admin'}
+                showPaymentsNav={currentUser?.role === 'Admin'}
                 showSubscriptionsNav={currentUser?.role === 'Admin'}
               >
                 {page}

@@ -113,12 +113,14 @@ async function enrichCourse(userId: number, c: Course): Promise<CourseEnriched> 
   };
 }
 
-export default function MyCoursesScreen({ navigation }: any) {
+export default function MyCoursesScreen({ navigation, route }: any) {
   const { user } = useAuth();
   const insets = useSafeAreaInsets();
   const [courses, setCourses] = useState<CourseEnriched[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [filterCourseId, setFilterCourseId] = useState<number | null>(null);
+  const [filterCourseName, setFilterCourseName] = useState('');
 
   const load = useCallback(async () => {
     if (!user?.id) return;
@@ -145,9 +147,24 @@ export default function MyCoursesScreen({ navigation }: any) {
 
   useFocusEffect(
     useCallback(() => {
-      if (!user) return;
+      if (!user?.id) return;
       void load();
     }, [load, user?.id]),
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      const rawId = route.params?.focusCourseId;
+      if (rawId == null) return;
+      const nextId = Number(rawId);
+      if (!Number.isFinite(nextId)) return;
+      setFilterCourseId(nextId);
+      setFilterCourseName(String(route.params?.focusCourseName || ''));
+      navigation.setParams({
+        focusCourseId: undefined,
+        focusCourseName: undefined,
+      });
+    }, [navigation, route.params?.focusCourseId, route.params?.focusCourseName]),
   );
 
   if (!user) {
@@ -174,18 +191,45 @@ export default function MyCoursesScreen({ navigation }: any) {
 
   const scheduleFabBottom = 20 + insets.bottom;
   const manageFabBottom = user.role === 'Admin' ? 82 + insets.bottom : scheduleFabBottom;
+  const visibleCourses =
+    filterCourseId == null ? courses : courses.filter((course) => course.id === filterCourseId);
 
   return (
     <View style={[styles.shell, { paddingBottom: insets.bottom }]}>
       <BrandedTopBar />
       <FlatList
         style={styles.listFlex}
-        data={courses}
+        data={visibleCourses}
         keyExtractor={(item) => String(item.id)}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); void load(); }} />}
         contentContainerStyle={[styles.list, { paddingBottom: 100 + insets.bottom }]}
+        ListHeaderComponent={
+          filterCourseId != null ? (
+            <View style={styles.filterBanner}>
+              <View style={styles.filterCopy}>
+                <Text style={styles.filterLabel}>Showing selected course</Text>
+                <Text style={styles.filterName} numberOfLines={1}>
+                  {filterCourseName || 'Active course'}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.filterClearBtn}
+                onPress={() => {
+                  setFilterCourseId(null);
+                  setFilterCourseName('');
+                }}
+              >
+                <Text style={styles.filterClearText}>Show all</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null
+        }
         ListEmptyComponent={
-          <Text style={styles.empty}>No enrolled courses yet. Explore and enroll from the Home tab.</Text>
+          <Text style={styles.empty}>
+            {filterCourseId != null
+              ? 'This course is not currently active in My Courses.'
+              : 'No enrolled courses yet. Explore and enroll from the Home tab.'}
+          </Text>
         }
         renderItem={({ item }) => {
           const ctaLabel =
@@ -281,6 +325,36 @@ const styles = StyleSheet.create({
   guestHint: { color: '#64748b', textAlign: 'center', fontSize: 17 },
   list: { padding: 18, paddingTop: 12, gap: 14 },
   empty: { color: '#64748b', textAlign: 'center', paddingVertical: 36, fontSize: 15 },
+  filterBanner: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#dfe7f8',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  filterCopy: { flex: 1 },
+  filterLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+    fontWeight: '700',
+  },
+  filterName: { marginTop: 4, fontSize: 16, fontWeight: '700', color: BRAND_BLUE },
+  filterClearBtn: {
+    borderWidth: 1,
+    borderColor: '#c7cff0',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#f8fafc',
+  },
+  filterClearText: { color: BRAND_BLUE, fontWeight: '700', fontSize: 13 },
   card: {
     backgroundColor: '#fff',
     borderRadius: 20,

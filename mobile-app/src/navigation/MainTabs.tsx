@@ -31,6 +31,7 @@ import SessionRecordingsScreen from '../screens/SessionRecordingsScreen';
 import MyAssignmentsScreen from '../screens/MyAssignmentsScreen';
 import AssignmentScreen from '../screens/AssignmentScreen';
 import AccountScreen from '../screens/AccountScreen';
+import PaymentsInvoicesScreen from '../screens/PaymentsInvoicesScreen';
 import SignupScreen from '../screens/SignupScreen';
 import LoginScreen from '../screens/LoginScreen';
 
@@ -135,6 +136,7 @@ function AccountStackNavigator() {
   return (
     <AccountStack.Navigator screenOptions={stackOpts}>
       <AccountStack.Screen name="AccountMain" component={AccountScreen} options={{ title: 'My Account' }} />
+      <AccountStack.Screen name="PaymentsInvoices" component={PaymentsInvoicesScreen} options={{ title: 'Payments & Invoices' }} />
       <AccountStack.Screen name="Login" component={LoginScreen} options={{ title: 'Sign in' }} />
       <AccountStack.Screen name="Signup" component={SignupScreen} options={{ title: 'Sign up' }} />
     </AccountStack.Navigator>

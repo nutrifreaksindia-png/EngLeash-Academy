@@ -540,8 +540,10 @@ function syncAllBatchMembersCourseAccess(batchId) {
   }
 }
 
-function upsertLifetimeGrant(userId, courseId, source) {
+function upsertLifetimeGrant(userId, courseId, source, options = {}) {
   const now = Date.now();
+  const razorpayOrderId = options.razorpayOrderId || null;
+  const paymentId = options.paymentId || null;
   const existed = db
     .prepare(
       `SELECT id FROM course_access_grants WHERE user_id = ? AND course_id = ? AND revoked_at_ms IS NULL AND ends_at_ms IS NULL AND source = ?`,
@@ -558,8 +560,8 @@ function upsertLifetimeGrant(userId, courseId, source) {
     billingPackageId: null,
     batchId: null,
     comboId: null,
-    razorpayOrderId: null,
-    paymentId: null,
+    razorpayOrderId,
+    paymentId,
   });
 }
 

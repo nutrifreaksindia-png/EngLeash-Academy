@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
@@ -72,15 +73,46 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    api
-      .publicGet(`/courses/public/${courseId}`)
-      .then(setCourse)
-      .catch(() => setCourse(null))
-      .finally(() => setLoading(false));
-  }, [courseId]);
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const detail = await api.publicGet(`/courses/public/${courseId}`);
+      let enrolled = false;
+      if (user?.id) {
+        try {
+          const catalog = await api.get('/courses/catalog');
+          const match = Array.isArray(catalog)
+            ? catalog.find((row: any) => Number(row?.id) === Number(courseId))
+            : null;
+          enrolled = !!match?.enrolled;
+        } catch {
+          enrolled = false;
+        }
+      }
+      setCourse(detail ? { ...detail, enrolled } : null);
+    } catch {
+      setCourse(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [courseId, user?.id]);
+
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load]),
+  );
 
   const goAccount = () => navigation.getParent()?.getParent()?.navigate('Account');
+  const goToCourse = useCallback((targetCourse: PublicCourse) => {
+    navigation.getParent()?.navigate?.('MyCourses', {
+      screen: 'MyCoursesList',
+      params: {
+        focusCourseId: targetCourse.id,
+        focusCourseName: targetCourse.name,
+      },
+    });
+  }, [navigation]);
 
   const enroll = async (typeOverride?: string) => {
     if (!course) return;
@@ -94,6 +126,7 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
       await api.post('/enrollments/enroll', { course_id: course.id, enrollmentType: type });
       Alert.alert('Success', 'Your enrollment request was submitted.');
       refreshUser();
+      load();
     } catch (e: any) {
       Alert.alert('Enrollment', e?.message || 'Could not complete enrollment');
     } finally {
@@ -133,7 +166,13 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
   const disc = course.discount_inr ?? 0;
   const eff = Math.max(0, fee - disc);
   const cta = primaryCta(course.enrollment_type);
+  const isActive = !!course.enrolled;
+  const primaryLabel = isActive ? 'Go to Course' : cta.label;
   const onPrimaryAction = async () => {
+    if (isActive) {
+      goToCourse(course);
+      return;
+    }
     if (cta.kind === 'apply') {
       void enroll('apply');
       return;
@@ -233,8 +272,13 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
         ) : null}
 
         <View style={styles.btnRow}>
+          {isActive ? (
+            <View style={styles.activeTag}>
+              <Text style={styles.activeTagText}>Active</Text>
+            </View>
+          ) : null}
           <TouchableOpacity style={styles.btnPrimary} onPress={() => void onPrimaryAction()} disabled={busy}>
-            <Text style={styles.btnPrimaryText}>{busy ? 'Please wait…' : cta.label}</Text>
+            <Text style={styles.btnPrimaryText}>{busy ? 'Please wait…' : primaryLabel}</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.btnOutline}
@@ -281,4 +325,11 @@ const styles = StyleSheet.create({
   btnOutlineText: { color: BRAND_BLUE, fontWeight: '700', fontSize: 13 },
   btnPrimary: { backgroundColor: BRAND_RED, borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12 },
   btnPrimaryText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+  activeTag: {
+    backgroundColor: '#e8f5e9',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  activeTagText: { color: '#2e7d32', fontWeight: '700', fontSize: 13 },
 });

@@ -308,6 +308,16 @@ export default function AccountScreen({ navigation }: any) {
           </View>
 
           <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>Payments & Invoices</Text>
+            <Text style={styles.sectionCopy}>
+              See your payment history for purchased and subscribed courses, and download invoice PDFs.
+            </Text>
+            <TouchableOpacity style={styles.primaryActionBtn} onPress={() => navigation.navigate('PaymentsInvoices')}>
+              <Text style={styles.primaryActionBtnText}>Open Payments & Invoices</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.sectionCard}>
             <Text style={styles.sectionTitle}>Subscriptions & access</Text>
             {subsLoading ? (
               <ActivityIndicator style={styles.spaceTop} color={BRAND_RED} />
@@ -543,6 +553,7 @@ const styles = StyleSheet.create({
     color: '#1f2a44',
     marginBottom: 6,
   },
+  sectionCopy: { fontSize: 14, color: '#475569', lineHeight: 20 },
   label: { fontSize: 12, fontWeight: '700', color: '#6b7280', textTransform: 'uppercase' },
   value: { fontSize: 16, color: '#111827', marginTop: 4 },
   input: {
@@ -579,6 +590,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#eef2ff',
   },
   ghostBtnText: { color: BRAND_BLUE, fontWeight: '700' },
+  primaryActionBtn: {
+    marginTop: 14,
+    backgroundColor: BRAND_BLUE,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  primaryActionBtnText: { color: '#fff', fontWeight: '800' },
   refreshBtn: { marginTop: 6, paddingVertical: 12, alignItems: 'center' },
   refreshText: { color: BRAND_BLUE, fontWeight: '700' },
   logoutBtn: {

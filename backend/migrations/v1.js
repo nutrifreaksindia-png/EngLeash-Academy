@@ -559,6 +559,72 @@ function ensureV1Tables(db) {
       updated_at TEXT DEFAULT (datetime('now'))
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_rp_bill_orders_payment ON razorpay_billing_orders(payment_id) WHERE payment_id IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS payment_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      payment_kind TEXT NOT NULL CHECK(payment_kind IN ('purchase','subscribe','renewal','combo')),
+      order_kind TEXT NOT NULL,
+      course_id INTEGER REFERENCES courses(id) ON DELETE SET NULL,
+      combo_id INTEGER REFERENCES course_combos(id) ON DELETE SET NULL,
+      billing_package_id INTEGER REFERENCES billing_packages(id) ON DELETE SET NULL,
+      course_title TEXT,
+      combo_title TEXT,
+      package_label TEXT,
+      gateway TEXT NOT NULL DEFAULT 'razorpay',
+      gateway_order_id TEXT NOT NULL UNIQUE,
+      gateway_payment_id TEXT NOT NULL UNIQUE,
+      source_order_table TEXT NOT NULL CHECK(source_order_table IN ('razorpay_course_orders','razorpay_billing_orders')),
+      source_order_row_id INTEGER,
+      amount_paise INTEGER NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      status TEXT NOT NULL DEFAULT 'paid' CHECK(status IN ('paid')),
+      paid_at TEXT NOT NULL,
+      customer_name TEXT,
+      customer_email TEXT,
+      customer_mobile TEXT,
+      customer_address_lines_json TEXT,
+      meta_json TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_payment_records_user_paid ON payment_records(user_id, paid_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_payment_records_kind_paid ON payment_records(payment_kind, paid_at DESC, id DESC);
+
+    CREATE TABLE IF NOT EXISTS invoice_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_record_id INTEGER NOT NULL UNIQUE REFERENCES payment_records(id) ON DELETE CASCADE,
+      invoice_number TEXT UNIQUE,
+      invoice_date TEXT NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      subtotal_paise INTEGER NOT NULL,
+      total_paise INTEGER NOT NULL,
+      academy_name TEXT NOT NULL,
+      academy_email TEXT,
+      academy_phone TEXT,
+      academy_address_lines_json TEXT,
+      customer_name TEXT,
+      customer_email TEXT,
+      customer_mobile TEXT,
+      customer_address_lines_json TEXT,
+      notes_text TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_invoice_records_number ON invoice_records(invoice_number);
+
+    CREATE TABLE IF NOT EXISTS invoice_line_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      invoice_record_id INTEGER NOT NULL REFERENCES invoice_records(id) ON DELETE CASCADE,
+      line_order INTEGER NOT NULL DEFAULT 0,
+      item_name TEXT NOT NULL,
+      description TEXT,
+      quantity REAL NOT NULL DEFAULT 1,
+      unit_rate_paise INTEGER NOT NULL DEFAULT 0,
+      amount_paise INTEGER NOT NULL DEFAULT 0,
+      meta_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_invoice_line_items_invoice ON invoice_line_items(invoice_record_id, line_order, id);
   `);
 
   db.prepare('INSERT OR IGNORE INTO video_categories (name, slug) VALUES (?, ?)').run('English Grammar', 'english-grammar');

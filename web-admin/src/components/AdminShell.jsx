@@ -47,6 +47,7 @@ export default function AdminShell({
   children,
   creatorMode = false,
   showBillingNav = false,
+  showPaymentsNav = false,
   showSubscriptionsNav = false,
 }) {
   const lessonsCoursesItems = React.useMemo(() => {
@@ -55,8 +56,9 @@ export default function AdminShell({
       { id: 'courses', label: 'Courses' },
     ];
     if (showBillingNav) base.push({ id: 'billing', label: 'Billing & combos' });
+    if (showPaymentsNav) base.push({ id: 'payments', label: 'Payments & invoices' });
     return base;
-  }, [showBillingNav]);
+  }, [showBillingNav, showPaymentsNav]);
 
   const navCtx = { showSubscriptionsNav, lessonsCoursesItems };
   const navSections = creatorMode

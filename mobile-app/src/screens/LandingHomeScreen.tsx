@@ -34,6 +34,7 @@ export type PublicCourse = {
   fee_inr?: number;
   discount_inr?: number;
   enrollment_type?: string;
+  enrolled?: boolean;
 };
 
 type OpenBatch = {
@@ -99,7 +100,7 @@ export default function LandingHomeScreen({ navigation, route }: any) {
 
   const load = useCallback(async () => {
     try {
-      const data = await api.publicGet('/courses/public');
+      const data = user?.id ? await api.get('/courses/catalog') : await api.publicGet('/courses/public');
       setCourses(Array.isArray(data) ? data : []);
     } catch {
       setCourses([]);
@@ -107,7 +108,7 @@ export default function LandingHomeScreen({ navigation, route }: any) {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useFocusEffect(
     useCallback(() => {
@@ -128,6 +129,16 @@ export default function LandingHomeScreen({ navigation, route }: any) {
   }, []);
 
   const goAccount = () => navigation.getParent()?.navigate?.('Account');
+
+  const goToCourse = useCallback((course: PublicCourse) => {
+    navigation.getParent()?.navigate?.('MyCourses', {
+      screen: 'MyCoursesList',
+      params: {
+        focusCourseId: course.id,
+        focusCourseName: course.name,
+      },
+    });
+  }, [navigation]);
 
   useFocusEffect(
     useCallback(() => {
@@ -279,6 +290,10 @@ export default function LandingHomeScreen({ navigation, route }: any) {
   };
 
   const onPrimaryAction = (course: PublicCourse) => {
+    if (course.enrolled) {
+      goToCourse(course);
+      return;
+    }
     const cta = primaryCta(course.enrollment_type);
     if (cta.kind === 'apply') {
       onApply(course);
@@ -336,6 +351,8 @@ export default function LandingHomeScreen({ navigation, route }: any) {
           const disc = item.discount_inr ?? 0;
           const eff = Math.max(0, fee - disc);
           const type = (item.enrollment_type || 'free').toLowerCase();
+          const isActive = !!item.enrolled;
+          const primaryLabel = isActive ? 'Go to Course' : primaryCta(item.enrollment_type).label;
           return (
             <View style={styles.card}>
               {resolveAssetUrl(item.image_url) ? (
@@ -365,13 +382,18 @@ export default function LandingHomeScreen({ navigation, route }: any) {
                 <Text style={styles.price}>Free</Text>
               )}
               <View style={styles.btnRow}>
+                {isActive ? (
+                  <View style={styles.activeTag}>
+                    <Text style={styles.activeTagText}>Active</Text>
+                  </View>
+                ) : null}
                 <TouchableOpacity
                   style={[styles.btnPrimary, type !== 'free' && primaryCta(item.enrollment_type).kind === 'free' && styles.btnMuted]}
                   onPress={() => onPrimaryAction(item)}
-                  disabled={enrollingId !== null}
+                  disabled={!isActive && enrollingId !== null}
                 >
                   <Text style={styles.btnPrimaryText}>
-                    {enrollingId === item.id ? '…' : primaryCta(item.enrollment_type).label}
+                    {!isActive && enrollingId === item.id ? '…' : primaryLabel}
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -493,6 +515,14 @@ const styles = StyleSheet.create({
   btnPrimary: { backgroundColor: BRAND_RED, borderRadius: 8, paddingVertical: 8, paddingHorizontal: 10 },
   btnMuted: { opacity: 0.45 },
   btnPrimaryText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+  activeTag: {
+    backgroundColor: '#e8f5e9',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    alignSelf: 'center',
+  },
+  activeTagText: { color: '#2e7d32', fontWeight: '700', fontSize: 13 },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(15,23,42,0.45)',
