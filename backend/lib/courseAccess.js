@@ -521,6 +521,7 @@ function syncBatchMemberCourseAccess(batchId, userId) {
       if (!course) continue;
       const et = String(course.enrollment_type || '').toLowerCase();
       const isSubscribe = et === 'subscribe';
+      const isApply = et === 'apply';
 
       const pkgId = row.billing_package_id != null ? Number(row.billing_package_id) : null;
       let appliedPkg = false;
@@ -533,7 +534,7 @@ function syncBatchMemberCourseAccess(batchId, userId) {
           )
           .get(pkgId, cid);
         if (pkg) {
-          if (isSubscribe) {
+          if (isSubscribe || isApply) {
             if (batchStarted && cohortStartMs != null) {
               applyPackageGrantsForPayment({
                 userId: uid,
