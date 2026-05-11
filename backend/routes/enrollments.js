@@ -57,21 +57,44 @@ router.post('/enroll', auth, requireRole('Trainer', 'Student', 'Lab'), (req, res
   if (type === 'subscribe' || type === 'purchase') {
     return res.status(400).json({ error: 'This course must be joined via Subscribe or Purchase payment' });
   }
+  const existing = db
+    .prepare('SELECT id, status, enrollment_type FROM course_enrollments WHERE user_id = ? AND course_id = ?')
+    .get(req.user.id, course_id);
   const finalStatus = type === 'free' ? 'approved' : 'pending';
-  try {
-    db.prepare(`
-      INSERT INTO course_enrollments (user_id, course_id, enrollment_type, status, approved_at, approved_by)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(req.user.id, course_id, type, finalStatus, finalStatus === 'approved' ? new Date().toISOString() : null, finalStatus === 'approved' ? req.user.id : null);
-  } catch (e) {
-    if (e.message.includes('UNIQUE')) return res.status(409).json({ error: 'Already enrolled' });
-    throw e;
-  }
-  if (finalStatus === 'approved') {
+  const nowIso = new Date().toISOString();
+
+  if (type === 'free') {
+    if (learnerHasCourseAccess(req.user.id, Number(course_id))) {
+      return res.status(409).json({ error: 'Already enrolled' });
+    }
+    if (!existing) {
+      db.prepare(`
+        INSERT INTO course_enrollments (user_id, course_id, enrollment_type, status, requested_at, approved_at, approved_by)
+        VALUES (?, ?, 'free', 'approved', ?, ?, ?)
+      `).run(req.user.id, course_id, nowIso, nowIso, req.user.id);
+    } else {
+      db.prepare(`
+        UPDATE course_enrollments
+        SET enrollment_type = 'free', status = 'approved', requested_at = ?, approved_at = ?, approved_by = ?, notes = NULL, batch_id = NULL
+        WHERE id = ?
+      `).run(nowIso, nowIso, req.user.id, existing.id);
+    }
     db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(req.user.id, course_id);
     db.transaction(() => {
       upsertLifetimeGrant(req.user.id, Number(course_id), 'free');
     })();
+    const row = db.prepare('SELECT * FROM course_enrollments WHERE user_id = ? AND course_id = ?').get(req.user.id, course_id);
+    return res.status(201).json(row);
+  }
+
+  try {
+    db.prepare(`
+      INSERT INTO course_enrollments (user_id, course_id, enrollment_type, status, approved_at, approved_by)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(req.user.id, course_id, type, finalStatus, finalStatus === 'approved' ? nowIso : null, finalStatus === 'approved' ? req.user.id : null);
+  } catch (e) {
+    if (e.message.includes('UNIQUE')) return res.status(409).json({ error: 'Already enrolled' });
+    throw e;
   }
   const row = db.prepare('SELECT * FROM course_enrollments WHERE user_id = ? AND course_id = ?').get(req.user.id, course_id);
   res.status(201).json(row);
