@@ -166,6 +166,16 @@ function removeBatchStudentAccess(batchId, studentId) {
   }
 }
 
+/** Run before deleting a batch row: revoke batch-linked access and sync enrollments for every member. */
+function purgeAllMembersAccessForDeletingBatch(batchId) {
+  const bid = Number(batchId);
+  if (!Number.isFinite(bid)) return;
+  const members = db.prepare('SELECT student_id FROM batch_members WHERE batch_id = ?').all(bid);
+  for (const m of members) {
+    removeBatchStudentAccess(bid, m.student_id);
+  }
+}
+
 /**
  * Primary learner entitlement: formal enrollment rows, timed/lifetime grants, or membership in any batch tied to this course.
  * Used across courses list, lesson access, quizzes, etc.
@@ -601,6 +611,7 @@ module.exports = {
   clearStaleEnrollmentIfNoAccess,
   revokeAccessGrantById,
   removeBatchStudentAccess,
+  purgeAllMembersAccessForDeletingBatch,
   userHasCourseAccess,
   latestSubscriptionEndMs,
   userEligibleForRenewal,

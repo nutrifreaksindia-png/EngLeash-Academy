@@ -11,6 +11,7 @@ const {
   syncBatchMemberCourseAccess,
   syncAllBatchMembersCourseAccess,
   removeBatchStudentAccess,
+  purgeAllMembersAccessForDeletingBatch,
 } = require('../lib/courseAccess');
 
 function normalizeBatchCoursesInput(body) {
@@ -686,6 +687,7 @@ router.delete('/:id(\\d+)', auth, requireRole('Admin'), async (req, res) => {
 
     /* course_enrollments.batch_id / course_access_grants.batch_id were added without ON DELETE CASCADE */
     db.transaction(() => {
+      purgeAllMembersAccessForDeletingBatch(batchId);
       db.prepare('UPDATE course_enrollments SET batch_id = NULL WHERE batch_id = ?').run(batchId);
       db.prepare('DELETE FROM course_access_grants WHERE batch_id = ?').run(batchId);
       db.prepare('DELETE FROM batches WHERE id = ?').run(batchId);
