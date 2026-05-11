@@ -1,7 +1,7 @@
 const express = require('express');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
-const { learnerHasCourseAccess, upsertLifetimeGrant } = require('../lib/courseAccess');
+const { learnerHasCourseAccess, syncBatchMemberCourseAccess, upsertLifetimeGrant } = require('../lib/courseAccess');
 
 const router = express.Router();
 
@@ -209,7 +209,13 @@ router.post('/applications/:id/approve', auth, requireRole('Admin'), (req, res) 
   const targetBatchId = Number.isFinite(selectedBatchId) ? selectedBatchId : row.batch_id;
   if (!Number.isFinite(targetBatchId)) return res.status(400).json({ error: 'Batch is required for approval' });
   const targetBatch = db.prepare('SELECT id, course_id FROM batches WHERE id = ?').get(targetBatchId);
-  if (!targetBatch || Number(targetBatch.course_id) !== Number(row.course_id)) {
+  const batchMatchesCourse =
+    targetBatch &&
+    (Number(targetBatch.course_id) === Number(row.course_id)
+      || db
+        .prepare('SELECT 1 FROM batch_courses WHERE batch_id = ? AND course_id = ?')
+        .get(targetBatchId, row.course_id));
+  if (!batchMatchesCourse) {
     return res.status(400).json({ error: 'Selected batch does not belong to this course' });
   }
   db.prepare(`
@@ -218,6 +224,11 @@ router.post('/applications/:id/approve', auth, requireRole('Admin'), (req, res) 
     WHERE id = ?
   `).run(targetBatchId, new Date().toISOString(), req.user.id, id);
   db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(targetBatchId, row.user_id);
+  try {
+    syncBatchMemberCourseAccess(targetBatchId, row.user_id);
+  } catch (e) {
+    console.error('syncBatchMemberCourseAccess on application approve', targetBatchId, row.user_id, e);
+  }
   const latest = db.prepare('SELECT * FROM course_enrollments WHERE id = ?').get(id);
   res.json(latest);
 });
