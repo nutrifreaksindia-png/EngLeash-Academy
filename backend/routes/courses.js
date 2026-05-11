@@ -45,6 +45,11 @@ router.get('/', auth, (req, res) => {
                 AND b.course_id = c.id
               )
             )
+            AND (
+              LOWER(COALESCE(c.enrollment_type, 'free')) IN ('free', 'purchase')
+              OR LOWER(COALESCE(b.batch_status, '')) = 'started'
+              OR (b.actual_start_date IS NOT NULL AND LENGTH(TRIM(b.actual_start_date)) > 0)
+            )
         )
       )
     ORDER BY c.sort_order, c.id
@@ -79,14 +84,26 @@ router.get('/catalog', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), 
       FROM batch_members bm
       INNER JOIN batches b ON b.id = bm.batch_id
       INNER JOIN batch_courses bc ON bc.batch_id = b.id
+      INNER JOIN courses co ON co.id = bc.course_id
       WHERE bm.student_id = ?
+        AND (
+          LOWER(COALESCE(co.enrollment_type, 'free')) IN ('free', 'purchase')
+          OR LOWER(COALESCE(b.batch_status, '')) = 'started'
+          OR (b.actual_start_date IS NOT NULL AND LENGTH(TRIM(b.actual_start_date)) > 0)
+        )
       UNION
       SELECT b.course_id AS course_id
       FROM batch_members bm
       INNER JOIN batches b ON b.id = bm.batch_id
+      INNER JOIN courses co ON co.id = b.course_id
       WHERE bm.student_id = ?
         AND b.course_id IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM batch_courses bx WHERE bx.batch_id = b.id)
+        AND (
+          LOWER(COALESCE(co.enrollment_type, 'free')) IN ('free', 'purchase')
+          OR LOWER(COALESCE(b.batch_status, '')) = 'started'
+          OR (b.actual_start_date IS NOT NULL AND LENGTH(TRIM(b.actual_start_date)) > 0)
+        )
     ) x
   `,
     )

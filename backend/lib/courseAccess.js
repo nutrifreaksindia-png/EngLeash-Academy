@@ -60,32 +60,41 @@ function learnerHasCourseAccess(userId, courseId, nowMs = Date.now()) {
     .prepare(
       `SELECT 1 FROM batch_members bm
        INNER JOIN batches b ON b.id = bm.batch_id
+       INNER JOIN courses co ON co.id = ?
        WHERE bm.student_id = ?
          AND (
-           EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = b.id AND bc.course_id = ?)
+           EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = b.id AND bc.course_id = co.id)
            OR (
              NOT EXISTS (SELECT 1 FROM batch_courses bx WHERE bx.batch_id = b.id)
              AND b.course_id IS NOT NULL
-             AND b.course_id = ?
+             AND b.course_id = co.id
            )
+         )
+         AND (
+           LOWER(COALESCE(co.enrollment_type, 'free')) IN ('free', 'purchase')
+           OR LOWER(COALESCE(b.batch_status, '')) = 'started'
+           OR (b.actual_start_date IS NOT NULL AND LENGTH(TRIM(b.actual_start_date)) > 0)
          )`,
     )
-    .get(uid, cid, cid);
+    .get(cid, uid);
   return !!batchRow;
 }
 
 function userHasCourseAccess(userId, courseId, nowMs = Date.now()) {
   const rows = db
     .prepare(
-      `SELECT ends_at_ms, grace_ends_at_ms FROM course_access_grants
+      `SELECT ends_at_ms, grace_ends_at_ms, starts_at_ms FROM course_access_grants
        WHERE user_id = ? AND course_id = ? AND revoked_at_ms IS NULL`
     )
     .all(userId, courseId);
 
   for (const r of rows) {
-    if (r.ends_at_ms == null) return true;
-    const ge = Number(r.grace_ends_at_ms);
     const st = Number(r.starts_at_ms);
+    if (r.ends_at_ms == null) {
+      if (Number.isFinite(st) && nowMs < st) continue;
+      return true;
+    }
+    const ge = Number(r.grace_ends_at_ms);
     if (!Number.isFinite(ge) || !Number.isFinite(st)) continue;
     if (nowMs >= st && nowMs <= ge) return true;
   }
@@ -255,12 +264,75 @@ function loadComboCourses(comboId) {
   return db.prepare('SELECT course_id FROM course_combo_members WHERE combo_id = ? ORDER BY id').all(comboId).map((r) => Number(r.course_id));
 }
 
-function grantNonSubscribeBatchCourseForSingleCourse(userId, courseId) {
+/** True once the batch has a real cohort start (sessions generated). Subscribe/Apply access is anchored here, not at batch creation. */
+function isBatchStartedForAccess(batch) {
+  if (!batch) return false;
+  if (String(batch.batch_status || '').toLowerCase() === 'started') return true;
+  const a = String(batch.actual_start_date || '').trim();
+  return a.length > 0;
+}
+
+/** Start of subscription / deferred batch_course grant window (local midnight of cohort start date). */
+function batchCohortAccessStartMs(batch) {
+  if (!batch) return null;
+  const a = String(batch.actual_start_date || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(a)) return startOfDayFromYmd(a);
+  const p = String(batch.planned_start_date || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(p)) return startOfDayFromYmd(p);
+  return null;
+}
+
+function grantNonSubscribeBatchCourseForSingleCourse(userId, courseId, options = {}) {
   const cid = Number(courseId);
   if (!Number.isFinite(cid)) return;
   const course = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(cid);
   if (!course) return;
-  if (String(course.enrollment_type || '').toLowerCase() === 'subscribe') return;
+  const et = String(course.enrollment_type || '').toLowerCase();
+  if (et === 'subscribe') return;
+
+  const batchStarted = Boolean(options.batchStarted);
+  const accessStartMs = options.accessStartMs != null ? Number(options.accessStartMs) : null;
+
+  if (et === 'apply') {
+    if (!batchStarted || !Number.isFinite(accessStartMs)) return;
+    const existed = db
+      .prepare(
+        `SELECT id FROM course_access_grants
+         WHERE user_id = ? AND course_id = ? AND revoked_at_ms IS NULL AND ends_at_ms IS NULL AND source = 'batch_course'`,
+      )
+      .get(userId, cid);
+    if (existed) return;
+    insertGrant({
+      userId,
+      courseId: cid,
+      source: 'batch_course',
+      startsAtMs: accessStartMs,
+      endsAtMs: null,
+      graceEndsAtMs: null,
+      billingPackageId: null,
+      batchId: null,
+      comboId: null,
+      razorpayOrderId: null,
+      paymentId: null,
+    });
+    const ts = new Date(accessStartMs).toISOString();
+    const existing = db.prepare('SELECT id, status FROM course_enrollments WHERE user_id = ? AND course_id = ?').get(userId, cid);
+    if (!existing) {
+      db.prepare(
+        `INSERT INTO course_enrollments (user_id, course_id, enrollment_type, status, requested_at, approved_at, approved_by)
+         VALUES (?, ?, 'free', 'approved', ?, ?, NULL)`,
+      ).run(userId, cid, ts, ts);
+    } else if (existing.status !== 'approved') {
+      db.prepare(
+        `UPDATE course_enrollments SET enrollment_type = 'free', status = 'approved', approved_at = ?, approved_by = NULL, notes = NULL
+         WHERE id = ?`,
+      ).run(ts, existing.id);
+    }
+    db.prepare('INSERT OR IGNORE INTO enrollments (user_id, course_id) VALUES (?, ?)').run(userId, cid);
+    return;
+  }
+
+  if (et !== 'free' && et !== 'purchase') return;
 
   upsertLifetimeGrant(userId, cid, 'batch_course');
   const ts = new Date().toISOString();
@@ -301,8 +373,13 @@ function syncBatchMemberCourseAccess(batchId, userId) {
     }
   }
 
-  const batchMeta = db.prepare('SELECT planned_start_date FROM batches WHERE id = ?').get(bid);
-  const startMs = batchMeta?.planned_start_date ? startOfDayFromYmd(batchMeta.planned_start_date) : Date.now();
+  const batchMeta = db
+    .prepare(
+      `SELECT planned_start_date, actual_start_date, batch_status FROM batches WHERE id = ?`,
+    )
+    .get(bid);
+  const batchStarted = isBatchStartedForAccess(batchMeta);
+  const cohortStartMs = batchCohortAccessStartMs(batchMeta);
 
   db.transaction(() => {
     for (const row of rows) {
@@ -317,10 +394,12 @@ function syncBatchMemberCourseAccess(batchId, userId) {
 
       const course = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(cid);
       if (!course) continue;
-      const isSubscribe = String(course.enrollment_type || '').toLowerCase() === 'subscribe';
+      const et = String(course.enrollment_type || '').toLowerCase();
+      const isSubscribe = et === 'subscribe';
 
       const pkgId = row.billing_package_id != null ? Number(row.billing_package_id) : null;
       let appliedPkg = false;
+
       if (pkgId && Number.isFinite(pkgId)) {
         const pkg = db
           .prepare(
@@ -329,26 +408,59 @@ function syncBatchMemberCourseAccess(batchId, userId) {
           )
           .get(pkgId, cid);
         if (pkg) {
-          applyPackageGrantsForPayment({
-            userId: uid,
-            pkg,
-            startMs,
-            source: 'subscribe_batch',
-            razorpayOrderId: null,
-            paymentId: null,
-            batchId: bid,
-            comboId: null,
-            courseIds: [cid],
-          });
-          appliedPkg = true;
+          if (isSubscribe) {
+            if (batchStarted && cohortStartMs != null) {
+              applyPackageGrantsForPayment({
+                userId: uid,
+                pkg,
+                startMs: cohortStartMs,
+                source: 'subscribe_batch',
+                razorpayOrderId: null,
+                paymentId: null,
+                batchId: bid,
+                comboId: null,
+                courseIds: [cid],
+              });
+              appliedPkg = true;
+            }
+          } else {
+            applyPackageGrantsForPayment({
+              userId: uid,
+              pkg,
+              startMs: Date.now(),
+              source: 'subscribe_batch',
+              razorpayOrderId: null,
+              paymentId: null,
+              batchId: bid,
+              comboId: null,
+              courseIds: [cid],
+            });
+            appliedPkg = true;
+          }
         }
       }
 
       if (!appliedPkg && !isSubscribe) {
-        grantNonSubscribeBatchCourseForSingleCourse(uid, cid);
+        grantNonSubscribeBatchCourseForSingleCourse(uid, cid, {
+          batchStarted,
+          accessStartMs: cohortStartMs,
+        });
       }
     }
   })();
+}
+
+function syncAllBatchMembersCourseAccess(batchId) {
+  const bid = Number(batchId);
+  if (!Number.isFinite(bid)) return;
+  const members = db.prepare('SELECT student_id FROM batch_members WHERE batch_id = ?').all(bid);
+  for (const m of members) {
+    try {
+      syncBatchMemberCourseAccess(bid, m.student_id);
+    } catch (e) {
+      console.error('[syncAllBatchMembersCourseAccess]', bid, m.student_id, e);
+    }
+  }
 }
 
 function upsertLifetimeGrant(userId, courseId, source) {
@@ -391,6 +503,7 @@ module.exports = {
   loadBillingPackage,
   loadComboCourses,
   syncBatchMemberCourseAccess,
+  syncAllBatchMembersCourseAccess,
   upsertLifetimeGrant,
   startOfDayFromYmd,
   hasActiveSubscribeWindow,

@@ -7,7 +7,7 @@ const { ensureLiveSessionsForBatch, combineDateTime } = require('../services/ens
 const liveRecording = require('../services/liveRecording');
 
 const router = express.Router();
-const { syncBatchMemberCourseAccess } = require('../lib/courseAccess');
+const { syncBatchMemberCourseAccess, syncAllBatchMembersCourseAccess } = require('../lib/courseAccess');
 
 function normalizeBatchCoursesInput(body) {
   const rows = [];
@@ -837,6 +837,11 @@ router.post('/:id/start', auth, requireRole('Admin', 'Trainer'), (req, res) => {
       liveSummary = ensureLiveSessionsForBatch(batchId);
     } catch (liveErr) {
       console.error('ensureLiveSessionsForBatch', batchId, liveErr);
+    }
+    try {
+      syncAllBatchMembersCourseAccess(batchId);
+    } catch (syncErr) {
+      console.error('syncAllBatchMembersCourseAccess on batch start', batchId, syncErr);
     }
     res.json({ ok: true, sessions, liveSessions: liveSummary });
   } catch (e) {
