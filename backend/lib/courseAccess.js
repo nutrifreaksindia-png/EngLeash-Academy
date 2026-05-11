@@ -178,21 +178,31 @@ function purgeAllMembersAccessForDeletingBatch(batchId) {
 
 /**
  * Primary learner entitlement: formal enrollment rows, timed/lifetime grants, or membership in any batch tied to this course.
- * Used across courses list, lesson access, quizzes, etc.
+ * Subscribe / Apply: approved enrollment alone does not unlock access (admin-approved applications, batch roster, etc.)
+ * until grants exist or the batch has actually started — matches deferred batch sync.
  */
 function learnerHasCourseAccess(userId, courseId, nowMs = Date.now()) {
   const uid = Number(userId);
   const cid = Number(courseId);
   if (!Number.isFinite(uid) || !Number.isFinite(cid)) return false;
 
+  const courseRow = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(cid);
+  const et = String(courseRow?.enrollment_type || 'free').toLowerCase();
+
   const enrolled =
     db
       .prepare("SELECT 1 FROM course_enrollments WHERE user_id = ? AND course_id = ? AND status = 'approved'")
       .get(uid, cid)
     || db.prepare('SELECT 1 FROM enrollments WHERE user_id = ? AND course_id = ?').get(uid, cid);
-  if (enrolled) return true;
 
-  return entitlementFromGrantsOrBatchMembership(uid, cid, nowMs);
+  const entitlement = entitlementFromGrantsOrBatchMembership(uid, cid, nowMs);
+
+  if (et === 'subscribe' || et === 'apply') {
+    return entitlement;
+  }
+
+  if (enrolled) return true;
+  return entitlement;
 }
 
 function userHasCourseAccess(userId, courseId, nowMs = Date.now()) {

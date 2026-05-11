@@ -21,39 +21,24 @@ router.get('/', auth, (req, res) => {
     return res.json(courses);
   }
   const uid = req.user.id;
-  const courses = db.prepare(`
+  const allCourses = db
+    .prepare(
+      `
     SELECT c.id, c.name, c.description, c.image_url, c.sort_order, c.is_published, c.created_at,
            c.highlights, c.specifications_html, c.duration_days, c.lesson_schedule_json, c.modes_json, c.languages_json,
            c.fee_inr, c.discount_inr, c.course_status, c.enrollment_type, c.progression_type
     FROM courses c
     WHERE c.is_published = 1 AND COALESCE(c.course_status, 'Active') = 'Active'
-      AND (
-        EXISTS (
-          SELECT 1 FROM course_enrollments ce
-          WHERE ce.course_id = c.id AND ce.user_id = ? AND ce.status = 'approved'
-        )
-        OR EXISTS (SELECT 1 FROM enrollments e WHERE e.course_id = c.id AND e.user_id = ?)
-        OR EXISTS (
-          SELECT 1 FROM batch_members bm
-          INNER JOIN batches b ON b.id = bm.batch_id
-          WHERE bm.student_id = ?
-            AND (
-              EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = b.id AND bc.course_id = c.id)
-              OR (
-                NOT EXISTS (SELECT 1 FROM batch_courses bx WHERE bx.batch_id = b.id)
-                AND b.course_id IS NOT NULL
-                AND b.course_id = c.id
-              )
-            )
-            AND (
-              LOWER(COALESCE(c.enrollment_type, 'free')) IN ('free', 'purchase')
-              OR LOWER(COALESCE(b.batch_status, '')) = 'started'
-              OR (b.actual_start_date IS NOT NULL AND LENGTH(TRIM(b.actual_start_date)) > 0)
-            )
-        )
-      )
     ORDER BY c.sort_order, c.id
-  `).all(uid, uid, uid);
+  `,
+    )
+    .all();
+
+  let courses = allCourses;
+  if (role !== 'Admin' && role !== 'Creator') {
+    courses = allCourses.filter((c) => learnerHasCourseAccess(uid, c.id));
+  }
+
   const learner =
     req.user.role === 'Student' || req.user.role === 'Lab'
       ? (c) => ({
@@ -118,7 +103,7 @@ router.get('/catalog', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), 
     courses.map((c) => ({
       ...c,
       enrollmentStatus: enrollmentByCourse.get(c.id) || null,
-      enrolled: !!(enrollmentByCourse.get(c.id) === 'approved' || learnerHasCourseAccess(uid, c.id, now)),
+      enrolled: learnerHasCourseAccess(uid, c.id, now),
     })),
   );
 });
