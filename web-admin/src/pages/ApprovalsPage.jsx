@@ -36,28 +36,37 @@ export default function ApprovalsPage({
     await onApproveApplication(app.id, picked || app.batch_id || null);
   }
 
+  function statusLabel(status) {
+    const s = String(status || '').toLowerCase();
+    if (s === 'approved') return 'Approved';
+    if (s === 'rejected') return 'Disapproved';
+    return 'Pending';
+  }
+
   return (
-    <SectionCard title="Pending Applications" subtitle="Approve/disapprove student applications and place students into a batch">
+    <SectionCard title="Course Applications" subtitle="Review student applications and place learners into a batch when approving">
       <div className="tableWrap">
         <table>
           <thead>
             <tr>
-              <th>Student</th><th>Course</th><th>Requested batch</th><th>Requested at</th><th>Change batch</th><th>Action</th>
+              <th>Student</th><th>Course</th><th>Status</th><th>Requested batch</th><th>Requested at</th><th>Change batch</th><th>Action</th>
             </tr>
           </thead>
           <tbody>
             {pendingApplications.length === 0 ? (
-              <tr><td colSpan="6" className="muted">No pending applications</td></tr>
+              <tr><td colSpan="7" className="muted">No course applications yet.</td></tr>
             ) : pendingApplications.map((app) => (
               <tr key={app.id}>
                 <td>{app.user_name || app.user_email}</td>
                 <td>{app.course_name}</td>
+                <td>{statusLabel(app.status)}</td>
                 <td>{app.requested_batch_number ? `Batch ${app.requested_batch_number}` : (app.requested_batch_title || (app.batch_id ? `Batch ${app.batch_id}` : '—'))}</td>
                 <td>{app.requested_at || '—'}</td>
                 <td>
                   <select
                     value={pickByApplication[app.id] || app.batch_id || ''}
                     onChange={(e) => setPickByApplication((prev) => ({ ...prev, [app.id]: e.target.value ? Number(e.target.value) : null }))}
+                    disabled={String(app.status || '').toLowerCase() !== 'pending'}
                   >
                     <option value="">Select batch</option>
                     {(batchOptionsByCourse[app.course_id] || []).map((b) => (
@@ -68,10 +77,14 @@ export default function ApprovalsPage({
                   </select>
                 </td>
                 <td>
-                  <div className="row">
-                    <button onClick={() => void approve(app)}>Approve</button>
-                    <button className="dangerBtn" onClick={() => void onDisapproveApplication(app.id)}>Disapprove</button>
-                  </div>
+                  {String(app.status || '').toLowerCase() === 'pending' ? (
+                    <div className="row">
+                      <button onClick={() => void approve(app)}>Approve</button>
+                      <button className="dangerBtn" onClick={() => void onDisapproveApplication(app.id)}>Disapprove</button>
+                    </div>
+                  ) : (
+                    <span className="muted">{statusLabel(app.status)}</span>
+                  )}
                 </td>
               </tr>
             ))}

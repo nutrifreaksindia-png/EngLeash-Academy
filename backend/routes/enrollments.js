@@ -139,6 +139,9 @@ router.post('/apply-batch', auth, requireRole('Student', 'Lab'), (req, res) => {
   if ((batch.enrollment_open_status || 'closed') !== 'open') {
     return res.status(409).json({ error: 'Batch is currently closed for applications' });
   }
+  if (learnerHasCourseAccess(req.user.id, courseId)) {
+    return res.status(409).json({ error: 'You already have active access to this course' });
+  }
   const existing = db.prepare(`
     SELECT id, status FROM course_enrollments
     WHERE user_id = ? AND course_id = ?
@@ -148,12 +151,11 @@ router.post('/apply-batch', auth, requireRole('Student', 'Lab'), (req, res) => {
       INSERT INTO course_enrollments (user_id, course_id, enrollment_type, status, batch_id)
       VALUES (?, ?, 'apply', 'pending', ?)
     `).run(req.user.id, courseId, batchId);
-  } else if (existing.status === 'approved') {
-    return res.status(409).json({ error: 'Application already approved for this course' });
   } else {
     db.prepare(`
       UPDATE course_enrollments
-      SET enrollment_type = 'apply', status = 'pending', batch_id = ?, approved_at = NULL, approved_by = NULL, notes = NULL
+      SET enrollment_type = 'apply', status = 'pending', batch_id = ?, requested_at = datetime('now'),
+          approved_at = NULL, approved_by = NULL, notes = NULL
       WHERE id = ?
     `).run(batchId, existing.id);
   }
@@ -174,6 +176,7 @@ router.get('/pending-applications', auth, requireRole('Admin'), (req, res) => {
       ce.enrollment_type,
       ce.status,
       ce.requested_at,
+      ce.approved_at,
       u.name AS user_name,
       u.email AS user_email,
       c.name AS course_name,
@@ -183,8 +186,16 @@ router.get('/pending-applications', auth, requireRole('Admin'), (req, res) => {
     JOIN users u ON u.id = ce.user_id
     JOIN courses c ON c.id = ce.course_id
     LEFT JOIN batches b ON b.id = ce.batch_id
-    WHERE ce.status = 'pending' AND ce.enrollment_type = 'apply'
-    ORDER BY ce.requested_at ASC
+    WHERE ce.enrollment_type = 'apply'
+    ORDER BY
+      CASE ce.status
+        WHEN 'pending' THEN 0
+        WHEN 'approved' THEN 1
+        WHEN 'rejected' THEN 2
+        ELSE 3
+      END,
+      COALESCE(ce.approved_at, ce.requested_at) DESC,
+      ce.id DESC
   `).all();
   res.json(rows);
 });
