@@ -680,6 +680,21 @@ export default function App() {
     return Array.isArray(data?.subscriptions) ? data.subscriptions : [];
   }
 
+  async function deleteSubscriptionGrant(grantId) {
+    try {
+      await apiFetch(`/subscriptions/admin/grants/${grantId}`, token, { method: 'DELETE' });
+      pushToast('Access window removed', 'success');
+    } catch (err) {
+      const msg =
+        typeof err?.message === 'string' && err.message.trim()
+          ? err.message.trim()
+          : 'Could not remove access';
+      setError(msg);
+      pushToast(msg, 'error');
+      throw err;
+    }
+  }
+
   async function updateBatch(batchId, payload) {
     try {
       const updated = await apiFetch(`/batch-manager/${batchId}`, token, {
@@ -1345,7 +1360,9 @@ export default function App() {
       />
     );
   } else if (currentPage === 'subscriptions' && currentUser?.role === 'Admin') {
-    page = <SubscriptionsPage loadSubscriptions={fetchAdminSubscriptions} />;
+    page = (
+      <SubscriptionsPage loadSubscriptions={fetchAdminSubscriptions} onDeleteGrant={deleteSubscriptionGrant} />
+    );
   } else if (currentPage === 'batches') {
     page = (
       <BatchesPage

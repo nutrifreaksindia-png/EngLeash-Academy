@@ -147,4 +147,21 @@ router.get('/admin', auth, requireRole('Admin'), (req, res) => {
   });
 });
 
+/** Admin: revoke a single course access grant (soft-delete; keeps audit row). */
+router.delete('/admin/grants/:grantId', auth, requireRole('Admin'), (req, res) => {
+  const grantId = Number(req.params.grantId);
+  if (!Number.isFinite(grantId)) {
+    return res.status(400).json({ error: 'Invalid grant id' });
+  }
+  const row = db
+    .prepare('SELECT id FROM course_access_grants WHERE id = ? AND revoked_at_ms IS NULL')
+    .get(grantId);
+  if (!row) {
+    return res.status(404).json({ error: 'Grant not found or already revoked' });
+  }
+  const now = Date.now();
+  db.prepare('UPDATE course_access_grants SET revoked_at_ms = ? WHERE id = ?').run(now, grantId);
+  res.status(204).end();
+});
+
 module.exports = router;
