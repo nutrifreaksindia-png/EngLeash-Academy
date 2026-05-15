@@ -66,7 +66,7 @@ async function main() {
       duration_days, apply_registration_fee_inr, apply_single_payment_discount_inr,
       apply_installment_count, apply_installment_amounts_json, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled, created_at
     ) VALUES (?, ?, ?, 1, 12000, 2000, 'Active', 'apply', 30, 999, 1000, 2, ?, 10, 3, 1, datetime('now'))`,
-  ).run(applyCourseId, 'Career English Intensive', 'Apply revenue validation course', JSON.stringify([3000, 7000]));
+  ).run(applyCourseId, 'Career English Intensive', 'Apply revenue validation course', JSON.stringify([3000]));
 
   const today = new Date();
   const todayYmd = today.toISOString().slice(0, 10);

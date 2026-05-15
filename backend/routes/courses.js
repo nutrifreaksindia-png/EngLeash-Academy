@@ -35,15 +35,21 @@ function splitEvenlyInr(totalInr, count) {
 function normalizeApplyInstallmentAmounts(raw, count, netFeeInr) {
   const n = Math.max(1, Math.trunc(numberOrDefault(count, 1)));
   const values = Array.isArray(raw) ? raw : [];
-  const amounts = values.map((x) => numberOrDefault(x, NaN));
-  if (amounts.length !== n || amounts.some((x) => !Number.isFinite(x) || x < 0)) {
-    return { ok: false, error: `Enter ${n} installment amount${n === 1 ? '' : 's'}.` };
+  const manualCount = Math.max(0, n - 1);
+  if (values.length < manualCount) {
+    return { ok: false, error: `Enter the first ${manualCount} installment amount${manualCount === 1 ? '' : 's'}.` };
   }
-  const amountPaiseTotal = amounts.reduce((sum, amount) => sum + Math.round(amount * 100), 0);
   const netPaise = Math.round(Math.max(0, numberOrDefault(netFeeInr, 0)) * 100);
-  if (amountPaiseTotal !== netPaise) {
-    return { ok: false, error: 'Installment amounts must add up to the net course fee.' };
+  const manualAmounts = values.slice(0, manualCount).map((x) => numberOrDefault(x, NaN));
+  if (manualAmounts.some((x) => !Number.isFinite(x) || x < 0)) {
+    return { ok: false, error: 'Installment amounts must be valid non-negative numbers.' };
   }
+  const manualPaise = manualAmounts.map((amount) => Math.round(amount * 100));
+  const manualTotalPaise = manualPaise.reduce((sum, amount) => sum + amount, 0);
+  if (manualTotalPaise > netPaise) {
+    return { ok: false, error: 'Installments before the final one cannot exceed the net course fee.' };
+  }
+  const amounts = [...manualPaise, netPaise - manualTotalPaise].map((paise) => paise / 100);
   return { ok: true, json: JSON.stringify(amounts) };
 }
 

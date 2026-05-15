@@ -68,6 +68,15 @@ function resizeInstallmentAmounts(amounts, count) {
   return next;
 }
 
+function withAutoCalculatedLastInstallment(amounts, count, netFee) {
+  const n = Math.max(1, Number(count || 1));
+  const manual = resizeInstallmentAmounts(amounts, n).slice(0, Math.max(0, n - 1));
+  const manualPaise = manual.map((x) => Math.round(Number(x || 0) * 100));
+  const netPaise = Math.round(Math.max(0, Number(netFee || 0)) * 100);
+  const manualTotalPaise = manualPaise.reduce((sum, amount) => sum + amount, 0);
+  return [...manualPaise, Math.max(0, netPaise - manualTotalPaise)].map((paise) => paise / 100);
+}
+
 function enrollmentLabel(value) {
   const v = (value || 'free').toLowerCase();
   if (v === 'apply') return 'Apply';
@@ -274,10 +283,20 @@ export default function CoursesPage({
 
   async function submit(e) {
     e.preventDefault();
+    const payload = isApplyCourse
+      ? {
+          ...form,
+          applyInstallmentAmounts: withAutoCalculatedLastInstallment(
+            form.applyInstallmentAmounts,
+            form.applyInstallmentCount,
+            netCourseFeeInr(form)
+          ),
+        }
+      : form;
     if (form.id) {
-      await onUpdateCourse(form);
+      await onUpdateCourse(payload);
     } else {
-      await onCreateCourse(form);
+      await onCreateCourse(payload);
     }
     setOpen(false);
     setForm({ ...emptyForm });
@@ -319,7 +338,10 @@ export default function CoursesPage({
 
   const isApplyCourse = form.enrollmentType === 'apply';
   const netFee = netCourseFeeInr(form);
-  const installmentTotal = (form.applyInstallmentAmounts || []).reduce((sum, amount) => sum + Number(amount || 0), 0);
+  const resolvedInstallmentAmounts = withAutoCalculatedLastInstallment(form.applyInstallmentAmounts, form.applyInstallmentCount, netFee);
+  const editableInstallmentTotal = resolvedInstallmentAmounts
+    .slice(0, Math.max(0, Number(form.applyInstallmentCount || 1) - 1))
+    .reduce((sum, amount) => sum + Number(amount || 0), 0);
 
   function setHighlightLine(index, value) {
     setForm((prev) => {
@@ -890,8 +912,8 @@ export default function CoursesPage({
               <div className="courseFormField">
                 <span className="fieldLabel">Apply billing rules</span>
                 <p className="fieldHint">
-                  Net fee is Fee minus Discount. Single payment applies its own discount on that net fee. Installment amounts must
-                  add up to the net fee.
+                  Net fee is Fee minus Discount. Single payment applies its own discount on that net fee. Enter all installments
+                  except the final one; the final installment is calculated automatically.
                 </p>
               </div>
 
@@ -947,11 +969,13 @@ export default function CoursesPage({
               <div className="courseFormField courseFormWide">
                 <span className="fieldLabel">Installment amounts (INR)</span>
                 <p className="fieldHint">
-                  Net course fee: INR {netFee}. Enter each installment amount manually. Current total: INR {installmentTotal}.
+                  Net course fee: INR {netFee}. Enter the earlier installments manually. Final installment is auto-calculated from
+                  the remaining INR {Math.max(0, netFee - editableInstallmentTotal)}.
                 </p>
-                {resizeInstallmentAmounts(form.applyInstallmentAmounts, form.applyInstallmentCount).map((amount, index) => (
+                {resolvedInstallmentAmounts.map((amount, index) => (
                   <label key={index} className="fieldLabel" htmlFor={`course-apply-installment-amount-${index}`}>
                     Installment {index + 1}
+                    {index === resolvedInstallmentAmounts.length - 1 ? ' (auto)' : ''}
                     <input
                       id={`course-apply-installment-amount-${index}`}
                       className="courseInput courseInputNarrow"
@@ -963,11 +987,12 @@ export default function CoursesPage({
                       }}
                       type="number"
                       min={0}
+                      disabled={index === resolvedInstallmentAmounts.length - 1}
                     />
                   </label>
                 ))}
-                {Math.round(installmentTotal * 100) !== Math.round(netFee * 100) ? (
-                  <p className="fieldHint">Installment total must equal the net course fee before saving.</p>
+                {Math.round(editableInstallmentTotal * 100) > Math.round(netFee * 100) ? (
+                  <p className="fieldHint">Earlier installments cannot exceed the net course fee.</p>
                 ) : null}
               </div>
 

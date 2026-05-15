@@ -69,11 +69,14 @@ function splitEvenlyPaise(totalPaise, count) {
 function parseInstallmentAmountsPaise(raw, expectedCount, totalPaise) {
   const parsed = parseJson(raw, []);
   if (!Array.isArray(parsed)) return null;
-  const amounts = parsed.map((x) => toPaise(x));
   const count = Math.max(1, Number(expectedCount || 1));
-  if (amounts.length !== count) return null;
-  const sum = amounts.reduce((acc, amount) => acc + amount, 0);
-  return sum === Math.max(0, Number(totalPaise || 0)) ? amounts : null;
+  const manualCount = Math.max(0, count - 1);
+  if (parsed.length < manualCount) return null;
+  const manualAmounts = parsed.slice(0, manualCount).map((x) => toPaise(x));
+  const manualTotal = manualAmounts.reduce((acc, amount) => acc + amount, 0);
+  const total = Math.max(0, Number(totalPaise || 0));
+  if (manualTotal > total) return null;
+  return [...manualAmounts, total - manualTotal];
 }
 
 function loadApplyCourse(courseId) {
