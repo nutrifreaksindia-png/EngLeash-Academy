@@ -14,6 +14,14 @@ function packageKindLabel(k) {
   return 'Subscription';
 }
 
+function enrollmentLabel(value) {
+  const v = String(value || 'free').toLowerCase();
+  if (v === 'apply') return 'Apply';
+  if (v === 'purchase') return 'Purchase';
+  if (v === 'subscribe') return 'Subscribe';
+  return 'Join Free';
+}
+
 function durationLabel(unit, count) {
   const u = String(unit || '').toLowerCase();
   const c = Number(count);
@@ -42,6 +50,24 @@ function selectedEntityId(raw) {
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 1) return null;
   return n;
+}
+
+function courseEnrollmentType(course) {
+  return String(course?.enrollment_type || 'free').toLowerCase();
+}
+
+function coursePackageKinds(course) {
+  const type = courseEnrollmentType(course);
+  if (type === 'subscribe') return ['subscription', 'renewal'];
+  if (type === 'apply') return ['renewal'];
+  return [];
+}
+
+function coursePackageHint(course) {
+  const type = courseEnrollmentType(course);
+  if (type === 'apply') return 'Apply courses can use renewal packages only. New access is handled by the apply flow.';
+  if (type === 'free' || type === 'purchase') return 'Packages are not applicable to Join Free or Purchase courses.';
+  return 'Subscribe courses can use subscription and renewal packages.';
 }
 
 const emptyPackageForm = {
@@ -122,6 +148,14 @@ export default function BillingPage({
     if (!courseBillingId) return null;
     return courseOptions.find((c) => String(c.id) === String(courseBillingId)) || null;
   }, [courseBillingId, courseOptions]);
+  const selectedCoursePackageKinds = useMemo(() => coursePackageKinds(selectedCourse), [selectedCourse]);
+  const modalPackageKinds = useMemo(() => {
+    let kinds = !pkgModalTarget || pkgModalTarget.scope !== 'course' ? ['subscription', 'renewal'] : coursePackageKinds(selectedCourse);
+    if (pkgModal === 'edit' && pkgForm.packageKind && !kinds.includes(pkgForm.packageKind)) {
+      kinds = [...kinds, pkgForm.packageKind];
+    }
+    return kinds;
+  }, [pkgModal, pkgForm.packageKind, pkgModalTarget, selectedCourse]);
 
   async function reloadCoursePackages() {
     const id = selectedEntityId(courseBillingId);
@@ -222,7 +256,8 @@ export default function BillingPage({
   function openNewPackage(scope, targetId) {
     setPkgModal('create');
     setPkgModalTarget({ scope, targetId });
-    setPkgForm({ ...emptyPackageForm });
+    const allowedKinds = scope === 'course' ? selectedCoursePackageKinds : ['subscription', 'renewal'];
+    setPkgForm({ ...emptyPackageForm, packageKind: allowedKinds[0] || 'subscription' });
   }
 
   function openEditPackage(row, scope, targetId) {
@@ -244,6 +279,10 @@ export default function BillingPage({
     e.preventDefault();
     if (!pkgModalTarget) return;
     const target = pkgModalTarget;
+    if (target.scope === 'course' && !selectedCoursePackageKinds.includes(pkgForm.packageKind)) {
+      pushToast(coursePackageHint(selectedCourse), 'error');
+      return;
+    }
     const body = {
       packageKind: pkgForm.packageKind,
       durationUnit: pkgForm.durationUnit,
@@ -333,22 +372,21 @@ export default function BillingPage({
             <option value="">Select a course…</option>
             {courseOptions.map((c) => (
               <option key={c.id} value={c.id}>
-                {c.name}
-                {String(c.enrollment_type || '').toLowerCase() === 'subscribe' ? ' (Subscribe)' : ''}
+                {c.name} ({enrollmentLabel(c.enrollment_type)})
               </option>
             ))}
           </select>
         </label>
-        {selectedCourse && String(selectedCourse.enrollment_type || '').toLowerCase() !== 'subscribe' ? (
+        {selectedCourse ? (
           <p className="muted fieldHint">
-            This course is not set to Subscribe enrollment. Packages still save for when you switch it, but students will not see subscribe checkout until the course enrollment type is Subscribe.
+            {coursePackageHint(selectedCourse)}
           </p>
         ) : null}
 
         <div className="row" style={{ marginTop: 12 }}>
           <button
             type="button"
-            disabled={!courseBillingId || busy}
+            disabled={!courseBillingId || busy || selectedCoursePackageKinds.length === 0}
             onClick={() => openNewPackage('course', Number(courseBillingId))}
           >
             Add package
@@ -614,8 +652,12 @@ export default function BillingPage({
               onChange={(e) => setPkgForm({ ...pkgForm, packageKind: e.target.value })}
               disabled={pkgModal === 'edit'}
             >
-              <option value="subscription">Subscription (new access)</option>
-              <option value="renewal">Renewal (extend existing)</option>
+              {modalPackageKinds.includes('subscription') ? (
+                <option value="subscription">Subscription (new access)</option>
+              ) : null}
+              {modalPackageKinds.includes('renewal') ? (
+                <option value="renewal">Renewal (extend existing)</option>
+              ) : null}
             </select>
           </label>
           <label className="batchCreateLabel">

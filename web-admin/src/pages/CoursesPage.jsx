@@ -773,18 +773,39 @@ export default function CoursesPage({
           </div>
 
           <div className="courseFormField">
-            <label className="fieldLabel" htmlFor="course-duration">
-              Duration (days)
-            </label>
-            <input
-              id="course-duration"
-              className="courseInput courseInputNarrow"
-              value={form.durationDays}
-              onChange={(e) => setForm({ ...form, durationDays: Number(e.target.value || 1) })}
-              type="number"
-              min={1}
-            />
+            <span className="fieldLabel" id="course-enroll-label">
+              How students enroll
+            </span>
+            <p className="fieldHint">Subscribe uses billing packages (web admin → Billing & combos). Apply and purchase use their own flows in the app.</p>
+            <select
+              id="course-enrollment"
+              className="courseSelect"
+              aria-labelledby="course-enroll-label"
+              value={form.enrollmentType}
+              onChange={(e) => setForm({ ...form, enrollmentType: e.target.value })}
+            >
+              <option value="free">Join Free</option>
+              <option value="apply">Apply</option>
+              <option value="purchase">Purchase</option>
+              <option value="subscribe">Subscribe</option>
+            </select>
           </div>
+
+          {!isApplyCourse ? (
+            <div className="courseFormField">
+              <label className="fieldLabel" htmlFor="course-duration">
+                Duration (days)
+              </label>
+              <input
+                id="course-duration"
+                className="courseInput courseInputNarrow"
+                value={form.durationDays}
+                onChange={(e) => setForm({ ...form, durationDays: Number(e.target.value || 1) })}
+                type="number"
+                min={1}
+              />
+            </div>
+          ) : null}
 
           <div className="courseFormField">
             <label className="fieldLabel" htmlFor="course-progression">
@@ -886,25 +907,6 @@ export default function CoursesPage({
               type="number"
               min={0}
             />
-          </div>
-
-          <div className="courseFormField">
-            <span className="fieldLabel" id="course-enroll-label">
-              How students enroll
-            </span>
-            <p className="fieldHint">Subscribe uses billing packages (web admin → Billing & combos). Apply and purchase use their own flows in the app.</p>
-            <select
-              id="course-enrollment"
-              className="courseSelect"
-              aria-labelledby="course-enroll-label"
-              value={form.enrollmentType}
-              onChange={(e) => setForm({ ...form, enrollmentType: e.target.value })}
-            >
-              <option value="free">Join Free</option>
-              <option value="apply">Apply</option>
-              <option value="purchase">Purchase</option>
-              <option value="subscribe">Subscribe</option>
-            </select>
           </div>
 
           {isApplyCourse ? (

@@ -795,8 +795,15 @@ router.post('/razorpay/create-billing-order', auth, requireRole('Student', 'Lab'
     const course = db
       .prepare('SELECT id, enrollment_type, course_status, is_published, name FROM courses WHERE id = ?')
       .get(cid);
-    if (!course || String(course.enrollment_type || '').toLowerCase() !== 'subscribe') {
+    const enrollmentType = String(course?.enrollment_type || '').toLowerCase();
+    if (!course || (enrollmentType !== 'subscribe' && enrollmentType !== 'apply')) {
       return res.status(400).json({ error: 'Invalid course for billing package' });
+    }
+    if (enrollmentType === 'apply' && kind !== 'renewal') {
+      return res.status(400).json({ error: 'Apply courses can only use renewal packages' });
+    }
+    if (enrollmentType !== 'subscribe' && kind === 'subscription') {
+      return res.status(400).json({ error: 'Subscription packages are only for Subscribe courses' });
     }
     if (!course.is_published || (course.course_status && course.course_status !== 'Active')) {
       return res.status(400).json({ error: 'Course is not available' });

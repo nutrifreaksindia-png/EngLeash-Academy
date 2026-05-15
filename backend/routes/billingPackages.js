@@ -9,6 +9,20 @@ function rowToPkg(r) {
   return { ...r, is_active: !!r.is_active };
 }
 
+function validateCoursePackageKind(course, kind) {
+  const enrollmentType = String(course?.enrollment_type || 'free').toLowerCase();
+  if (enrollmentType === 'free' || enrollmentType === 'purchase') {
+    return { ok: false, error: 'Packages are not applicable to Join Free or Purchase courses' };
+  }
+  if (enrollmentType === 'apply' && kind !== 'renewal') {
+    return { ok: false, error: 'Apply courses can only use renewal packages' };
+  }
+  if (enrollmentType === 'subscribe' && kind !== 'subscription' && kind !== 'renewal') {
+    return { ok: false, error: 'Subscribe courses can use subscription or renewal packages' };
+  }
+  return { ok: true };
+}
+
 router.get('/combos', auth, requireRole('Admin'), (req, res) => {
   const combos = db.prepare('SELECT * FROM course_combos ORDER BY id DESC').all();
   const membersStmt = db.prepare('SELECT course_id FROM course_combo_members WHERE combo_id = ? ORDER BY id');
@@ -109,11 +123,13 @@ router.get('/admin/course/:courseId/packages', auth, requireRole('Admin'), (req,
 
 router.post('/admin/course/:courseId/packages', auth, requireRole('Admin'), (req, res) => {
   const courseId = Number(req.params.courseId);
-  const c = db.prepare('SELECT id FROM courses WHERE id = ?').get(courseId);
+  const c = db.prepare('SELECT id, enrollment_type FROM courses WHERE id = ?').get(courseId);
   if (!c) return res.status(404).json({ error: 'Course not found' });
   const { packageKind, durationUnit, durationCount, feeInr, discountInr, sortOrder, isActive } = req.body || {};
   const kind = String(packageKind || '').toLowerCase();
   if (kind !== 'subscription' && kind !== 'renewal') return res.status(400).json({ error: 'packageKind must be subscription or renewal' });
+  const eligibility = validateCoursePackageKind(c, kind);
+  if (!eligibility.ok) return res.status(400).json({ error: eligibility.error });
   const unit = String(durationUnit || '').toLowerCase();
   if (!['day', 'month', 'year'].includes(unit)) return res.status(400).json({ error: 'durationUnit must be day, month, or year' });
   const count = Number(durationCount);
@@ -143,6 +159,11 @@ router.put('/admin/packages/:id', auth, requireRole('Admin'), (req, res) => {
   const kind = packageKind != null ? String(packageKind).toLowerCase() : null;
   if (kind != null && kind !== 'subscription' && kind !== 'renewal') {
     return res.status(400).json({ error: 'packageKind must be subscription or renewal' });
+  }
+  if (String(row.scope || '') === 'course') {
+    const c = db.prepare('SELECT id, enrollment_type FROM courses WHERE id = ?').get(row.course_id);
+    const eligibility = validateCoursePackageKind(c, kind || row.package_kind);
+    if (!eligibility.ok) return res.status(400).json({ error: eligibility.error });
   }
   const unit = durationUnit != null ? String(durationUnit).toLowerCase() : null;
   if (unit != null && !['day', 'month', 'year'].includes(unit)) {
@@ -224,14 +245,19 @@ router.get('/public/course/:courseId', (req, res) => {
   const course = db.prepare('SELECT id, enrollment_type FROM courses WHERE id = ? AND is_published = 1').get(courseId);
   if (!course) return res.status(404).json({ error: 'Course not found' });
   const ent = String(course.enrollment_type || '').toLowerCase();
-  if (ent !== 'subscribe') return res.status(400).json({ error: 'Course does not support subscription packages' });
+  if (ent !== 'subscribe' && ent !== 'apply') {
+    return res.status(400).json({ error: 'Course does not support billing packages' });
+  }
 
-  const subs = db
-    .prepare(
-      `SELECT id, scope, package_kind, duration_unit, duration_count, fee_inr, discount_inr, sort_order
-       FROM billing_packages WHERE scope='course' AND course_id=? AND package_kind='subscription' AND is_active=1 ORDER BY sort_order,id`,
-    )
-    .all(courseId);
+  const subs =
+    ent === 'subscribe'
+      ? db
+          .prepare(
+            `SELECT id, scope, package_kind, duration_unit, duration_count, fee_inr, discount_inr, sort_order
+             FROM billing_packages WHERE scope='course' AND course_id=? AND package_kind='subscription' AND is_active=1 ORDER BY sort_order,id`,
+          )
+          .all(courseId)
+      : [];
 
   const rens = db
     .prepare(
