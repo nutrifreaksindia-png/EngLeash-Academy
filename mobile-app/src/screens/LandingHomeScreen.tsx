@@ -18,6 +18,7 @@ import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { API_BASE } from '../config';
+import { alertApplyPaymentError, payApplyDueWithRazorpay } from '../payments/razorpayApplyBilling';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -34,6 +35,12 @@ export type PublicCourse = {
   fee_inr?: number;
   discount_inr?: number;
   enrollment_type?: string;
+  apply_registration_fee_inr?: number;
+  apply_single_payment_discount_inr?: number;
+  apply_installment_count?: number;
+  apply_installment_gap_days?: number;
+  apply_grace_days?: number;
+  apply_enquiry_enabled?: boolean | number;
   enrolled?: boolean;
 };
 
@@ -78,6 +85,45 @@ function primaryCta(typeRaw?: string) {
   return { label: 'Join Free', kind: 'free' as const };
 }
 
+function localYmd(value?: string | null) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
+function startDateForBatch(batch: OpenBatch) {
+  return batch.actual_start_date || batch.planned_start_date || null;
+}
+
+function allowedApplyPlansForBatch(batch: OpenBatch) {
+  const startYmd = startDateForBatch(batch);
+  if (!startYmd) return ['single_payment', 'first_installment'] as const;
+  const today = localYmd(new Date().toISOString()) || startYmd;
+  const startMs = new Date(`${startYmd}T00:00:00`).getTime();
+  const todayMs = new Date(`${today}T00:00:00`).getTime();
+  const days = Math.floor((startMs - todayMs) / (24 * 60 * 60 * 1000));
+  return days > 7
+    ? (['registration', 'single_payment', 'first_installment'] as const)
+    : (['single_payment', 'first_installment'] as const);
+}
+
+function applyPlanLabel(plan: 'registration' | 'single_payment' | 'first_installment') {
+  if (plan === 'registration') return 'Registration fee';
+  if (plan === 'single_payment') return 'Single payment';
+  return 'First installment';
+}
+
+function applyPlanAmount(course: PublicCourse, plan: 'registration' | 'single_payment' | 'first_installment') {
+  const total = Math.max(0, Number(course.fee_inr || 0));
+  const registration = Math.min(total, Number(course.apply_registration_fee_inr ?? 999));
+  const singleDiscount = Math.max(0, Number(course.apply_single_payment_discount_inr || 0));
+  const installmentCount = Math.max(1, Number(course.apply_installment_count || 2));
+  if (plan === 'registration') return registration;
+  if (plan === 'single_payment') return Math.max(0, total - singleDiscount);
+  return Math.ceil((total * 100) / installmentCount) / 100;
+}
+
 export default function LandingHomeScreen({ navigation, route }: any) {
   function formatDateFriendly(value: string | null | undefined) {
     if (!value) return '—';
@@ -95,6 +141,7 @@ export default function LandingHomeScreen({ navigation, route }: any) {
   const [applyCourse, setApplyCourse] = useState<PublicCourse | null>(null);
   const [openBatches, setOpenBatches] = useState<OpenBatch[]>([]);
   const [openBatchesLoading, setOpenBatchesLoading] = useState(false);
+  const [applyBusyKey, setApplyBusyKey] = useState<string | null>(null);
   const applyResumeKeyRef = useRef<string | null>(null);
   const subscribeResumeKeyRef = useRef<string | null>(null);
 
@@ -236,16 +283,41 @@ export default function LandingHomeScreen({ navigation, route }: any) {
     openApplyModalForCourse(course);
   };
 
-  async function applyToBatch(batchId: number) {
+  async function applyToBatch(batch: OpenBatch, selectedPlan: 'registration' | 'single_payment' | 'first_installment') {
     if (!applyCourse) return;
+    if (!user) return;
+    const busyKey = `${batch.id}:${selectedPlan}`;
+    setApplyBusyKey(busyKey);
     try {
-      await api.post('/enrollments/apply-batch', { course_id: applyCourse.id, batch_id: batchId });
-      Alert.alert('Application sent', 'Your batch application was submitted.');
+      const result = await payApplyDueWithRazorpay({
+        courseId: applyCourse.id,
+        batchId: batch.id,
+        selectedPlan,
+        userEmail: user.email,
+        userName: user.name,
+        userMobileDigits: user.mobile_number ?? undefined,
+        checkoutTitle: `${applyCourse.name} — ${applyPlanLabel(selectedPlan)}`,
+      });
+      if (!result?.ok) return;
+      Alert.alert('Application sent', 'Payment successful. Your application is now pending review.');
       setApplyCourse(null);
       setOpenBatches([]);
       refreshUser();
+      load();
     } catch (e: any) {
-      Alert.alert('Apply', e?.message || 'Could not submit application');
+      alertApplyPaymentError(e);
+    } finally {
+      setApplyBusyKey(null);
+    }
+  }
+
+  async function sendEnquiry(batchId: number) {
+    if (!applyCourse) return;
+    try {
+      await api.post('/payments/apply/enquiries', { course_id: applyCourse.id, batch_id: batchId });
+      Alert.alert('Enquiry sent', 'Your callback request has been shared with the academy team.');
+    } catch (e: any) {
+      Alert.alert('Enquiry', e?.message || 'Could not send enquiry');
     }
   }
 
@@ -422,6 +494,7 @@ export default function LandingHomeScreen({ navigation, route }: any) {
             ) : (
               <ScrollView style={styles.batchListScroll}>
                 {openBatches.map((b) => {
+                  const allowedPlans = allowedApplyPlansForBatch(b);
                   let sched = {};
                   try {
                     sched = b.training_schedule_json ? JSON.parse(b.training_schedule_json) : {};
@@ -431,7 +504,7 @@ export default function LandingHomeScreen({ navigation, route }: any) {
                   const days = Array.isArray((sched as any).daysOfWeek) ? (sched as any).daysOfWeek.join(', ') : '—';
                   const timing = (sched as any).startTime && (sched as any).endTime ? `${(sched as any).startTime}-${(sched as any).endTime}` : '—';
                   return (
-                    <TouchableOpacity key={b.id} style={styles.batchCard} onPress={() => void applyToBatch(b.id)}>
+                    <View key={b.id} style={styles.batchCard}>
                       <Text style={styles.batchCardTitle}>
                         Batch {b.batch_number || b.id} - {b.title || b.name}
                       </Text>
@@ -448,7 +521,30 @@ export default function LandingHomeScreen({ navigation, route }: any) {
                       ) : (
                         <Text style={styles.batchMeta}>Expected start: {formatDateFriendly(b.planned_start_date)}</Text>
                       )}
-                    </TouchableOpacity>
+                      <Text style={styles.batchPlanHint}>Choose a payment option to apply:</Text>
+                      <View style={styles.batchPlanRow}>
+                        {allowedPlans.map((plan) => {
+                          const busy = applyBusyKey === `${b.id}:${plan}`;
+                          return (
+                            <TouchableOpacity
+                              key={plan}
+                              style={[styles.batchPlanBtn, busy && styles.batchPlanBtnDisabled]}
+                              disabled={!!applyBusyKey}
+                              onPress={() => void applyToBatch(b, plan)}
+                            >
+                              <Text style={styles.batchPlanBtnText}>
+                                {busy ? 'Opening…' : `${applyPlanLabel(plan)} · ${formatInr(applyPlanAmount(applyCourse, plan))}`}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                      {applyCourse?.apply_enquiry_enabled === false || applyCourse?.apply_enquiry_enabled === 0 ? null : (
+                        <TouchableOpacity style={styles.batchEnquiryBtn} onPress={() => void sendEnquiry(b.id)}>
+                          <Text style={styles.batchEnquiryText}>Enquiry / Request callback</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
                   );
                 })}
               </ScrollView>
@@ -547,4 +643,23 @@ const styles = StyleSheet.create({
   },
   batchCardTitle: { fontSize: 14, fontWeight: '700', color: '#111827' },
   batchMeta: { fontSize: 12, color: '#334155', marginTop: 2 },
+  batchPlanHint: { marginTop: 10, fontSize: 12, color: '#475569', fontWeight: '700' },
+  batchPlanRow: { marginTop: 8, gap: 8 },
+  batchPlanBtn: {
+    backgroundColor: BRAND_RED,
+    borderRadius: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+  },
+  batchPlanBtnDisabled: { opacity: 0.6 },
+  batchPlanBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  batchEnquiryBtn: {
+    marginTop: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: BRAND_BLUE,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+  },
+  batchEnquiryText: { color: BRAND_BLUE, fontSize: 12, fontWeight: '700', textAlign: 'center' },
 });

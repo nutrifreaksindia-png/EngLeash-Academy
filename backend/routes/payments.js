@@ -17,12 +17,25 @@ const {
 const {
   ensurePaymentLedgerForCourseOrder,
   ensurePaymentLedgerForBillingOrder,
+  ensureApplyDuePaymentRecord,
   getInvoiceBundleByPaymentId,
   getPaymentRecordById,
   getPaymentRecordForUser,
   listPaymentRecordsForAdmin,
   listPaymentRecordsForUser,
 } = require('../lib/paymentRecords');
+const {
+  allowedInitialApplyPlans,
+  createApplyEnquiry,
+  createOrReuseInitialProfile,
+  dueAmountToCollectNow,
+  loadApplyBatch,
+  loadApplyCourse,
+  loadDueItemWithProfile,
+  listApplyBillingProfilesForAdmin,
+  listApplyBillingProfilesForUser,
+  settleDueItem,
+} = require('../lib/applyBilling');
 const { streamInvoicePdf } = require('../lib/invoicePdf');
 
 const router = express.Router();
@@ -317,6 +330,301 @@ function verifyPaymentSignature(orderId, paymentId, signature) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+function batchContainsCourse(batchId, courseId) {
+  const batch = db.prepare('SELECT id, course_id, enrollment_open_status FROM batches WHERE id = ?').get(batchId);
+  if (!batch) return null;
+  const matches =
+    Number(batch.course_id) === Number(courseId) ||
+    db
+      .prepare('SELECT 1 FROM batch_courses WHERE batch_id = ? AND course_id = ?')
+      .get(batchId, courseId);
+  if (!matches) return null;
+  return batch;
+}
+
+function createRazorpayApplyDueOrder({ clientPkg, userId, billingProfileId, dueItemId, amountPaise }) {
+  const receipt = `ad${dueItemId}_u${userId}_${Date.now()}`.slice(0, 40);
+  return clientPkg.instance.orders.create({
+    amount: amountPaise,
+    currency: 'INR',
+    receipt,
+    notes: {
+      user_id: String(userId),
+      billing_profile_id: String(billingProfileId),
+      due_item_id: String(dueItemId),
+    },
+  });
+}
+
+function tryMarkApplyDueOrderPaid(razorpayOrderId, paymentId, amountPaiseFromPayment, paidAtIso = new Date().toISOString()) {
+  const row = db.prepare('SELECT * FROM razorpay_apply_due_orders WHERE razorpay_order_id = ?').get(razorpayOrderId);
+  if (!row) return { ok: false, reason: 'unknown_order' };
+  const dueRow = loadDueItemWithProfile(row.due_item_id);
+  if (!dueRow) return { ok: false, reason: 'missing_due' };
+  const expectedAmountPaise = dueAmountToCollectNow(dueRow, paidAtIso);
+  if (row.status === 'paid') {
+    const payment = ensureApplyDuePaymentRecord({
+      dueRow: loadDueItemWithProfile(row.due_item_id) || dueRow,
+      amountPaise: expectedAmountPaise,
+      paymentSource: 'razorpay',
+      gateway: 'razorpay',
+      gatewayOrderId: row.razorpay_order_id,
+      gatewayPaymentId: row.payment_id || paymentId,
+      sourceOrderTable: 'razorpay_apply_due_orders',
+      sourceOrderRowId: Number(row.id),
+      paidAtIso,
+    });
+    return { ok: true, duplicate: true, payment };
+  }
+
+  if (Number(expectedAmountPaise) !== Number(amountPaiseFromPayment)) {
+    return { ok: false, reason: 'amount_mismatch' };
+  }
+
+  const tx = db.transaction(() => {
+    const updated = db.prepare(
+      `UPDATE razorpay_apply_due_orders
+       SET status = 'paid', payment_id = ?, updated_at = datetime('now')
+       WHERE razorpay_order_id = ? AND status = 'created'`,
+    ).run(paymentId, razorpayOrderId);
+    if (updated.changes === 0) return false;
+
+    settleDueItem({
+      dueItemId: Number(row.due_item_id),
+      amountPaise: Number(expectedAmountPaise),
+      paidAtIso,
+      sourceMeta: {
+        gateway: 'razorpay',
+        razorpayOrderId,
+        paymentId,
+      },
+    });
+
+    return ensureApplyDuePaymentRecord({
+      dueRow: loadDueItemWithProfile(row.due_item_id),
+      amountPaise: expectedAmountPaise,
+      paymentSource: 'razorpay',
+      gateway: 'razorpay',
+      gatewayOrderId: row.razorpay_order_id,
+      gatewayPaymentId: paymentId,
+      sourceOrderTable: 'razorpay_apply_due_orders',
+      sourceOrderRowId: Number(row.id),
+      paidAtIso,
+    });
+  });
+
+  try {
+    const payment = tx();
+    return payment ? { ok: true, payment } : { ok: true, duplicate: true };
+  } catch (error) {
+    if (String(error?.message || '').includes('UNIQUE')) {
+      return { ok: true, duplicate: true };
+    }
+    throw error;
+  }
+}
+
+router.get('/apply/my', auth, requireRole('Student', 'Lab', 'Trainer', 'Admin'), (req, res) => {
+  res.json(listApplyBillingProfilesForUser(req.user.id));
+});
+
+router.get('/admin/apply-billing', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
+  res.json(
+    listApplyBillingProfilesForAdmin({
+      search: req.query?.search || '',
+      status: req.query?.status || '',
+    }),
+  );
+});
+
+router.post('/apply/enquiries', auth, requireRole('Student', 'Lab'), (req, res) => {
+  const courseId = Number(req.body?.course_id);
+  const batchId = Number(req.body?.batch_id);
+  if (!Number.isFinite(courseId) || !Number.isFinite(batchId)) {
+    return res.status(400).json({ error: 'course_id and batch_id are required' });
+  }
+  const course = loadApplyCourse(courseId);
+  if (!course || String(course.enrollment_type || '').toLowerCase() !== 'apply') {
+    return res.status(400).json({ error: 'This course does not use the apply revenue flow' });
+  }
+  if (!course.apply_enquiry_enabled) {
+    return res.status(409).json({ error: 'Enquiries are disabled for this course' });
+  }
+  const batch = batchContainsCourse(batchId, courseId);
+  if (!batch) return res.status(404).json({ error: 'Batch not found for course' });
+  const enquiryId = createApplyEnquiry({
+    userId: req.user.id,
+    courseId,
+    batchId,
+    noteText: req.body?.note || null,
+  });
+  res.status(201).json({ ok: true, enquiryId });
+});
+
+router.post('/razorpay/create-apply-order', auth, requireRole('Student', 'Lab'), async (req, res) => {
+  const clientPkg = getRazorpayClient();
+  if (!clientPkg) return res.status(503).json({ error: 'Payments are not configured on the server' });
+
+  const dueItemId = req.body?.due_item_id == null || req.body.due_item_id === '' ? null : Number(req.body.due_item_id);
+  let dueRow = null;
+
+  if (Number.isFinite(dueItemId)) {
+    dueRow = loadDueItemWithProfile(dueItemId);
+    if (!dueRow) return res.status(404).json({ error: 'Due item not found' });
+    if (Number(dueRow.user_id) !== Number(req.user.id)) {
+      return res.status(403).json({ error: 'This due item does not belong to your account' });
+    }
+    if (String(dueRow.due_status || '').toLowerCase() === 'paid') {
+      return res.status(409).json({ error: 'This due item is already settled' });
+    }
+  } else {
+    const courseId = Number(req.body?.course_id);
+    const batchId = Number(req.body?.batch_id);
+    const selectedPlan = String(req.body?.selected_plan || '').trim().toLowerCase();
+    if (!Number.isFinite(courseId) || !Number.isFinite(batchId) || !selectedPlan) {
+      return res.status(400).json({ error: 'course_id, batch_id and selected_plan are required' });
+    }
+
+    const course = loadApplyCourse(courseId);
+    if (!course) return res.status(404).json({ error: 'Course not found' });
+    if (!course.is_published || String(course.course_status || 'Active') !== 'Active') {
+      return res.status(400).json({ error: 'Course is not available' });
+    }
+    if (String(course.enrollment_type || '').toLowerCase() !== 'apply') {
+      return res.status(400).json({ error: 'This course does not use batch applications' });
+    }
+    if (userHasCourseAccess(req.user.id, courseId)) {
+      return res.status(409).json({ error: 'You already have active access to this course' });
+    }
+
+    const batchMeta = batchContainsCourse(batchId, courseId);
+    if (!batchMeta) return res.status(404).json({ error: 'Batch not found for course' });
+    if ((batchMeta.enrollment_open_status || 'closed') !== 'open') {
+      return res.status(409).json({ error: 'Batch is currently closed for applications' });
+    }
+    const batch = loadApplyBatch(batchId) || batchMeta;
+    const allowedPlans = allowedInitialApplyPlans(batch);
+    if (!allowedPlans.includes(selectedPlan)) {
+      return res.status(400).json({ error: 'Selected payment option is not available for this batch timing' });
+    }
+
+    try {
+      const prepared = createOrReuseInitialProfile({
+        userId: req.user.id,
+        course,
+        batch,
+        selectedPlan,
+      });
+      dueRow = loadDueItemWithProfile(prepared.initialDue.id);
+    } catch (error) {
+      return res.status(409).json({ error: error.message || 'Could not prepare apply billing' });
+    }
+  }
+
+  const amountPaise = dueAmountToCollectNow(dueRow);
+  if (amountPaise < 100) {
+    return res.status(400).json({ error: 'Payable amount must be at least Rs. 1' });
+  }
+
+  try {
+    const order = await createRazorpayApplyDueOrder({
+      clientPkg,
+      userId: req.user.id,
+      billingProfileId: Number(dueRow.billing_profile_id),
+      dueItemId: Number(dueRow.id),
+      amountPaise,
+    });
+    db.prepare(
+      `INSERT INTO razorpay_apply_due_orders (
+        razorpay_order_id, user_id, billing_profile_id, due_item_id, amount_paise, currency, status, payment_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'INR', 'created', NULL, datetime('now'), datetime('now'))`,
+    ).run(order.id, req.user.id, Number(dueRow.billing_profile_id), Number(dueRow.id), amountPaise);
+    res.status(201).json({
+      orderId: order.id,
+      amount: amountPaise,
+      currency: 'INR',
+      keyId: clientPkg.keyId,
+      courseName: dueRow.course_name || 'EngLeash Academy',
+      paymentLabel: dueRow.label_text || 'Apply course payment',
+      dueItemId: Number(dueRow.id),
+      billingProfileId: Number(dueRow.billing_profile_id),
+    });
+  } catch (error) {
+    res.status(502).json({ error: error?.message || 'Could not create apply payment order' });
+  }
+});
+
+router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
+  const dueItemId = Number(req.params.dueItemId);
+  const dueRow = loadDueItemWithProfile(dueItemId);
+  if (!dueRow) return res.status(404).json({ error: 'Due item not found' });
+  if (String(dueRow.due_status || '').toLowerCase() === 'paid') {
+    return res.status(409).json({ error: 'This due item is already settled' });
+  }
+
+  const paidAtIso = req.body?.paidAt ? new Date(req.body.paidAt).toISOString() : new Date().toISOString();
+  const expectedAmountPaise = dueAmountToCollectNow(dueRow, paidAtIso);
+  const bodyAmountPaise =
+    req.body?.amountPaise != null
+      ? Number(req.body.amountPaise)
+      : req.body?.amountInr != null
+        ? Math.round(Number(req.body.amountInr) * 100)
+        : expectedAmountPaise;
+  if (Number(bodyAmountPaise) !== Number(expectedAmountPaise)) {
+    return res.status(400).json({ error: `This due requires Rs. ${(expectedAmountPaise / 100).toFixed(2)}` });
+  }
+
+  const tx = db.transaction(() => {
+    const entry = db.prepare(
+      `INSERT INTO manual_apply_due_entries (
+        due_item_id, billing_profile_id, user_id, amount_paise, currency, reference_text, note_text, recorded_by, paid_at, created_at
+      ) VALUES (?, ?, ?, ?, 'INR', ?, ?, ?, ?, datetime('now'))`,
+    ).run(
+      dueItemId,
+      Number(dueRow.billing_profile_id),
+      Number(dueRow.user_id),
+      expectedAmountPaise,
+      req.body?.referenceText || null,
+      req.body?.noteText || null,
+      req.user.id,
+      paidAtIso,
+    );
+
+    settleDueItem({
+      dueItemId,
+      amountPaise: expectedAmountPaise,
+      paidAtIso,
+      sourceMeta: {
+        gateway: 'manual',
+        referenceText: req.body?.referenceText || null,
+        noteText: req.body?.noteText || null,
+        recordedBy: req.user.id,
+      },
+    });
+
+    return ensureApplyDuePaymentRecord({
+      dueRow: loadDueItemWithProfile(dueItemId),
+      amountPaise: expectedAmountPaise,
+      paymentSource: 'cash_manual',
+      gateway: 'manual',
+      gatewayOrderId: `manual_order_${entry.lastInsertRowid}`,
+      gatewayPaymentId: `manual_payment_${entry.lastInsertRowid}`,
+      manualReference: req.body?.referenceText || null,
+      manualRecordedBy: req.user.id,
+      sourceOrderTable: 'manual_apply_due_entries',
+      sourceOrderRowId: Number(entry.lastInsertRowid),
+      paidAtIso,
+    });
+  });
+
+  try {
+    const payment = tx();
+    res.status(201).json({ ok: true, payment });
+  } catch (error) {
+    res.status(400).json({ error: error?.message || 'Could not record manual payment' });
+  }
+});
+
 router.get('/my', auth, requireRole('Student', 'Lab', 'Trainer', 'Admin'), (req, res) => {
   res.json(listPaymentRecordsForUser(req.user.id));
 });
@@ -575,10 +883,11 @@ router.post('/razorpay/verify', auth, requireRole('Student', 'Lab', 'Trainer', '
 
   const courseRow = db.prepare('SELECT * FROM razorpay_course_orders WHERE razorpay_order_id = ?').get(orderId);
   const billRow = db.prepare('SELECT * FROM razorpay_billing_orders WHERE razorpay_order_id = ?').get(orderId);
+  const applyRow = db.prepare('SELECT * FROM razorpay_apply_due_orders WHERE razorpay_order_id = ?').get(orderId);
 
-  if (!courseRow && !billRow) return res.status(404).json({ error: 'Order not found' });
+  if (!courseRow && !billRow && !applyRow) return res.status(404).json({ error: 'Order not found' });
 
-  const row = courseRow || billRow;
+  const row = courseRow || billRow || applyRow;
   if (Number(row.user_id) !== Number(req.user.id)) return res.status(403).json({ error: 'Order does not belong to this account' });
 
   let amountFromGateway = row.amount_paise;
@@ -599,6 +908,17 @@ router.post('/razorpay/verify', auth, requireRole('Student', 'Lab', 'Trainer', '
       return res.status(400).json({ error: 'Paid amount did not match the order' });
     }
     return res.json({ ok: true, duplicate: !!result.duplicate, kind: 'purchase', payment: result.payment || null });
+  }
+
+  if (applyRow) {
+    const result = tryMarkApplyDueOrderPaid(orderId, paymentId, amountFromGateway, paidAtIso);
+    if (!result.ok && result.reason === 'amount_mismatch') {
+      return res.status(400).json({ error: 'Paid amount did not match the order' });
+    }
+    if (!result.ok && result.reason === 'missing_due') {
+      return res.status(404).json({ error: 'Due item no longer exists for this payment order' });
+    }
+    return res.json({ ok: true, duplicate: !!result.duplicate, kind: 'apply_due', payment: result.payment || null });
   }
 
   const br = tryMarkBillingOrderPaid(orderId, paymentId, amountFromGateway, paidAtIso);
@@ -640,7 +960,10 @@ function razorpayWebhookHandler(req, res) {
         const paidAtIso = paymentPaidAtIso(payEntity);
         const r1 = tryMarkOrderPaidAndFulfill(oid, payEntity.id, amt, paidAtIso);
         if (!r1.ok && r1.reason === 'unknown_order') {
-          tryMarkBillingOrderPaid(oid, payEntity.id, amt, paidAtIso);
+          const r2 = tryMarkBillingOrderPaid(oid, payEntity.id, amt, paidAtIso);
+          if (!r2.ok && r2.reason === 'unknown_order') {
+            tryMarkApplyDueOrderPaid(oid, payEntity.id, amt, paidAtIso);
+          }
         }
       }
     }

@@ -78,6 +78,30 @@ function legacyBatchCourseColumnsFromRows(rows) {
   };
 }
 
+function rowsContainApplyCourse(rows) {
+  return (rows || []).some((r) => {
+    const course = db.prepare('SELECT enrollment_type FROM courses WHERE id = ?').get(r.courseId);
+    return String(course?.enrollment_type || '').toLowerCase() === 'apply';
+  });
+}
+
+function batchHasApplyCourses(batchId) {
+  const rows = db.prepare(
+    `SELECT c.enrollment_type
+     FROM batch_courses bc
+     JOIN courses c ON c.id = bc.course_id
+     WHERE bc.batch_id = ?`,
+  ).all(batchId);
+  if (rows.some((row) => String(row.enrollment_type || '').toLowerCase() === 'apply')) return true;
+  const legacy = db.prepare(
+    `SELECT c.enrollment_type
+     FROM batches b
+     JOIN courses c ON c.id = b.course_id
+     WHERE b.id = ? AND NOT EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = b.id)`,
+  ).get(batchId);
+  return String(legacy?.enrollment_type || '').toLowerCase() === 'apply';
+}
+
 function persistBatchCourses(batchId, rows) {
   db.prepare('DELETE FROM batch_courses WHERE batch_id = ?').run(batchId);
   const ins = db.prepare(`
@@ -730,6 +754,11 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   if (!normalizedCourses.ok) return res.status(400).json({ error: normalizedCourses.error });
   const courseCheck = validateBatchCourseRows(normalizedCourses.rows);
   if (!courseCheck.ok) return res.status(400).json({ error: courseCheck.error });
+  if (rowsContainApplyCourse(normalizedCourses.rows) && Array.isArray(students) && students.length > 0) {
+    return res.status(409).json({
+      error: 'Apply-course batches cannot be created with learners already attached. Learners must apply and be approved after payment.',
+    });
+  }
   const legacyCols = legacyBatchCourseColumnsFromRows(normalizedCourses.rows);
 
   const trainerCandidates = Array.isArray(trainers) ? trainers.map(Number).filter((x) => Number.isFinite(x)) : [];
@@ -1057,6 +1086,11 @@ router.post('/:id/members', auth, requireRole('Admin', 'Trainer'), (req, res) =>
   const batchId = Number(req.params.id);
   const studentId = Number(req.body.studentId);
   if (!studentId) return res.status(400).json({ error: 'studentId is required' });
+  if (batchHasApplyCourses(batchId)) {
+    return res.status(409).json({
+      error: 'Add learners to apply-course batches through the paid application approval flow, not the batch roster editor.',
+    });
+  }
   const user = db.prepare("SELECT id, role FROM users WHERE id = ? AND role IN ('Student','Lab')").get(studentId);
   if (!user) return res.status(404).json({ error: 'Student/Lab user not found' });
   db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(batchId, studentId);

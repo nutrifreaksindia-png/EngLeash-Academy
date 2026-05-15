@@ -10,6 +10,19 @@ export default function ApprovalsPage({
   const [batchOptionsByCourse, setBatchOptionsByCourse] = React.useState({});
   const [pickByApplication, setPickByApplication] = React.useState({});
 
+  function formatInrFromPaise(paise) {
+    const value = Number(paise || 0) / 100;
+    return `Rs. ${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+
+  function planLabel(plan) {
+    const raw = String(plan || '').toLowerCase();
+    if (raw === 'registration') return 'Registration fee';
+    if (raw === 'single_payment') return 'Single payment';
+    if (raw === 'first_installment') return 'First installment';
+    return '—';
+  }
+
   React.useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -49,17 +62,28 @@ export default function ApprovalsPage({
         <table>
           <thead>
             <tr>
-              <th>Student</th><th>Course</th><th>Status</th><th>Requested batch</th><th>Requested at</th><th>Change batch</th><th>Action</th>
+              <th>Student</th><th>Course</th><th>Status</th><th>Billing</th><th>Requested batch</th><th>Requested at</th><th>Change batch</th><th>Action</th>
             </tr>
           </thead>
           <tbody>
             {pendingApplications.length === 0 ? (
-              <tr><td colSpan="7" className="muted">No course applications yet.</td></tr>
+              <tr><td colSpan="8" className="muted">No course applications yet.</td></tr>
             ) : pendingApplications.map((app) => (
               <tr key={app.id}>
                 <td>{app.user_name || app.user_email}</td>
                 <td>{app.course_name}</td>
                 <td>{statusLabel(app.status)}</td>
+                <td>
+                  <div>{planLabel(app.billing_selected_plan)}</div>
+                  <div className="muted" style={{ fontSize: '0.82rem' }}>
+                    {app.billing_status ? `Billing: ${app.billing_status}` : 'No billing profile'}
+                  </div>
+                  {app.billing_remaining_balance_paise != null ? (
+                    <div className="muted" style={{ fontSize: '0.82rem' }}>
+                      Balance: {formatInrFromPaise(app.billing_remaining_balance_paise)}
+                    </div>
+                  ) : null}
+                </td>
                 <td>{app.requested_batch_number ? `Batch ${app.requested_batch_number}` : (app.requested_batch_title || (app.batch_id ? `Batch ${app.batch_id}` : '—'))}</td>
                 <td>{app.requested_at || '—'}</td>
                 <td>

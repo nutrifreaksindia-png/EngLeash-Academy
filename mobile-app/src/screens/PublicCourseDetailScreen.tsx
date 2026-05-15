@@ -1,11 +1,12 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import type { PublicCourse } from './LandingHomeScreen';
 import { API_BASE } from '../config';
+import { alertApplyPaymentError, payApplyDueWithRazorpay } from '../payments/razorpayApplyBilling';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -66,12 +67,62 @@ function formatModeLabel(m: string) {
   return s;
 }
 
+type OpenBatch = {
+  id: number;
+  batch_number?: number;
+  title?: string;
+  name?: string;
+  session_type: 'group' | 'one_to_one';
+  duration_days?: number | null;
+  training_schedule_json?: string | null;
+  batch_status?: string;
+  planned_start_date?: string | null;
+  actual_start_date?: string | null;
+  sessions_passed?: number;
+};
+
+function startDateForBatch(batch: OpenBatch) {
+  return batch.actual_start_date || batch.planned_start_date || null;
+}
+
+function allowedApplyPlansForBatch(batch: OpenBatch) {
+  const startYmd = startDateForBatch(batch);
+  if (!startYmd) return ['single_payment', 'first_installment'] as const;
+  const startMs = new Date(`${startYmd}T00:00:00`).getTime();
+  const now = new Date();
+  const todayMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const days = Math.floor((startMs - todayMs) / (24 * 60 * 60 * 1000));
+  return days > 7
+    ? (['registration', 'single_payment', 'first_installment'] as const)
+    : (['single_payment', 'first_installment'] as const);
+}
+
+function applyPlanLabel(plan: 'registration' | 'single_payment' | 'first_installment') {
+  if (plan === 'registration') return 'Registration fee';
+  if (plan === 'single_payment') return 'Single payment';
+  return 'First installment';
+}
+
+function applyPlanAmount(course: PublicCourse, plan: 'registration' | 'single_payment' | 'first_installment') {
+  const total = Math.max(0, Number(course.fee_inr || 0));
+  const registration = Math.min(total, Number(course.apply_registration_fee_inr ?? 999));
+  const singleDiscount = Math.max(0, Number(course.apply_single_payment_discount_inr || 0));
+  const installmentCount = Math.max(1, Number(course.apply_installment_count || 2));
+  if (plan === 'registration') return registration;
+  if (plan === 'single_payment') return Math.max(0, total - singleDiscount);
+  return Math.ceil((total * 100) / installmentCount) / 100;
+}
+
 export default function PublicCourseDetailScreen({ route, navigation }: any) {
   const { courseId, courseName } = route.params;
   const { user, refreshUser } = useAuth();
   const [course, setCourse] = useState<PublicCourse | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [openBatches, setOpenBatches] = useState<OpenBatch[]>([]);
+  const [openBatchesLoading, setOpenBatchesLoading] = useState(false);
+  const [applyModalOpen, setApplyModalOpen] = useState(false);
+  const [applyBusyKey, setApplyBusyKey] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -113,6 +164,22 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
       },
     });
   }, [navigation]);
+
+  const openApplyModal = useCallback(async () => {
+    if (!course) return;
+    setApplyModalOpen(true);
+    setOpenBatches([]);
+    setOpenBatchesLoading(true);
+    try {
+      const data = await api.get(`/enrollments/courses/${course.id}/open-batches`);
+      setOpenBatches(Array.isArray(data?.batches) ? data.batches : []);
+    } catch (e: any) {
+      Alert.alert('Apply', e?.message || 'Could not load open batches');
+      setApplyModalOpen(false);
+    } finally {
+      setOpenBatchesLoading(false);
+    }
+  }, [course]);
 
   const enroll = async (typeOverride?: string) => {
     if (!course) return;
@@ -174,7 +241,18 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
       return;
     }
     if (cta.kind === 'apply') {
-      void enroll('apply');
+      if (!user) {
+        navigation.getParent()?.navigate?.('Account', {
+          screen: 'Signup',
+          params: {
+            redirectAfterSignup: 'apply',
+            courseId: course.id,
+            courseName: course.name,
+          },
+        });
+        return;
+      }
+      await openApplyModal();
       return;
     }
     if (cta.kind === 'purchase') {
@@ -219,6 +297,42 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
     }
     void enroll('free');
   };
+
+  async function applyToBatch(batch: OpenBatch, selectedPlan: 'registration' | 'single_payment' | 'first_installment') {
+    if (!course || !user) return;
+    const busyKey = `${batch.id}:${selectedPlan}`;
+    setApplyBusyKey(busyKey);
+    try {
+      const result = await payApplyDueWithRazorpay({
+        courseId: Number(course.id),
+        batchId: Number(batch.id),
+        selectedPlan,
+        userEmail: user.email,
+        userName: user.name,
+        userMobileDigits: user.mobile_number ?? undefined,
+        checkoutTitle: `${course.name} — ${applyPlanLabel(selectedPlan)}`,
+      });
+      if (!result?.ok) return;
+      Alert.alert('Application sent', 'Payment successful. Your application is now pending review.');
+      setApplyModalOpen(false);
+      refreshUser();
+      load();
+    } catch (error) {
+      alertApplyPaymentError(error);
+    } finally {
+      setApplyBusyKey(null);
+    }
+  }
+
+  async function sendEnquiry(batchId: number) {
+    if (!course) return;
+    try {
+      await api.post('/payments/apply/enquiries', { course_id: course.id, batch_id: batchId });
+      Alert.alert('Enquiry sent', 'Your callback request has been shared with the academy team.');
+    } catch (e: any) {
+      Alert.alert('Enquiry', e?.message || 'Could not send enquiry');
+    }
+  }
 
   return (
     <View style={styles.pageRoot}>
@@ -294,6 +408,63 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
           </TouchableOpacity>
         </View>
       </ScrollView>
+      <Modal visible={applyModalOpen} animationType="slide" transparent onRequestClose={() => setApplyModalOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Apply - {course?.name}</Text>
+            {openBatchesLoading ? <ActivityIndicator color={BRAND_RED} /> : null}
+            {!openBatchesLoading && openBatches.length === 0 ? (
+              <Text style={styles.metaRow}>No open batches currently available for this course.</Text>
+            ) : (
+              <ScrollView style={styles.modalScroll}>
+                {openBatches.map((batch) => {
+                  const plans = allowedApplyPlansForBatch(batch);
+                  return (
+                    <View key={batch.id} style={styles.batchCard}>
+                      <Text style={styles.batchTitle}>
+                        Batch {batch.batch_number || batch.id} - {batch.title || batch.name}
+                      </Text>
+                      <Text style={styles.batchMeta}>Type: {batch.session_type === 'one_to_one' ? '1:1' : 'Group'}</Text>
+                      <Text style={styles.batchMeta}>Duration: {batch.duration_days || '—'} days</Text>
+                      <Text style={styles.batchMeta}>
+                        Start: {batch.actual_start_date || batch.planned_start_date || '—'}
+                      </Text>
+                      <Text style={styles.batchMeta}>Choose a payment option to continue:</Text>
+                      <View style={styles.batchPlanWrap}>
+                        {plans.map((plan) => {
+                          const busyKey = `${batch.id}:${plan}`;
+                          return (
+                            <TouchableOpacity
+                              key={plan}
+                              style={[styles.batchPlanBtn, applyBusyKey === busyKey && styles.batchPlanBtnDisabled]}
+                              disabled={!!applyBusyKey}
+                              onPress={() => void applyToBatch(batch, plan)}
+                            >
+                              <Text style={styles.batchPlanBtnText}>
+                                {applyBusyKey === busyKey
+                                  ? 'Opening…'
+                                  : `${applyPlanLabel(plan)} · ${formatInr(applyPlanAmount(course, plan))}`}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                      {course?.apply_enquiry_enabled === false || course?.apply_enquiry_enabled === 0 ? null : (
+                        <TouchableOpacity style={styles.batchEnquiryBtn} onPress={() => void sendEnquiry(batch.id)}>
+                          <Text style={styles.batchEnquiryText}>Enquiry / Request callback</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            )}
+            <TouchableOpacity style={styles.btnOutline} onPress={() => setApplyModalOpen(false)}>
+              <Text style={styles.btnOutlineText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -332,4 +503,41 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   activeTagText: { color: '#2e7d32', fontWeight: '700', fontSize: 13 },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15,23,42,0.45)',
+    justifyContent: 'center',
+    padding: 16,
+  },
+  modalCard: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 14,
+    maxHeight: '84%',
+  },
+  modalTitle: { fontSize: 16, fontWeight: '700', color: BRAND_BLUE, marginBottom: 10 },
+  modalScroll: { marginBottom: 12 },
+  batchCard: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 10,
+    backgroundColor: '#f8fafc',
+  },
+  batchTitle: { fontSize: 14, fontWeight: '700', color: '#111827' },
+  batchMeta: { fontSize: 12, color: '#334155', marginTop: 4 },
+  batchPlanWrap: { marginTop: 8, gap: 8 },
+  batchPlanBtn: { backgroundColor: BRAND_RED, borderRadius: 8, paddingVertical: 10, paddingHorizontal: 10 },
+  batchPlanBtnDisabled: { opacity: 0.6 },
+  batchPlanBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  batchEnquiryBtn: {
+    marginTop: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: BRAND_BLUE,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+  },
+  batchEnquiryText: { color: BRAND_BLUE, fontSize: 12, fontWeight: '700', textAlign: 'center' },
 });

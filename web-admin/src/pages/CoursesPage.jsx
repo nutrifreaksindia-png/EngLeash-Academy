@@ -27,6 +27,12 @@ const emptyForm = {
   coverPreviewUrl: '',
   /** Curriculum: day_wise = calendar unlock; unlock_all = self-paced access to all lessons in period */
   progressionType: 'unlock_all',
+  applyRegistrationFeeInr: 999,
+  applySinglePaymentDiscountInr: 0,
+  applyInstallmentCount: 2,
+  applyInstallmentGapDays: 30,
+  applyGraceDays: 7,
+  applyEnquiryEnabled: true,
 };
 
 function enrollmentLabel(value) {
@@ -210,6 +216,12 @@ export default function CoursesPage({
       discountInr: c.discount_inr || 0,
       courseStatus: c.course_status || 'Active',
       enrollmentType: c.enrollment_type || 'free',
+      applyRegistrationFeeInr: c.apply_registration_fee_inr ?? 999,
+      applySinglePaymentDiscountInr: c.apply_single_payment_discount_inr ?? 0,
+      applyInstallmentCount: c.apply_installment_count ?? 2,
+      applyInstallmentGapDays: c.apply_installment_gap_days ?? 30,
+      applyGraceDays: c.apply_grace_days ?? 7,
+      applyEnquiryEnabled: c.apply_enquiry_enabled !== 0 && c.apply_enquiry_enabled !== false,
       isPublished: c.is_published !== 0 && c.is_published !== false,
       coverBlob: null,
       coverPreviewUrl: resolveCoverPreviewUrl(c.image_url),
@@ -249,12 +261,20 @@ export default function CoursesPage({
       discountInr: c.discount_inr || 0,
       courseStatus: c.course_status || 'Active',
       enrollmentType: c.enrollment_type || 'free',
+      applyRegistrationFeeInr: c.apply_registration_fee_inr ?? 999,
+      applySinglePaymentDiscountInr: c.apply_single_payment_discount_inr ?? 0,
+      applyInstallmentCount: c.apply_installment_count ?? 2,
+      applyInstallmentGapDays: c.apply_installment_gap_days ?? 30,
+      applyGraceDays: c.apply_grace_days ?? 7,
+      applyEnquiryEnabled: c.apply_enquiry_enabled !== 0 && c.apply_enquiry_enabled !== false,
       isPublished: c.is_published !== 0 && c.is_published !== false,
       coverBlob: null,
       coverPreviewUrl: resolveCoverPreviewUrl(c.image_url),
       progressionType: String(c.progression_type || '').toLowerCase() === 'day_wise' ? 'day_wise' : 'unlock_all',
     });
   }
+
+  const isApplyCourse = form.enrollmentType === 'apply';
 
   function setHighlightLine(index, value) {
     setForm((prev) => {
@@ -485,6 +505,22 @@ export default function CoursesPage({
                 <dd>INR {viewCourse.discount_inr ?? 0}</dd>
                 <dt>Enrollment</dt>
                 <dd>{enrollmentLabel(viewCourse.enrollment_type)}</dd>
+                {String(viewCourse.enrollment_type || '').toLowerCase() === 'apply' ? (
+                  <>
+                    <dt>Registration fee</dt>
+                    <dd>INR {viewCourse.apply_registration_fee_inr ?? 999}</dd>
+                    <dt>Single-payment discount</dt>
+                    <dd>INR {viewCourse.apply_single_payment_discount_inr ?? 0}</dd>
+                    <dt>Installments</dt>
+                    <dd>
+                      {viewCourse.apply_installment_count ?? 2} every {viewCourse.apply_installment_gap_days ?? 30} day(s)
+                    </dd>
+                    <dt>Grace period</dt>
+                    <dd>{viewCourse.apply_grace_days ?? 7} day(s)</dd>
+                    <dt>Enquiry button</dt>
+                    <dd>{viewCourse.apply_enquiry_enabled !== 0 && viewCourse.apply_enquiry_enabled !== false ? 'Enabled' : 'Disabled'}</dd>
+                  </>
+                ) : null}
                 <dt>Status</dt>
                 <dd>{viewCourse.course_status || 'Active'}</dd>
                 <dt>Visibility</dt>
@@ -791,6 +827,109 @@ export default function CoursesPage({
               <option value="subscribe">Subscribe</option>
             </select>
           </div>
+
+          {isApplyCourse ? (
+            <>
+              <div className="courseFormField">
+                <span className="fieldLabel">Apply billing rules</span>
+                <p className="fieldHint">
+                  Registration is used before the 7-day window. Single payment discount, installment count, day gap, and grace period
+                  drive the apply revenue flow.
+                </p>
+              </div>
+
+              <div className="courseFormField">
+                <label className="fieldLabel" htmlFor="course-apply-registration-fee">
+                  Registration fee (INR)
+                </label>
+                <input
+                  id="course-apply-registration-fee"
+                  className="courseInput courseInputNarrow"
+                  value={form.applyRegistrationFeeInr}
+                  onChange={(e) => setForm({ ...form, applyRegistrationFeeInr: Number(e.target.value || 0) })}
+                  type="number"
+                  min={0}
+                />
+              </div>
+
+              <div className="courseFormField">
+                <label className="fieldLabel" htmlFor="course-apply-single-discount">
+                  Single-payment discount (INR)
+                </label>
+                <input
+                  id="course-apply-single-discount"
+                  className="courseInput courseInputNarrow"
+                  value={form.applySinglePaymentDiscountInr}
+                  onChange={(e) => setForm({ ...form, applySinglePaymentDiscountInr: Number(e.target.value || 0) })}
+                  type="number"
+                  min={0}
+                />
+              </div>
+
+              <div className="courseFormField">
+                <label className="fieldLabel" htmlFor="course-apply-installment-count">
+                  Installment count
+                </label>
+                <input
+                  id="course-apply-installment-count"
+                  className="courseInput courseInputNarrow"
+                  value={form.applyInstallmentCount}
+                  onChange={(e) => setForm({ ...form, applyInstallmentCount: Number(e.target.value || 1) })}
+                  type="number"
+                  min={1}
+                />
+              </div>
+
+              <div className="courseFormField">
+                <label className="fieldLabel" htmlFor="course-apply-gap-days">
+                  Installment gap (days)
+                </label>
+                <input
+                  id="course-apply-gap-days"
+                  className="courseInput courseInputNarrow"
+                  value={form.applyInstallmentGapDays}
+                  onChange={(e) => setForm({ ...form, applyInstallmentGapDays: Number(e.target.value || 0) })}
+                  type="number"
+                  min={0}
+                />
+              </div>
+
+              <div className="courseFormField">
+                <label className="fieldLabel" htmlFor="course-apply-grace-days">
+                  Grace period (days)
+                </label>
+                <input
+                  id="course-apply-grace-days"
+                  className="courseInput courseInputNarrow"
+                  value={form.applyGraceDays}
+                  onChange={(e) => setForm({ ...form, applyGraceDays: Number(e.target.value || 0) })}
+                  type="number"
+                  min={0}
+                />
+              </div>
+
+              <div className="courseFormField">
+                <span className="fieldLabel">Enquiry button</span>
+                <p className="fieldHint">Shows a callback request option in the learner apply flow.</p>
+                <div className="togglePair" role="group" aria-label="Apply enquiry toggle">
+                  <button
+                    type="button"
+                    className={form.applyEnquiryEnabled ? 'toggleBtn toggleBtnOn' : 'toggleBtn toggleBtnOff'}
+                    onClick={() => setForm({ ...form, applyEnquiryEnabled: true })}
+                  >
+                    Enabled
+                  </button>
+                  <button
+                    type="button"
+                    className={!form.applyEnquiryEnabled ? 'toggleBtn toggleBtnOn' : 'toggleBtn toggleBtnOff'}
+                    onClick={() => setForm({ ...form, applyEnquiryEnabled: false })}
+                  >
+                    Disabled
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : null}
 
           <div className="courseFormField">
             <span className="fieldLabel">Status</span>

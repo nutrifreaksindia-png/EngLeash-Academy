@@ -13,6 +13,8 @@ import {
 } from 'react-native';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
+import { useAuth } from '../context/AuthContext';
+import { alertApplyPaymentError, payApplyDueWithRazorpay } from '../payments/razorpayApplyBilling';
 
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
@@ -54,18 +56,47 @@ type PaymentRow = {
   hasInvoice?: boolean;
 };
 
+type ApplyDueRow = {
+  id: number;
+  dueLabel: string;
+  dueDate?: string | null;
+  graceEndDate?: string | null;
+  amountDueNowInr?: number;
+  dueStatus?: string;
+  isInitialDue?: boolean;
+};
+
+type ApplyBillingRow = {
+  id: number;
+  courseName?: string;
+  batchTitle?: string | null;
+  batchNumber?: number | null;
+  selectedPlanLabel?: string;
+  status?: string;
+  remainingBalanceInr?: number;
+  dueItems?: ApplyDueRow[];
+};
+
 export default function PaymentsInvoicesScreen() {
+  const { user, refreshUser } = useAuth();
   const [payments, setPayments] = useState<PaymentRow[]>([]);
+  const [applyProfiles, setApplyProfiles] = useState<ApplyBillingRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [downloadingId, setDownloadingId] = useState<number | null>(null);
+  const [payingDueId, setPayingDueId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const rows = await api.get('/payments/my');
+      const [rows, applyRows] = await Promise.all([
+        api.get('/payments/my'),
+        api.get('/payments/apply/my'),
+      ]);
       setPayments(Array.isArray(rows) ? rows : []);
+      setApplyProfiles(Array.isArray(applyRows) ? applyRows : []);
     } catch {
       setPayments([]);
+      setApplyProfiles([]);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -92,6 +123,28 @@ export default function PaymentsInvoicesScreen() {
     }
   }
 
+  async function payDue(profile: ApplyBillingRow, due: ApplyDueRow) {
+    if (!user || !due?.id) return;
+    setPayingDueId(due.id);
+    try {
+      const result = await payApplyDueWithRazorpay({
+        dueItemId: due.id,
+        userEmail: user.email,
+        userName: user.name,
+        userMobileDigits: user.mobile_number ?? undefined,
+        checkoutTitle: `${profile.courseName || 'Course'} — ${due.dueLabel}`,
+      });
+      if (!result?.ok) return;
+      Alert.alert('Payment successful', 'Your apply-course due has been recorded.');
+      refreshUser();
+      load();
+    } catch (error) {
+      alertApplyPaymentError(error);
+    } finally {
+      setPayingDueId(null);
+    }
+  }
+
   return (
     <View style={styles.root}>
       <ScreenPageTitle title="Payments & Invoices" />
@@ -106,8 +159,43 @@ export default function PaymentsInvoicesScreen() {
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
         >
           <Text style={styles.intro}>
-            View your payment history and download invoice PDFs for course purchases and subscriptions.
+            View your payment history, invoice PDFs, and apply-course due schedules in one place.
           </Text>
+          {applyProfiles.map((profile) => (
+            <View key={`apply-${profile.id}`} style={styles.card}>
+              <View style={styles.rowBetween}>
+                <Text style={styles.title}>{profile.courseName || 'Apply course'}</Text>
+                <View style={styles.statusBadge}>
+                  <Text style={styles.statusText}>{String(profile.status || 'pending').toUpperCase()}</Text>
+                </View>
+              </View>
+              <Text style={styles.meta}>
+                {profile.selectedPlanLabel || 'Apply plan'}
+                {profile.batchTitle ? ` · ${profile.batchTitle}${profile.batchNumber ? ` (#${profile.batchNumber})` : ''}` : ''}
+              </Text>
+              <Text style={styles.detail}>Remaining balance: {formatAmount(profile.remainingBalanceInr, 'INR')}</Text>
+              {(profile.dueItems || []).map((due) => (
+                <View key={due.id} style={styles.dueCard}>
+                  <Text style={styles.dueTitle}>{due.dueLabel}</Text>
+                  <Text style={styles.detail}>Status: {due.dueStatus || 'scheduled'}</Text>
+                  {due.dueDate ? <Text style={styles.detail}>Due on: {formatDate(due.dueDate)}</Text> : null}
+                  {due.graceEndDate ? <Text style={styles.detail}>Grace until: {formatDate(due.graceEndDate)}</Text> : null}
+                  <Text style={styles.detail}>Amount now: {formatAmount(due.amountDueNowInr, 'INR')}</Text>
+                  {due.dueStatus === 'paid' ? null : (
+                    <TouchableOpacity
+                      style={[styles.downloadBtn, payingDueId === due.id && styles.downloadBtnDisabled]}
+                      disabled={payingDueId === due.id}
+                      onPress={() => payDue(profile, due)}
+                    >
+                      <Text style={styles.downloadText}>
+                        {payingDueId === due.id ? 'Opening payment...' : 'Pay this due'}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              ))}
+            </View>
+          ))}
           {payments.map((payment) => (
             <View key={payment.id} style={styles.card}>
               <View style={styles.rowBetween}>
@@ -136,11 +224,11 @@ export default function PaymentsInvoicesScreen() {
               </TouchableOpacity>
             </View>
           ))}
-          {payments.length === 0 ? (
+          {payments.length === 0 && applyProfiles.length === 0 ? (
             <View style={styles.emptyCard}>
               <Text style={styles.emptyTitle}>No payments yet</Text>
               <Text style={styles.emptyText}>
-                Course purchases and subscriptions will appear here with invoice downloads.
+                Course purchases, subscriptions, and apply-course dues will appear here with invoice downloads.
               </Text>
             </View>
           ) : null}
@@ -180,6 +268,13 @@ const styles = StyleSheet.create({
   meta: { marginTop: 6, fontSize: 13, color: '#475569', fontWeight: '600' },
   amount: { marginTop: 12, fontSize: 21, fontWeight: '800', color: BRAND_RED },
   detail: { marginTop: 6, fontSize: 13, color: '#475569', lineHeight: 18 },
+  dueCard: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+  },
+  dueTitle: { fontSize: 14, fontWeight: '800', color: BRAND_BLUE },
   downloadBtn: {
     marginTop: 16,
     backgroundColor: BRAND_BLUE,

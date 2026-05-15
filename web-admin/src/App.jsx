@@ -526,6 +526,12 @@ export default function App() {
           courseStatus: payload.courseStatus,
           enrollmentType: payload.enrollmentType,
           progressionType: payload.progressionType === 'day_wise' ? 'day_wise' : 'unlock_all',
+          applyRegistrationFeeInr: Number(payload.applyRegistrationFeeInr ?? 999),
+          applySinglePaymentDiscountInr: Number(payload.applySinglePaymentDiscountInr ?? 0),
+          applyInstallmentCount: Number(payload.applyInstallmentCount ?? 2),
+          applyInstallmentGapDays: Number(payload.applyInstallmentGapDays ?? 30),
+          applyGraceDays: Number(payload.applyGraceDays ?? 7),
+          applyEnquiryEnabled: payload.applyEnquiryEnabled !== false,
           is_published: payload.isPublished === false ? 0 : 1,
         }),
       });
@@ -559,6 +565,12 @@ export default function App() {
           courseStatus: payload.courseStatus,
           enrollmentType: payload.enrollmentType,
           progressionType: payload.progressionType === 'day_wise' ? 'day_wise' : 'unlock_all',
+          applyRegistrationFeeInr: Number(payload.applyRegistrationFeeInr ?? 999),
+          applySinglePaymentDiscountInr: Number(payload.applySinglePaymentDiscountInr ?? 0),
+          applyInstallmentCount: Number(payload.applyInstallmentCount ?? 2),
+          applyInstallmentGapDays: Number(payload.applyInstallmentGapDays ?? 30),
+          applyGraceDays: Number(payload.applyGraceDays ?? 7),
+          applyEnquiryEnabled: payload.applyEnquiryEnabled !== false,
           is_published: payload.isPublished === false ? 0 : 1,
         }),
       });
@@ -690,11 +702,28 @@ export default function App() {
     return Array.isArray(data) ? data : [];
   }
 
+  async function fetchAdminApplyBilling(filters = {}) {
+    const params = new URLSearchParams();
+    if (filters.search) params.set('search', String(filters.search));
+    if (filters.status) params.set('status', String(filters.status));
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    const data = await apiFetch(`/payments/admin/apply-billing${suffix}`, token);
+    return Array.isArray(data) ? data : [];
+  }
+
   async function openAdminInvoice(paymentId) {
     const data = await apiFetch(`/payments/admin/${paymentId}/invoice-link`, token);
     const url = String(data?.url || '').trim();
     if (!url) throw new Error('Invoice link not available');
     window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
+  async function recordAdminApplyManualPayment(dueItemId, payload = {}) {
+    const data = await apiFetch(`/payments/admin/apply-due/${dueItemId}/manual`, token, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    return data?.payment || null;
   }
 
   async function deleteSubscriptionGrant(grantId) {
@@ -1432,7 +1461,9 @@ export default function App() {
     page = (
       <PaymentsPage
         loadPayments={fetchAdminPayments}
+        loadApplyBilling={fetchAdminApplyBilling}
         openInvoice={openAdminInvoice}
+        recordManualApplyPayment={recordAdminApplyManualPayment}
         pushToast={pushToast}
       />
     );

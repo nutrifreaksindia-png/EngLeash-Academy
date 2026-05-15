@@ -15,7 +15,9 @@ router.get('/', auth, (req, res) => {
     const courses = db.prepare(
       `SELECT id, name, description, image_url, sort_order, is_published, created_at,
               highlights, specifications_html, duration_days, lesson_schedule_json, modes_json, languages_json,
-              fee_inr, discount_inr, course_status, enrollment_type, progression_type
+              fee_inr, discount_inr, course_status, enrollment_type, progression_type,
+              apply_registration_fee_inr, apply_single_payment_discount_inr,
+              apply_installment_count, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
        FROM courses ORDER BY sort_order, id`
     ).all();
     return res.json(courses);
@@ -26,7 +28,9 @@ router.get('/', auth, (req, res) => {
       `
     SELECT c.id, c.name, c.description, c.image_url, c.sort_order, c.is_published, c.created_at,
            c.highlights, c.specifications_html, c.duration_days, c.lesson_schedule_json, c.modes_json, c.languages_json,
-           c.fee_inr, c.discount_inr, c.course_status, c.enrollment_type, c.progression_type
+           c.fee_inr, c.discount_inr, c.course_status, c.enrollment_type, c.progression_type,
+           c.apply_registration_fee_inr, c.apply_single_payment_discount_inr,
+           c.apply_installment_count, c.apply_installment_gap_days, c.apply_grace_days, c.apply_enquiry_enabled
     FROM courses c
     WHERE c.is_published = 1 AND COALESCE(c.course_status, 'Active') = 'Active'
     ORDER BY c.sort_order, c.id
@@ -52,7 +56,9 @@ router.get('/', auth, (req, res) => {
 router.get('/catalog', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), (req, res) => {
   const courses = db.prepare(
     `SELECT id, name, description, image_url, sort_order, highlights, duration_days, modes_json, languages_json,
-            fee_inr, discount_inr, course_status, enrollment_type, progression_type
+            fee_inr, discount_inr, course_status, enrollment_type, progression_type,
+            apply_registration_fee_inr, apply_single_payment_discount_inr,
+            apply_installment_count, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
      FROM courses WHERE is_published = 1 AND COALESCE(course_status, 'Active') = 'Active' ORDER BY sort_order, id`
   ).all();
   const uid = req.user.id;
@@ -112,7 +118,9 @@ router.get('/catalog', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), 
 router.get('/public', (req, res) => {
   const courses = db.prepare(
     `SELECT id, name, description, image_url, sort_order, highlights, duration_days, modes_json, languages_json,
-            fee_inr, discount_inr, course_status, enrollment_type, progression_type
+            fee_inr, discount_inr, course_status, enrollment_type, progression_type,
+            apply_registration_fee_inr, apply_single_payment_discount_inr,
+            apply_installment_count, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
      FROM courses WHERE is_published = 1 AND COALESCE(course_status, 'Active') = 'Active' ORDER BY sort_order, id`
   ).all();
   res.json(courses);
@@ -123,7 +131,9 @@ router.get('/public/:id', (req, res) => {
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid course id' });
   const c = db.prepare(
     `SELECT id, name, description, image_url, sort_order, highlights, duration_days, modes_json, languages_json,
-            fee_inr, discount_inr, course_status, enrollment_type, progression_type, specifications_html
+            fee_inr, discount_inr, course_status, enrollment_type, progression_type, specifications_html,
+            apply_registration_fee_inr, apply_single_payment_discount_inr,
+            apply_installment_count, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
      FROM courses WHERE id = ? AND is_published = 1 AND COALESCE(course_status, 'Active') = 'Active'`
   ).get(id);
   if (!c) return res.status(404).json({ error: 'Course not found' });
@@ -134,7 +144,9 @@ router.get('/:id', auth, (req, res) => {
   const c = db.prepare(`
     SELECT id, name, description, image_url, sort_order, is_published, created_at,
            highlights, specifications_html, duration_days, lesson_schedule_json, modes_json, languages_json,
-           fee_inr, discount_inr, course_status, enrollment_type, progression_type
+           fee_inr, discount_inr, course_status, enrollment_type, progression_type,
+           apply_registration_fee_inr, apply_single_payment_discount_inr,
+           apply_installment_count, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
     FROM courses WHERE id = ?
   `).get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Course not found' });
@@ -151,6 +163,12 @@ router.post('/', auth, requireRole('Admin'), (req, res) => {
     highlights, specificationsHtml, durationDays, lessonSchedule, modes, languages,
     feeInr, discountInr, courseStatus, enrollmentType,
     progressionType,
+    applyRegistrationFeeInr,
+    applySinglePaymentDiscountInr,
+    applyInstallmentCount,
+    applyInstallmentGapDays,
+    applyGraceDays,
+    applyEnquiryEnabled,
     is_published: isPublishedBody,
   } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
@@ -163,8 +181,10 @@ router.post('/', auth, requireRole('Admin'), (req, res) => {
   db.prepare(
     `INSERT INTO courses (
       name, description, image_url, sort_order, is_published, highlights, specifications_html, duration_days, lesson_schedule_json, modes_json, languages_json,
-      fee_inr, discount_inr, course_status, enrollment_type, progression_type
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      fee_inr, discount_inr, course_status, enrollment_type, progression_type,
+      apply_registration_fee_inr, apply_single_payment_discount_inr, apply_installment_count,
+      apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     name || '',
     description || '',
@@ -181,7 +201,13 @@ router.post('/', auth, requireRole('Admin'), (req, res) => {
     discountInr ?? 0,
     courseStatus || 'Active',
     enrollmentType || 'free',
-    progressionType === 'day_wise' ? 'day_wise' : 'unlock_all'
+    progressionType === 'day_wise' ? 'day_wise' : 'unlock_all',
+    applyRegistrationFeeInr ?? 999,
+    applySinglePaymentDiscountInr ?? 0,
+    applyInstallmentCount ?? 2,
+    applyInstallmentGapDays ?? 30,
+    applyGraceDays ?? 7,
+    applyEnquiryEnabled === false || applyEnquiryEnabled === 0 ? 0 : 1
   );
   const row = db.prepare('SELECT * FROM courses WHERE id = last_insert_rowid()').get();
   syncCourseLessonSlots(row.id);
@@ -194,6 +220,12 @@ router.put('/:id', auth, requireRole('Admin'), (req, res) => {
     highlights, specificationsHtml, durationDays, lessonSchedule, modes, languages,
     feeInr, discountInr, courseStatus, enrollmentType,
     progressionType,
+    applyRegistrationFeeInr,
+    applySinglePaymentDiscountInr,
+    applyInstallmentCount,
+    applyInstallmentGapDays,
+    applyGraceDays,
+    applyEnquiryEnabled,
   } = req.body;
 
   db.prepare(
@@ -212,7 +244,13 @@ router.put('/:id', auth, requireRole('Admin'), (req, res) => {
       fee_inr = COALESCE(?, fee_inr),
       discount_inr = COALESCE(?, discount_inr),
       course_status = COALESCE(?, course_status),
-      enrollment_type = COALESCE(?, enrollment_type)
+      enrollment_type = COALESCE(?, enrollment_type),
+      apply_registration_fee_inr = COALESCE(?, apply_registration_fee_inr),
+      apply_single_payment_discount_inr = COALESCE(?, apply_single_payment_discount_inr),
+      apply_installment_count = COALESCE(?, apply_installment_count),
+      apply_installment_gap_days = COALESCE(?, apply_installment_gap_days),
+      apply_grace_days = COALESCE(?, apply_grace_days),
+      apply_enquiry_enabled = COALESCE(?, apply_enquiry_enabled)
     WHERE id = ?`
   ).run(
     name,
@@ -230,6 +268,12 @@ router.put('/:id', auth, requireRole('Admin'), (req, res) => {
     discountInr,
     courseStatus,
     enrollmentType,
+    applyRegistrationFeeInr,
+    applySinglePaymentDiscountInr,
+    applyInstallmentCount,
+    applyInstallmentGapDays,
+    applyGraceDays,
+    applyEnquiryEnabled === undefined ? undefined : (applyEnquiryEnabled ? 1 : 0),
     req.params.id
   );
   if (progressionType !== undefined) {

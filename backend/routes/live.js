@@ -50,6 +50,23 @@ function isStudentInBatch(userId, batchId) {
   return !!row;
 }
 
+function batchHasApplyCourses(batchId) {
+  const rows = db.prepare(
+    `SELECT c.enrollment_type
+     FROM batch_courses bc
+     JOIN courses c ON c.id = bc.course_id
+     WHERE bc.batch_id = ?`,
+  ).all(batchId);
+  if (rows.some((row) => String(row.enrollment_type || '').toLowerCase() === 'apply')) return true;
+  const legacy = db.prepare(
+    `SELECT c.enrollment_type
+     FROM batches b
+     JOIN courses c ON c.id = b.course_id
+     WHERE b.id = ? AND NOT EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = b.id)`,
+  ).get(batchId);
+  return String(legacy?.enrollment_type || '').toLowerCase() === 'apply';
+}
+
 function isUserAllowedForSession(session, user) {
   if (!session) return false;
   if (user.role === 'Admin') return true;
@@ -714,6 +731,11 @@ router.post('/batches/:id/members', auth, requireRole('Admin', 'Trainer'), (req,
   const batchId = Number(req.params.id);
   const { studentId } = req.body;
   if (!studentId) return res.status(400).json({ error: 'studentId is required' });
+  if (batchHasApplyCourses(batchId)) {
+    return res.status(409).json({
+      error: 'Apply-course batches must add learners through the paid application approval flow.',
+    });
+  }
 
   const batch = db.prepare('SELECT id, trainer_id FROM batches WHERE id = ?').get(batchId);
   if (!batch) return res.status(404).json({ error: 'Batch not found' });

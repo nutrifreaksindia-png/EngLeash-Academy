@@ -109,6 +109,13 @@ function loadBillingPackageAny(id) {
   return db.prepare('SELECT * FROM billing_packages WHERE id = ?').get(id) || null;
 }
 
+function paymentKindForApplyDue(dueKind) {
+  const raw = String(dueKind || '').toLowerCase();
+  if (raw === 'registration') return 'apply_registration';
+  if (raw === 'single_payment' || raw === 'registration_balance') return 'apply_single_payment';
+  return 'apply_installment';
+}
+
 function mapPaymentRow(row) {
   if (!row) return null;
   return {
@@ -124,10 +131,15 @@ function mapPaymentRow(row) {
     packageLabel: row.package_label || '',
     title: row.course_title || row.combo_title || 'Payment',
     gateway: row.gateway,
+    paymentSource: row.payment_source || 'razorpay',
     gatewayOrderId: row.gateway_order_id,
     gatewayPaymentId: row.gateway_payment_id,
+    manualReference: row.manual_reference || '',
+    manualRecordedBy: row.manual_recorded_by || null,
     sourceOrderTable: row.source_order_table,
     sourceOrderRowId: row.source_order_row_id,
+    applyBillingProfileId: row.apply_billing_profile_id || null,
+    applyDueItemId: row.apply_due_item_id || null,
     amountPaise: Number(row.amount_paise || 0),
     amountInr: Number(row.amount_paise || 0) / 100,
     currency: row.currency || 'INR',
@@ -225,7 +237,12 @@ function ensureInvoiceForPaymentRecord(paymentRecordId, invoicePayload, lineItem
 function ensurePaymentWithInvoice(payload) {
   const existing =
     db.prepare('SELECT * FROM payment_records WHERE gateway_payment_id = ?').get(payload.gatewayPaymentId) ||
-    db.prepare('SELECT * FROM payment_records WHERE gateway_order_id = ?').get(payload.gatewayOrderId);
+    db.prepare('SELECT * FROM payment_records WHERE gateway_order_id = ?').get(payload.gatewayOrderId) ||
+    (payload.sourceOrderTable && payload.sourceOrderRowId != null
+      ? db
+          .prepare('SELECT * FROM payment_records WHERE source_order_table = ? AND source_order_row_id = ?')
+          .get(payload.sourceOrderTable, payload.sourceOrderRowId)
+      : null);
   let paymentRow = existing;
   if (!paymentRow) {
     try {
@@ -233,10 +250,11 @@ function ensurePaymentWithInvoice(payload) {
         .prepare(
           `INSERT INTO payment_records (
             user_id, payment_kind, order_kind, course_id, combo_id, billing_package_id,
-            course_title, combo_title, package_label, gateway, gateway_order_id, gateway_payment_id,
-            source_order_table, source_order_row_id, amount_paise, currency, status, paid_at,
+            apply_billing_profile_id, apply_due_item_id,
+            course_title, combo_title, package_label, gateway, payment_source, gateway_order_id, gateway_payment_id,
+            manual_reference, manual_recorded_by, source_order_table, source_order_row_id, amount_paise, currency, status, paid_at,
             customer_name, customer_email, customer_mobile, customer_address_lines_json, meta_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paid', ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           payload.userId,
@@ -245,16 +263,22 @@ function ensurePaymentWithInvoice(payload) {
           payload.courseId,
           payload.comboId,
           payload.billingPackageId,
+          payload.applyBillingProfileId || null,
+          payload.applyDueItemId || null,
           payload.courseTitle || null,
           payload.comboTitle || null,
           payload.packageLabel || null,
           payload.gateway || 'razorpay',
+          payload.paymentSource || 'razorpay',
           payload.gatewayOrderId,
           payload.gatewayPaymentId,
+          payload.manualReference || null,
+          payload.manualRecordedBy || null,
           payload.sourceOrderTable,
           payload.sourceOrderRowId || null,
           payload.amountPaise,
           payload.currency || 'INR',
+          'paid',
           payload.paidAt,
           payload.customer.name || null,
           payload.customer.email || null,
@@ -267,7 +291,12 @@ function ensurePaymentWithInvoice(payload) {
       if (!String(error?.message || '').includes('UNIQUE')) throw error;
       paymentRow =
         db.prepare('SELECT * FROM payment_records WHERE gateway_payment_id = ?').get(payload.gatewayPaymentId) ||
-        db.prepare('SELECT * FROM payment_records WHERE gateway_order_id = ?').get(payload.gatewayOrderId);
+        db.prepare('SELECT * FROM payment_records WHERE gateway_order_id = ?').get(payload.gatewayOrderId) ||
+        (payload.sourceOrderTable && payload.sourceOrderRowId != null
+          ? db
+              .prepare('SELECT * FROM payment_records WHERE source_order_table = ? AND source_order_row_id = ?')
+              .get(payload.sourceOrderTable, payload.sourceOrderRowId)
+          : null);
     }
   }
 
@@ -376,6 +405,77 @@ function ensurePaymentLedgerForBillingOrder({ orderRow, paymentId, paidAtIso = n
   });
 }
 
+function ensureApplyDuePaymentRecord({
+  dueRow,
+  amountPaise,
+  paymentSource = 'razorpay',
+  gateway = 'razorpay',
+  gatewayOrderId,
+  gatewayPaymentId,
+  sourceOrderTable,
+  sourceOrderRowId,
+  manualReference = null,
+  manualRecordedBy = null,
+  paidAtIso = new Date().toISOString(),
+}) {
+  const customer = loadCustomerSnapshot(dueRow.user_id);
+  const academy = loadAcademySnapshot();
+  const courseTitle = loadCourseTitle(dueRow.course_id);
+  const batchLabel = dueRow.batch_number
+    ? `Batch #${dueRow.batch_number}`
+    : String(dueRow.batch_title || dueRow.batch_name || '').trim();
+  const dueLabel = String(dueRow.label_text || '').trim() || 'Apply course payment';
+  const parts = [dueLabel];
+  if (batchLabel) parts.push(batchLabel);
+  return ensurePaymentWithInvoice({
+    userId: Number(dueRow.user_id),
+    paymentKind: paymentKindForApplyDue(dueRow.due_kind),
+    orderKind: `apply_${String(dueRow.due_kind || '').toLowerCase()}`,
+    courseId: Number(dueRow.course_id),
+    comboId: null,
+    billingPackageId: null,
+    applyBillingProfileId: Number(dueRow.billing_profile_id),
+    applyDueItemId: Number(dueRow.id),
+    courseTitle,
+    comboTitle: '',
+    packageLabel: parts.filter(Boolean).join(' · '),
+    gateway,
+    paymentSource,
+    gatewayOrderId,
+    gatewayPaymentId,
+    manualReference,
+    manualRecordedBy,
+    sourceOrderTable,
+    sourceOrderRowId,
+    amountPaise: Number(amountPaise || 0),
+    currency: 'INR',
+    paidAt: paidAtIso,
+    customer,
+    academy,
+    metaJson: safeJsonStringify(
+      {
+        applyBillingProfileId: dueRow.billing_profile_id,
+        applyDueItemId: dueRow.id,
+        dueKind: dueRow.due_kind,
+        paymentSource,
+        manualReference,
+      },
+      {},
+    ),
+    notesText: 'Thank you for your payment.',
+    lineItems: [
+      {
+        itemName: courseTitle || 'Apply course payment',
+        description: parts.filter(Boolean).join(' | '),
+        quantity: 1,
+        unitRatePaise: Number(amountPaise || 0),
+        amountPaise: Number(amountPaise || 0),
+        metaJson: safeJsonStringify({ dueItemId: dueRow.id, billingProfileId: dueRow.billing_profile_id }, {}),
+      },
+    ],
+  });
+}
+
 function getPaymentRecordById(paymentId) {
   const row = db
     .prepare(
@@ -431,10 +531,11 @@ function listPaymentRecordsForAdmin({ search = '', paymentKind = '' } = {}) {
            OR COALESCE(i.invoice_number, '') LIKE ?
            OR COALESCE(p.gateway_order_id, '') LIKE ?
            OR COALESCE(p.gateway_payment_id, '') LIKE ?
+           OR COALESCE(p.manual_reference, '') LIKE ?
          )
        ORDER BY datetime(p.paid_at) DESC, p.id DESC`,
     )
-    .all(kind, kind, like, like, like, like, like, like, like, like);
+    .all(kind, kind, like, like, like, like, like, like, like, like, like);
   return rows.map(mapPaymentRow);
 }
 
@@ -479,6 +580,7 @@ function getInvoiceBundleByPaymentId(paymentId) {
 
 module.exports = {
   buildInvoiceNumber,
+  ensureApplyDuePaymentRecord,
   ensurePaymentLedgerForCourseOrder,
   ensurePaymentLedgerForBillingOrder,
   formatPackageLabel,

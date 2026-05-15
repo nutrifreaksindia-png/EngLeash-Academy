@@ -138,6 +138,7 @@ const assignmentRoutes = require('./routes/assignments');
 const { router: paymentRoutes, razorpayWebhookHandler } = require('./routes/payments');
 const billingPackageRoutes = require('./routes/billingPackages');
 const subscriptionRoutes = require('./routes/subscriptions');
+const { runApplyOverdueEnforcementSweep } = require('./services/applyDueEnforcement');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -186,6 +187,7 @@ app.get('/api/health/details', (req, res) => {
 });
 
 const LISTEN_HOST = process.env.BIND_HOST || '0.0.0.0';
+const APPLY_OVERDUE_SWEEP_MS = Math.max(60_000, Number(process.env.APPLY_OVERDUE_SWEEP_MS || 5 * 60 * 1000));
 
 function logLanAddresses() {
   const nets = os.networkInterfaces();
@@ -205,3 +207,14 @@ app.listen(PORT, LISTEN_HOST, () => {
   console.log(`EngLeash Academy API running on http://localhost:${PORT} (bound on ${LISTEN_HOST})`);
   logLanAddresses();
 });
+
+setInterval(() => {
+  try {
+    const summary = runApplyOverdueEnforcementSweep();
+    if (summary.scanned > 0) {
+      console.log('[apply-overdue] sweep', summary);
+    }
+  } catch (error) {
+    console.error('[apply-overdue] sweep failed', error);
+  }
+}, APPLY_OVERDUE_SWEEP_MS);

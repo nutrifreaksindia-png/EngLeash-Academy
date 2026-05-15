@@ -28,6 +28,12 @@ function ensureV1Tables(db) {
   safeAlter(db, "ALTER TABLE courses ADD COLUMN course_status TEXT DEFAULT 'Active'");
   safeAlter(db, "ALTER TABLE courses ADD COLUMN enrollment_type TEXT DEFAULT 'free'");
   safeAlter(db, "ALTER TABLE courses ADD COLUMN progression_type TEXT DEFAULT 'unlock_all'");
+  safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_registration_fee_inr REAL DEFAULT 999");
+  safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_single_payment_discount_inr REAL DEFAULT 0");
+  safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_installment_count INTEGER DEFAULT 2");
+  safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_installment_gap_days INTEGER DEFAULT 30");
+  safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_grace_days INTEGER DEFAULT 7");
+  safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_enquiry_enabled INTEGER DEFAULT 1");
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS user_profiles (
@@ -625,6 +631,97 @@ function ensureV1Tables(db) {
       meta_json TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_invoice_line_items_invoice ON invoice_line_items(invoice_record_id, line_order, id);
+
+    CREATE TABLE IF NOT EXISTS apply_course_billing_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+      batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+      enrollment_id INTEGER REFERENCES course_enrollments(id) ON DELETE SET NULL,
+      selected_plan TEXT NOT NULL CHECK(selected_plan IN ('registration','single_payment','first_installment')),
+      status TEXT NOT NULL DEFAULT 'awaiting_initial_payment'
+        CHECK(status IN ('awaiting_initial_payment','pending_approval','approved_pending_access','active','rejected','removed_overdue','cancelled')),
+      total_course_fee_paise INTEGER NOT NULL DEFAULT 0,
+      registration_fee_paise INTEGER NOT NULL DEFAULT 0,
+      single_payment_discount_paise INTEGER NOT NULL DEFAULT 0,
+      upfront_paid_paise INTEGER NOT NULL DEFAULT 0,
+      remaining_balance_paise INTEGER NOT NULL DEFAULT 0,
+      installment_count INTEGER NOT NULL DEFAULT 1,
+      installment_gap_days INTEGER NOT NULL DEFAULT 0,
+      grace_days INTEGER NOT NULL DEFAULT 0,
+      batch_start_date TEXT,
+      initial_due_item_id INTEGER REFERENCES apply_course_due_items(id) ON DELETE SET NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_apply_billing_profiles_user_course ON apply_course_billing_profiles(user_id, course_id, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_apply_billing_profiles_batch_status ON apply_course_billing_profiles(batch_id, status, id DESC);
+
+    CREATE TABLE IF NOT EXISTS apply_course_due_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      billing_profile_id INTEGER NOT NULL REFERENCES apply_course_billing_profiles(id) ON DELETE CASCADE,
+      sequence_no INTEGER NOT NULL DEFAULT 1,
+      due_kind TEXT NOT NULL
+        CHECK(due_kind IN ('registration','registration_balance','single_payment','installment')),
+      label_text TEXT,
+      due_date TEXT,
+      grace_end_date TEXT,
+      amount_paise INTEGER NOT NULL DEFAULT 0,
+      discount_paise INTEGER NOT NULL DEFAULT 0,
+      paid_amount_paise INTEGER NOT NULL DEFAULT 0,
+      due_status TEXT NOT NULL DEFAULT 'scheduled'
+        CHECK(due_status IN ('scheduled','paid','overdue','cancelled')),
+      satisfied_at TEXT,
+      is_initial_due INTEGER NOT NULL DEFAULT 0,
+      meta_json TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_apply_due_items_profile_order ON apply_course_due_items(billing_profile_id, sequence_no, id);
+    CREATE INDEX IF NOT EXISTS idx_apply_due_items_due_status ON apply_course_due_items(due_status, grace_end_date, due_date);
+
+    CREATE TABLE IF NOT EXISTS apply_course_enquiries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+      batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+      note_text TEXT,
+      status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','contacted','closed')),
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_apply_enquiries_course_batch ON apply_course_enquiries(course_id, batch_id, status, id DESC);
+
+    CREATE TABLE IF NOT EXISTS razorpay_apply_due_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      razorpay_order_id TEXT NOT NULL UNIQUE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      billing_profile_id INTEGER NOT NULL REFERENCES apply_course_billing_profiles(id) ON DELETE CASCADE,
+      due_item_id INTEGER NOT NULL REFERENCES apply_course_due_items(id) ON DELETE CASCADE,
+      amount_paise INTEGER NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      status TEXT NOT NULL DEFAULT 'created' CHECK(status IN ('created','paid','failed')),
+      payment_id TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_rp_apply_due_orders_payment ON razorpay_apply_due_orders(payment_id) WHERE payment_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_rp_apply_due_orders_due ON razorpay_apply_due_orders(due_item_id, status);
+
+    CREATE TABLE IF NOT EXISTS manual_apply_due_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      due_item_id INTEGER NOT NULL REFERENCES apply_course_due_items(id) ON DELETE CASCADE,
+      billing_profile_id INTEGER NOT NULL REFERENCES apply_course_billing_profiles(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      amount_paise INTEGER NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      reference_text TEXT,
+      note_text TEXT,
+      recorded_by INTEGER NOT NULL REFERENCES users(id),
+      paid_at TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_manual_apply_due_entries_due ON manual_apply_due_entries(due_item_id, paid_at DESC);
   `);
 
   db.prepare('INSERT OR IGNORE INTO video_categories (name, slug) VALUES (?, ?)').run('English Grammar', 'english-grammar');
@@ -640,6 +737,7 @@ function ensureV1Tables(db) {
   migrateCourseLessonsSchema(db);
   migrateUsersTableCreatorRole(db);
   migrateCourseEnrollmentsExpandSubscribe(db);
+  migratePaymentRecordsForApply(db);
   migrateBackfillCourseAccessGrants(db);
 }
 
@@ -803,6 +901,91 @@ function migrateCourseLessonsSchema(db) {
 
     const ids = db.prepare('SELECT id FROM courses').all();
     for (const { id } of ids) syncCourseLessonSlots(id);
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+}
+
+function paymentRecordsTableAllowsApply(db) {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'payment_records'").get();
+  if (!row?.sql) return false;
+  const sql = String(row.sql);
+  return (
+    sql.includes('apply_registration') &&
+    sql.includes('payment_source') &&
+    sql.includes('apply_due_item_id') &&
+    sql.includes('manual_reference')
+  );
+}
+
+function migratePaymentRecordsForApply(db) {
+  if (paymentRecordsTableAllowsApply(db)) return;
+
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.exec(`
+      CREATE TABLE payment_records__apply_next (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        payment_kind TEXT NOT NULL
+          CHECK(payment_kind IN ('purchase','subscribe','renewal','combo','apply_registration','apply_single_payment','apply_installment')),
+        order_kind TEXT NOT NULL,
+        course_id INTEGER REFERENCES courses(id) ON DELETE SET NULL,
+        combo_id INTEGER REFERENCES course_combos(id) ON DELETE SET NULL,
+        billing_package_id INTEGER REFERENCES billing_packages(id) ON DELETE SET NULL,
+        apply_billing_profile_id INTEGER REFERENCES apply_course_billing_profiles(id) ON DELETE SET NULL,
+        apply_due_item_id INTEGER REFERENCES apply_course_due_items(id) ON DELETE SET NULL,
+        course_title TEXT,
+        combo_title TEXT,
+        package_label TEXT,
+        gateway TEXT NOT NULL DEFAULT 'razorpay',
+        payment_source TEXT NOT NULL DEFAULT 'razorpay'
+          CHECK(payment_source IN ('razorpay','cash_manual')),
+        gateway_order_id TEXT NOT NULL UNIQUE,
+        gateway_payment_id TEXT NOT NULL UNIQUE,
+        manual_reference TEXT,
+        manual_recorded_by INTEGER REFERENCES users(id),
+        source_order_table TEXT NOT NULL
+          CHECK(source_order_table IN ('razorpay_course_orders','razorpay_billing_orders','razorpay_apply_due_orders','manual_apply_due_entries')),
+        source_order_row_id INTEGER,
+        amount_paise INTEGER NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'INR',
+        status TEXT NOT NULL DEFAULT 'paid' CHECK(status IN ('paid')),
+        paid_at TEXT NOT NULL,
+        customer_name TEXT,
+        customer_email TEXT,
+        customer_mobile TEXT,
+        customer_address_lines_json TEXT,
+        meta_json TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    db.exec(`
+      INSERT INTO payment_records__apply_next (
+        id, user_id, payment_kind, order_kind, course_id, combo_id, billing_package_id,
+        apply_billing_profile_id, apply_due_item_id,
+        course_title, combo_title, package_label,
+        gateway, payment_source, gateway_order_id, gateway_payment_id,
+        manual_reference, manual_recorded_by,
+        source_order_table, source_order_row_id, amount_paise, currency, status, paid_at,
+        customer_name, customer_email, customer_mobile, customer_address_lines_json, meta_json, created_at, updated_at
+      )
+      SELECT
+        id, user_id, payment_kind, order_kind, course_id, combo_id, billing_package_id,
+        NULL, NULL,
+        course_title, combo_title, package_label,
+        gateway, 'razorpay', gateway_order_id, gateway_payment_id,
+        NULL, NULL,
+        source_order_table, source_order_row_id, amount_paise, currency, status, paid_at,
+        customer_name, customer_email, customer_mobile, customer_address_lines_json, meta_json, created_at, updated_at
+      FROM payment_records;
+    `);
+    db.exec('DROP TABLE payment_records;');
+    db.exec('ALTER TABLE payment_records__apply_next RENAME TO payment_records;');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_payment_records_user_paid ON payment_records(user_id, paid_at DESC, id DESC);');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_payment_records_kind_paid ON payment_records(payment_kind, paid_at DESC, id DESC);');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_payment_records_apply_due ON payment_records(apply_due_item_id, paid_at DESC, id DESC);');
   } finally {
     db.pragma('foreign_keys = ON');
   }
