@@ -710,12 +710,74 @@ function listApplyBillingProfilesForAdmin({ search = '', status = '' } = {}) {
   }));
 }
 
-function createApplyEnquiry({ userId, courseId, batchId, noteText }) {
+function createApplyEnquiry({
+  userId,
+  courseId,
+  batchId,
+  noteText,
+  displayName,
+  phoneCountryCode,
+  phoneLocal,
+  callbackDate,
+  callbackSlot,
+}) {
   const result = db.prepare(
-    `INSERT INTO apply_course_enquiries (user_id, course_id, batch_id, note_text, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'open', datetime('now'), datetime('now'))`,
-  ).run(userId, courseId, batchId, noteText || null);
+    `INSERT INTO apply_course_enquiries (
+       user_id, course_id, batch_id, note_text, status,
+       display_name, phone_country_code, phone_local, callback_date, callback_slot,
+       created_at, updated_at
+     ) VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+  ).run(
+    userId,
+    courseId,
+    batchId == null ? null : batchId,
+    noteText || null,
+    displayName || null,
+    phoneCountryCode || null,
+    phoneLocal || null,
+    callbackDate || null,
+    callbackSlot || null,
+  );
   return Number(result.lastInsertRowid);
+}
+
+function listApplyEnquiriesForAdmin({ search } = {}) {
+  const q = String(search || '').trim();
+  const like = `%${q}%`;
+  return db
+    .prepare(
+      `SELECT
+         e.id, e.user_id, e.course_id, e.batch_id, e.note_text, e.status,
+         e.display_name, e.phone_country_code, e.phone_local, e.callback_date, e.callback_slot,
+         e.created_at, e.updated_at,
+         u.email AS user_email, u.name AS user_account_name, u.mobile_number AS user_mobile,
+         c.name AS course_name,
+         b.name AS batch_name, b.title AS batch_title, b.batch_number
+       FROM apply_course_enquiries e
+       JOIN users u ON u.id = e.user_id
+       JOIN courses c ON c.id = e.course_id
+       LEFT JOIN batches b ON b.id = e.batch_id
+       WHERE ? = ''
+         OR COALESCE(e.display_name, '') LIKE ?
+         OR COALESCE(u.email, '') LIKE ?
+         OR COALESCE(u.name, '') LIKE ?
+         OR COALESCE(u.mobile_number, '') LIKE ?
+         OR COALESCE(c.name, '') LIKE ?
+         OR COALESCE(e.callback_date, '') LIKE ?
+         OR COALESCE(e.callback_slot, '') LIKE ?
+       ORDER BY e.id DESC
+       LIMIT 500`,
+    )
+    .all(q, like, like, like, like, like, like, like);
+}
+
+function updateApplyEnquiryStatus(enquiryId, status) {
+  const s = String(status || '').toLowerCase();
+  if (!['open', 'contacted', 'closed'].includes(s)) return { ok: false, error: 'Invalid status' };
+  const info = db.prepare('SELECT id FROM apply_course_enquiries WHERE id = ?').get(enquiryId);
+  if (!info) return { ok: false, error: 'Not found' };
+  db.prepare(`UPDATE apply_course_enquiries SET status = ?, updated_at = datetime('now') WHERE id = ?`).run(s, enquiryId);
+  return { ok: true };
 }
 
 function listOverdueDueItems(nowMs = Date.now()) {
@@ -747,6 +809,7 @@ module.exports = {
   initialDueRowForProfile,
   listApplyBillingProfilesForAdmin,
   listApplyBillingProfilesForUser,
+  listApplyEnquiriesForAdmin,
   listOverdueDueItems,
   loadApplyBatch,
   loadApplyCourse,
@@ -759,4 +822,5 @@ module.exports = {
   serializeDueItem,
   settleDueItem,
   toPaise,
+  updateApplyEnquiryStatus,
 };

@@ -34,8 +34,17 @@ const {
   loadDueItemWithProfile,
   listApplyBillingProfilesForAdmin,
   listApplyBillingProfilesForUser,
+  listApplyEnquiriesForAdmin,
   settleDueItem,
+  updateApplyEnquiryStatus,
 } = require('../lib/applyBilling');
+const {
+  CALLBACK_TIME_SLOTS,
+  normalizeCountryDialCode,
+  normalizePhoneLocal,
+  validateCallbackDate,
+  validateCallbackSlot,
+} = require('../lib/callbackBookingRules');
 const { streamInvoicePdf } = require('../lib/invoicePdf');
 
 const router = express.Router();
@@ -342,6 +351,11 @@ function batchContainsCourse(batchId, courseId) {
   return batch;
 }
 
+function loadHolidayDateSet() {
+  const rows = db.prepare('SELECT holiday_date FROM holidays').all();
+  return new Set(rows.map((r) => String(r.holiday_date || '').trim()).filter(Boolean));
+}
+
 function createRazorpayApplyDueOrder({ clientPkg, userId, billingProfileId, dueItemId, amountPaise }) {
   const receipt = `ad${dueItemId}_u${userId}_${Date.now()}`.slice(0, 40);
   return clientPkg.instance.orders.create({
@@ -424,6 +438,14 @@ function tryMarkApplyDueOrderPaid(razorpayOrderId, paymentId, amountPaiseFromPay
   }
 }
 
+router.get('/apply/callback-meta', auth, requireRole('Student', 'Lab'), (req, res) => {
+  const holidayDates = db.prepare('SELECT holiday_date FROM holidays ORDER BY holiday_date').all();
+  res.json({
+    holidays: holidayDates.map((r) => String(r.holiday_date || '').trim()).filter(Boolean),
+    time_slots: CALLBACK_TIME_SLOTS,
+  });
+});
+
 router.get('/apply/my', auth, requireRole('Student', 'Lab', 'Trainer', 'Admin'), (req, res) => {
   res.json(listApplyBillingProfilesForUser(req.user.id));
 });
@@ -439,9 +461,14 @@ router.get('/admin/apply-billing', auth, requireRole('Admin', 'Creator', 'Traine
 
 router.post('/apply/enquiries', auth, requireRole('Student', 'Lab'), (req, res) => {
   const courseId = Number(req.body?.course_id);
-  const batchId = Number(req.body?.batch_id);
-  if (!Number.isFinite(courseId) || !Number.isFinite(batchId)) {
-    return res.status(400).json({ error: 'course_id and batch_id are required' });
+  const rawBatch = req.body?.batch_id;
+  const batchId =
+    rawBatch === null || rawBatch === undefined || rawBatch === '' ? null : Number(rawBatch);
+  if (!Number.isFinite(courseId)) {
+    return res.status(400).json({ error: 'course_id is required' });
+  }
+  if (batchId != null && !Number.isFinite(batchId)) {
+    return res.status(400).json({ error: 'batch_id is invalid' });
   }
   const course = loadApplyCourse(courseId);
   if (!course || String(course.enrollment_type || '').toLowerCase() !== 'apply') {
@@ -450,15 +477,64 @@ router.post('/apply/enquiries', auth, requireRole('Student', 'Lab'), (req, res) 
   if (!course.apply_enquiry_enabled) {
     return res.status(409).json({ error: 'Enquiries are disabled for this course' });
   }
-  const batch = batchContainsCourse(batchId, courseId);
-  if (!batch) return res.status(404).json({ error: 'Batch not found for course' });
+  if (!course.is_published || String(course.course_status || 'Active') !== 'Active') {
+    return res.status(400).json({ error: 'Course is not available' });
+  }
+  if (batchId != null) {
+    const batch = batchContainsCourse(batchId, courseId);
+    if (!batch) return res.status(404).json({ error: 'Batch not found for course' });
+  }
+
+  const displayName = String(req.body?.display_name || '').trim();
+  const phoneCountryCode = normalizeCountryDialCode(req.body?.phone_country_code);
+  const phoneLocal = normalizePhoneLocal(req.body?.phone_local ?? req.body?.phone_number);
+  const callbackDate = String(req.body?.callback_date || '').trim();
+  const callbackSlot = String(req.body?.callback_slot || '').trim();
+
+  if (displayName.length < 2) {
+    return res.status(400).json({ error: 'Please enter your name' });
+  }
+  if (!phoneCountryCode || phoneCountryCode.length > 14) {
+    return res.status(400).json({ error: 'Please select a valid country code' });
+  }
+  if (phoneLocal.length < 6 || phoneLocal.length > 15) {
+    return res.status(400).json({ error: 'Please enter a valid phone number' });
+  }
+
+  const holidaySet = loadHolidayDateSet();
+  const dateCheck = validateCallbackDate(callbackDate, holidaySet);
+  if (!dateCheck.ok) {
+    return res.status(400).json({ error: dateCheck.reason || 'Invalid callback date' });
+  }
+  const slotCheck = validateCallbackSlot(callbackSlot);
+  if (!slotCheck.ok) {
+    return res.status(400).json({ error: slotCheck.reason || 'Invalid time slot' });
+  }
+
   const enquiryId = createApplyEnquiry({
     userId: req.user.id,
     courseId,
     batchId,
     noteText: req.body?.note || null,
+    displayName,
+    phoneCountryCode,
+    phoneLocal,
+    callbackDate,
+    callbackSlot,
   });
   res.status(201).json({ ok: true, enquiryId });
+});
+
+router.get('/admin/apply-enquiries', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+  res.json(listApplyEnquiriesForAdmin({ search: req.query?.search || '' }));
+});
+
+router.patch('/admin/apply-enquiries/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+  const result = updateApplyEnquiryStatus(id, req.body?.status);
+  if (!result.ok) return res.status(result.error === 'Not found' ? 404 : 400).json({ error: result.error });
+  res.json({ ok: true });
 });
 
 router.post('/razorpay/create-apply-order', auth, requireRole('Student', 'Lab'), async (req, res) => {

@@ -19,6 +19,7 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { API_BASE } from '../config';
 import { alertApplyPaymentError, payApplyDueWithRazorpay } from '../payments/razorpayApplyBilling';
+import CallbackBookingModal from '../components/CallbackBookingModal';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -142,6 +143,7 @@ export default function LandingHomeScreen({ navigation, route }: any) {
   const [openBatches, setOpenBatches] = useState<OpenBatch[]>([]);
   const [openBatchesLoading, setOpenBatchesLoading] = useState(false);
   const [applyBusyKey, setApplyBusyKey] = useState<string | null>(null);
+  const [callbackTarget, setCallbackTarget] = useState<{ batchId: number | null } | null>(null);
   const applyResumeKeyRef = useRef<string | null>(null);
   const subscribeResumeKeyRef = useRef<string | null>(null);
 
@@ -308,16 +310,6 @@ export default function LandingHomeScreen({ navigation, route }: any) {
       alertApplyPaymentError(e);
     } finally {
       setApplyBusyKey(null);
-    }
-  }
-
-  async function sendEnquiry(batchId: number) {
-    if (!applyCourse) return;
-    try {
-      await api.post('/payments/apply/enquiries', { course_id: applyCourse.id, batch_id: batchId });
-      Alert.alert('Enquiry sent', 'Your callback request has been shared with the academy team.');
-    } catch (e: any) {
-      Alert.alert('Enquiry', e?.message || 'Could not send enquiry');
     }
   }
 
@@ -490,7 +482,11 @@ export default function LandingHomeScreen({ navigation, route }: any) {
             <Text style={styles.modalTitle}>Apply - {applyCourse?.name}</Text>
             {openBatchesLoading ? <ActivityIndicator color={BRAND_RED} /> : null}
             {!openBatchesLoading && openBatches.length === 0 ? (
-              <Text style={styles.hint}>No open batches currently available for this course.</Text>
+              applyCourse?.apply_enquiry_enabled === false || applyCourse?.apply_enquiry_enabled === 0 ? null : (
+                <TouchableOpacity style={styles.batchEnquiryBtn} onPress={() => setCallbackTarget({ batchId: null })}>
+                  <Text style={styles.batchEnquiryText}>Enquiry</Text>
+                </TouchableOpacity>
+              )
             ) : (
               <ScrollView style={styles.batchListScroll}>
                 {openBatches.map((b) => {
@@ -533,15 +529,17 @@ export default function LandingHomeScreen({ navigation, route }: any) {
                               onPress={() => void applyToBatch(b, plan)}
                             >
                               <Text style={styles.batchPlanBtnText}>
-                                {busy ? 'Opening…' : `${applyPlanLabel(plan)} · ${formatInr(applyPlanAmount(applyCourse, plan))}`}
+                                {busy
+                                  ? 'Opening…'
+                                  : `${applyPlanLabel(plan)} · ${formatInr(applyCourse ? applyPlanAmount(applyCourse, plan) : 0)}`}
                               </Text>
                             </TouchableOpacity>
                           );
                         })}
                       </View>
                       {applyCourse?.apply_enquiry_enabled === false || applyCourse?.apply_enquiry_enabled === 0 ? null : (
-                        <TouchableOpacity style={styles.batchEnquiryBtn} onPress={() => void sendEnquiry(b.id)}>
-                          <Text style={styles.batchEnquiryText}>Enquiry / Request callback</Text>
+                        <TouchableOpacity style={styles.batchEnquiryBtn} onPress={() => setCallbackTarget({ batchId: b.id })}>
+                          <Text style={styles.batchEnquiryText}>Enquiry</Text>
                         </TouchableOpacity>
                       )}
                     </View>
@@ -555,6 +553,15 @@ export default function LandingHomeScreen({ navigation, route }: any) {
           </View>
         </View>
       </Modal>
+      {applyCourse ? (
+        <CallbackBookingModal
+          visible={callbackTarget != null}
+          onClose={() => setCallbackTarget(null)}
+          courseId={applyCourse.id}
+          courseName={applyCourse.name}
+          batchId={callbackTarget?.batchId ?? null}
+        />
+      ) : null}
     </View>
   );
 }

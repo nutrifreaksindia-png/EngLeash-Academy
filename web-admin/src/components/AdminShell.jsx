@@ -5,6 +5,7 @@ function navStudentsBatches(showSubscriptionsNav) {
     { id: 'students', label: 'Students' },
     { id: 'batches', label: 'Batches' },
     { id: 'approvals', label: 'Course Applications' },
+    { id: 'leads', label: 'Leads' },
   ];
   if (showSubscriptionsNav) items.splice(2, 0, { id: 'subscriptions', label: 'Subscriptions' });
   return items;

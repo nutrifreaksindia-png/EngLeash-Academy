@@ -7,6 +7,7 @@ import { useAuth } from '../context/AuthContext';
 import type { PublicCourse } from './LandingHomeScreen';
 import { API_BASE } from '../config';
 import { alertApplyPaymentError, payApplyDueWithRazorpay } from '../payments/razorpayApplyBilling';
+import CallbackBookingModal from '../components/CallbackBookingModal';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -123,6 +124,7 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
   const [openBatchesLoading, setOpenBatchesLoading] = useState(false);
   const [applyModalOpen, setApplyModalOpen] = useState(false);
   const [applyBusyKey, setApplyBusyKey] = useState<string | null>(null);
+  const [callbackTarget, setCallbackTarget] = useState<{ batchId: number | null } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -324,16 +326,6 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
     }
   }
 
-  async function sendEnquiry(batchId: number) {
-    if (!course) return;
-    try {
-      await api.post('/payments/apply/enquiries', { course_id: course.id, batch_id: batchId });
-      Alert.alert('Enquiry sent', 'Your callback request has been shared with the academy team.');
-    } catch (e: any) {
-      Alert.alert('Enquiry', e?.message || 'Could not send enquiry');
-    }
-  }
-
   return (
     <View style={styles.pageRoot}>
       <ScreenPageTitle title={pageHeading} />
@@ -414,7 +406,11 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
             <Text style={styles.modalTitle}>Apply - {course?.name}</Text>
             {openBatchesLoading ? <ActivityIndicator color={BRAND_RED} /> : null}
             {!openBatchesLoading && openBatches.length === 0 ? (
-              <Text style={styles.metaRow}>No open batches currently available for this course.</Text>
+              course?.apply_enquiry_enabled === false || course?.apply_enquiry_enabled === 0 ? null : (
+                <TouchableOpacity style={styles.batchEnquiryBtn} onPress={() => setCallbackTarget({ batchId: null })}>
+                  <Text style={styles.batchEnquiryText}>Enquiry</Text>
+                </TouchableOpacity>
+              )
             ) : (
               <ScrollView style={styles.modalScroll}>
                 {openBatches.map((batch) => {
@@ -450,8 +446,8 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
                         })}
                       </View>
                       {course?.apply_enquiry_enabled === false || course?.apply_enquiry_enabled === 0 ? null : (
-                        <TouchableOpacity style={styles.batchEnquiryBtn} onPress={() => void sendEnquiry(batch.id)}>
-                          <Text style={styles.batchEnquiryText}>Enquiry / Request callback</Text>
+                        <TouchableOpacity style={styles.batchEnquiryBtn} onPress={() => setCallbackTarget({ batchId: batch.id })}>
+                          <Text style={styles.batchEnquiryText}>Enquiry</Text>
                         </TouchableOpacity>
                       )}
                     </View>
@@ -465,6 +461,15 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
           </View>
         </View>
       </Modal>
+      {course ? (
+        <CallbackBookingModal
+          visible={callbackTarget != null}
+          onClose={() => setCallbackTarget(null)}
+          courseId={Number(course.id)}
+          courseName={String(course.name || '')}
+          batchId={callbackTarget?.batchId ?? null}
+        />
+      ) : null}
     </View>
   );
 }

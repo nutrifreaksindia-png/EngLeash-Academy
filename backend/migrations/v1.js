@@ -684,9 +684,14 @@ function ensureV1Tables(db) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-      batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+      batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL,
       note_text TEXT,
       status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','contacted','closed')),
+      display_name TEXT,
+      phone_country_code TEXT,
+      phone_local TEXT,
+      callback_date TEXT,
+      callback_slot TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -739,6 +744,77 @@ function ensureV1Tables(db) {
   migrateCourseEnrollmentsExpandSubscribe(db);
   migratePaymentRecordsForApply(db);
   migrateBackfillCourseAccessGrants(db);
+  migrateApplyCourseEnquiriesCallback(db);
+}
+
+/** Nullable batch + callback fields for apply enquiries (SQLite cannot relax NOT NULL in place). */
+function migrateApplyCourseEnquiriesCallback(db) {
+  const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='apply_course_enquiries'").get();
+  if (!exists) return;
+
+  const cols = db.prepare('PRAGMA table_info(apply_course_enquiries)').all();
+  const byName = Object.fromEntries(cols.map((c) => [c.name, c]));
+  const batchCol = byName.batch_id;
+  const needsNullableBatch = batchCol && Number(batchCol.notnull) === 1;
+  const hasCallbackCols =
+    byName.callback_date && byName.callback_slot && byName.display_name && byName.phone_country_code && byName.phone_local;
+
+  if (!needsNullableBatch && hasCallbackCols) return;
+
+  if (!needsNullableBatch && !hasCallbackCols) {
+    safeAlter(db, 'ALTER TABLE apply_course_enquiries ADD COLUMN display_name TEXT');
+    safeAlter(db, 'ALTER TABLE apply_course_enquiries ADD COLUMN phone_country_code TEXT');
+    safeAlter(db, 'ALTER TABLE apply_course_enquiries ADD COLUMN phone_local TEXT');
+    safeAlter(db, 'ALTER TABLE apply_course_enquiries ADD COLUMN callback_date TEXT');
+    safeAlter(db, 'ALTER TABLE apply_course_enquiries ADD COLUMN callback_slot TEXT');
+    return;
+  }
+
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.exec(`
+      CREATE TABLE apply_course_enquiries__cb_next (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+        batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL,
+        note_text TEXT,
+        status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','contacted','closed')),
+        display_name TEXT,
+        phone_country_code TEXT,
+        phone_local TEXT,
+        callback_date TEXT,
+        callback_slot TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    const srcCols = new Set(cols.map((c) => c.name));
+    const selDisplay = srcCols.has('display_name') ? 'display_name' : 'NULL';
+    const selPhoneCc = srcCols.has('phone_country_code') ? 'phone_country_code' : 'NULL';
+    const selPhoneLoc = srcCols.has('phone_local') ? 'phone_local' : 'NULL';
+    const selCbDate = srcCols.has('callback_date') ? 'callback_date' : 'NULL';
+    const selCbSlot = srcCols.has('callback_slot') ? 'callback_slot' : 'NULL';
+    db.exec(`
+      INSERT INTO apply_course_enquiries__cb_next (
+        id, user_id, course_id, batch_id, note_text, status,
+        display_name, phone_country_code, phone_local, callback_date, callback_slot,
+        created_at, updated_at
+      )
+      SELECT
+        id, user_id, course_id, batch_id, note_text, status,
+        ${selDisplay}, ${selPhoneCc}, ${selPhoneLoc}, ${selCbDate}, ${selCbSlot},
+        created_at, updated_at
+      FROM apply_course_enquiries;
+    `);
+    db.exec('DROP TABLE apply_course_enquiries;');
+    db.exec('ALTER TABLE apply_course_enquiries__cb_next RENAME TO apply_course_enquiries;');
+    db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_apply_enquiries_course_batch ON apply_course_enquiries(course_id, batch_id, status, id DESC);',
+    );
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 /** SQLite cannot ALTER CHECK on enrollment_type — rebuild table with subscribe. */

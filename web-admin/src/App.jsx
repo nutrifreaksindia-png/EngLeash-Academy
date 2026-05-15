@@ -7,6 +7,7 @@ import AdminShell from './components/AdminShell';
 import DashboardPage from './pages/DashboardPage';
 import UsersPage from './pages/UsersPage';
 import ApprovalsPage from './pages/ApprovalsPage';
+import LeadsPage from './pages/LeadsPage';
 import CoursesPage from './pages/CoursesPage';
 import LessonsPage from './pages/LessonsPage';
 import BatchesPage from './pages/BatchesPage';
@@ -176,6 +177,7 @@ export default function App() {
   const [users, setUsers] = useState([]);
   const [pendingUsers, setPendingUsers] = useState([]);
   const [pendingApplications, setPendingApplications] = useState([]);
+  const [applyLeads, setApplyLeads] = useState([]);
   const [courses, setCourses] = useState([]);
   const [library, setLibrary] = useState([]);
   const [batches, setBatches] = useState([]);
@@ -301,6 +303,7 @@ export default function App() {
         setUsers([]);
         setPendingUsers([]);
         setPendingApplications([]);
+        setApplyLeads([]);
         setBatches([]);
         setHolidays([]);
         if (c.ok) setCourses(Array.isArray(c.data) ? c.data : []);
@@ -333,10 +336,11 @@ export default function App() {
         return;
       }
 
-      const [u, pu, pa, c, l, b, h, q, v, vc, sm, ws, asg] = await Promise.all([
+      const [u, pu, pa, ae, c, l, b, h, q, v, vc, sm, ws, asg] = await Promise.all([
         apiFetchSafe('/users', nextToken),
         apiFetchSafe('/users/pending', nextToken),
         apiFetchSafe('/enrollments/pending-applications', nextToken),
+        apiFetchSafe('/payments/admin/apply-enquiries', nextToken),
         apiFetchSafe('/courses', nextToken),
         apiFetchSafe('/lessons/admin/all', nextToken),
         apiFetchSafe('/batch-manager', nextToken),
@@ -352,6 +356,8 @@ export default function App() {
       if (u.ok) setUsers(Array.isArray(u.data) ? u.data : []);
       if (pu.ok) setPendingUsers(Array.isArray(pu.data) ? pu.data : []);
       if (pa.ok) setPendingApplications(Array.isArray(pa.data) ? pa.data : []);
+      if (ae.ok) setApplyLeads(Array.isArray(ae.data) ? ae.data : []);
+      else setApplyLeads([]);
       if (c.ok) setCourses(Array.isArray(c.data) ? c.data : []);
       if (l.ok) setLibrary(Array.isArray(l.data) ? l.data : []);
       if (b.ok) setBatches(Array.isArray(b.data) ? b.data : []);
@@ -367,6 +373,7 @@ export default function App() {
         !u.ok ? `/users: ${u.error}` : null,
         !pu.ok ? `/users/pending: ${pu.error}` : null,
         !pa.ok ? `/enrollments/pending-applications: ${pa.error}` : null,
+        !ae.ok ? `/payments/admin/apply-enquiries: ${ae.error}` : null,
         !c.ok ? `/courses: ${c.error}` : null,
         !l.ok ? `/lessons/admin/all: ${l.error}` : null,
         !b.ok ? `/batch-manager: ${b.error}` : null,
@@ -961,6 +968,16 @@ export default function App() {
     pushToast('Application disapproved', 'success');
   }
 
+  async function updateApplyLeadStatus(id, status) {
+    await apiFetch(`/payments/admin/apply-enquiries/${id}`, token, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    });
+    const data = await apiFetch('/payments/admin/apply-enquiries', token);
+    setApplyLeads(Array.isArray(data) ? data : []);
+    pushToast('Lead updated', 'success');
+  }
+
   async function startBatch(batchId, startDate) {
     const id = batchId ?? selectedBatchId;
     if (!id) return;
@@ -1376,6 +1393,8 @@ export default function App() {
         onDisapproveApplication={disapproveApplication}
       />
     );
+  } else if (currentPage === 'leads') {
+    page = <LeadsPage leads={applyLeads} onUpdateStatus={updateApplyLeadStatus} />;
   } else if (currentPage === 'courses') {
     page = (
       <CoursesPage
