@@ -85,6 +85,14 @@ function enrollmentLabel(value) {
   return 'Join Free';
 }
 
+function hasCourseDuration(enrollmentType) {
+  return String(enrollmentType || 'free').toLowerCase() === 'subscribe';
+}
+
+function hasCourseLevelFee(enrollmentType) {
+  return String(enrollmentType || 'free').toLowerCase() !== 'subscribe';
+}
+
 /** Load stored highlights into editable lines (JSON array, plain lines, or legacy HTML). */
 function parseHighlightPoints(highlightsText) {
   if (!highlightsText || !String(highlightsText).trim()) return [''];
@@ -281,6 +289,14 @@ export default function CoursesPage({
     setOpen(true);
   }
 
+  function onEnrollmentTypeChange(value) {
+    setForm((prev) => ({
+      ...prev,
+      enrollmentType: value,
+      progressionType: value === 'apply' && !prev.id ? 'day_wise' : prev.progressionType,
+    }));
+  }
+
   async function submit(e) {
     e.preventDefault();
     const payload = isApplyCourse
@@ -337,6 +353,8 @@ export default function CoursesPage({
   }
 
   const isApplyCourse = form.enrollmentType === 'apply';
+  const showDurationField = hasCourseDuration(form.enrollmentType);
+  const showFeeFields = hasCourseLevelFee(form.enrollmentType);
   const netFee = netCourseFeeInr(form);
   const resolvedInstallmentAmounts = withAutoCalculatedLastInstallment(form.applyInstallmentAmounts, form.applyInstallmentCount, netFee);
   const editableInstallmentTotal = resolvedInstallmentAmounts
@@ -475,8 +493,8 @@ export default function CoursesPage({
                     </span>
                   </td>
                   <td>{enrollmentLabel(c.enrollment_type)}</td>
-                  <td>{c.duration_days || 1} days</td>
-                  <td>INR {c.fee_inr || 0}</td>
+                  <td>{hasCourseDuration(c.enrollment_type) ? `${c.duration_days || 1} days` : '—'}</td>
+                  <td>{hasCourseLevelFee(c.enrollment_type) ? `INR ${c.fee_inr || 0}` : 'Packages'}</td>
                   <td className="courseActionsCell">
                     <div className="courseActionsRow">
                       <button
@@ -564,14 +582,27 @@ export default function CoursesPage({
               <dl className="courseViewMetaGrid">
                 <dt>Lesson access</dt>
                 <dd>{progressionLabel(viewCourse.progression_type)}</dd>
-                <dt>Duration</dt>
-                <dd>{viewCourse.duration_days || 1} days</dd>
-                <dt>Fee</dt>
-                <dd>INR {viewCourse.fee_inr ?? 0}</dd>
-                <dt>Discount</dt>
-                <dd>INR {viewCourse.discount_inr ?? 0}</dd>
-                <dt>Net fee</dt>
-                <dd>INR {Math.max(0, Number(viewCourse.fee_inr || 0) - Number(viewCourse.discount_inr || 0))}</dd>
+                {hasCourseDuration(viewCourse.enrollment_type) ? (
+                  <>
+                    <dt>Duration</dt>
+                    <dd>{viewCourse.duration_days || 1} days</dd>
+                  </>
+                ) : null}
+                {hasCourseLevelFee(viewCourse.enrollment_type) ? (
+                  <>
+                    <dt>Fee</dt>
+                    <dd>INR {viewCourse.fee_inr ?? 0}</dd>
+                    <dt>Discount</dt>
+                    <dd>INR {viewCourse.discount_inr ?? 0}</dd>
+                    <dt>Net fee</dt>
+                    <dd>INR {Math.max(0, Number(viewCourse.fee_inr || 0) - Number(viewCourse.discount_inr || 0))}</dd>
+                  </>
+                ) : (
+                  <>
+                    <dt>Pricing</dt>
+                    <dd>Managed through subscription/renewal packages</dd>
+                  </>
+                )}
                 <dt>Enrollment</dt>
                 <dd>{enrollmentLabel(viewCourse.enrollment_type)}</dd>
                 {String(viewCourse.enrollment_type || '').toLowerCase() === 'apply' ? (
@@ -782,7 +813,7 @@ export default function CoursesPage({
               className="courseSelect"
               aria-labelledby="course-enroll-label"
               value={form.enrollmentType}
-              onChange={(e) => setForm({ ...form, enrollmentType: e.target.value })}
+              onChange={(e) => onEnrollmentTypeChange(e.target.value)}
             >
               <option value="free">Join Free</option>
               <option value="apply">Apply</option>
@@ -791,7 +822,7 @@ export default function CoursesPage({
             </select>
           </div>
 
-          {!isApplyCourse ? (
+          {showDurationField ? (
             <div className="courseFormField">
               <label className="fieldLabel" htmlFor="course-duration">
                 Duration (days)
@@ -881,33 +912,37 @@ export default function CoursesPage({
             </select>
           </div>
 
-          <div className="courseFormField">
-            <label className="fieldLabel" htmlFor="course-fee">
-              Fee (INR)
-            </label>
-            <input
-              id="course-fee"
-              className="courseInput courseInputNarrow"
-              value={form.feeInr}
-              onChange={(e) => setForm({ ...form, feeInr: Number(e.target.value || 0) })}
-              type="number"
-              min={0}
-            />
-          </div>
+          {showFeeFields ? (
+            <>
+              <div className="courseFormField">
+                <label className="fieldLabel" htmlFor="course-fee">
+                  Fee (INR)
+                </label>
+                <input
+                  id="course-fee"
+                  className="courseInput courseInputNarrow"
+                  value={form.feeInr}
+                  onChange={(e) => setForm({ ...form, feeInr: Number(e.target.value || 0) })}
+                  type="number"
+                  min={0}
+                />
+              </div>
 
-          <div className="courseFormField">
-            <label className="fieldLabel" htmlFor="course-discount">
-              Discount (INR)
-            </label>
-            <input
-              id="course-discount"
-              className="courseInput courseInputNarrow"
-              value={form.discountInr}
-              onChange={(e) => setForm({ ...form, discountInr: Number(e.target.value || 0) })}
-              type="number"
-              min={0}
-            />
-          </div>
+              <div className="courseFormField">
+                <label className="fieldLabel" htmlFor="course-discount">
+                  Discount (INR)
+                </label>
+                <input
+                  id="course-discount"
+                  className="courseInput courseInputNarrow"
+                  value={form.discountInr}
+                  onChange={(e) => setForm({ ...form, discountInr: Number(e.target.value || 0) })}
+                  type="number"
+                  min={0}
+                />
+              </div>
+            </>
+          ) : null}
 
           {isApplyCourse ? (
             <>

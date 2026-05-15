@@ -528,8 +528,8 @@ export default function App() {
           languages: Array.isArray(payload.languages)
             ? payload.languages.filter((x) => typeof x === 'string' && x.trim())
             : [],
-          feeInr: Number(payload.feeInr || 0),
-          discountInr: Number(payload.discountInr || 0),
+          feeInr: payload.enrollmentType === 'subscribe' ? 0 : Number(payload.feeInr || 0),
+          discountInr: payload.enrollmentType === 'subscribe' ? 0 : Number(payload.discountInr || 0),
           courseStatus: payload.courseStatus,
           enrollmentType: payload.enrollmentType,
           progressionType: payload.progressionType === 'day_wise' ? 'day_wise' : 'unlock_all',
@@ -570,8 +570,8 @@ export default function App() {
           languages: Array.isArray(payload.languages)
             ? payload.languages.filter((x) => typeof x === 'string' && x.trim())
             : [],
-          feeInr: Number(payload.feeInr || 0),
-          discountInr: Number(payload.discountInr || 0),
+          feeInr: payload.enrollmentType === 'subscribe' ? 0 : Number(payload.feeInr || 0),
+          discountInr: payload.enrollmentType === 'subscribe' ? 0 : Number(payload.discountInr || 0),
           courseStatus: payload.courseStatus,
           enrollmentType: payload.enrollmentType,
           progressionType: payload.progressionType === 'day_wise' ? 'day_wise' : 'unlock_all',

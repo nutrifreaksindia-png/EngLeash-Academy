@@ -166,6 +166,7 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
   const disc = course.discount_inr ?? 0;
   const eff = Math.max(0, fee - disc);
   const cta = primaryCta(course.enrollment_type);
+  const showCoursePrice = cta.kind !== 'subscribe';
   const isActive = !!course.enrolled;
   const primaryLabel = isActive ? 'Go to Course' : cta.label;
   const onPrimaryAction = async () => {
@@ -239,7 +240,9 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
           <Image source={{ uri: resolveAssetUrl(course.image_url) || '' }} style={styles.coverImg} resizeMode="cover" />
         ) : null}
         {course.description ? <Text style={styles.desc}>{course.description}</Text> : null}
-        {fee > 0 ? (
+        {!showCoursePrice ? (
+          <Text style={styles.price}>See packages</Text>
+        ) : fee > 0 ? (
           <Text style={styles.price}>
             {disc > 0 ? (
               <>
