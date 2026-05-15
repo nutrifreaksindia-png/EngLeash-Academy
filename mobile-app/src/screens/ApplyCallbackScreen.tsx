@@ -10,6 +10,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Country } from 'country-state-city';
 import { api } from '../api/client';
 import { buildCallbackDateOptions } from '../lib/callbackBookingMeta';
@@ -22,15 +23,6 @@ const DEFAULT_COUNTRY_ISO = ALL_COUNTRIES.find((c) => c.isoCode === 'IN')?.isoCo
 
 type TimeSlot = { id: string; label: string };
 
-type Props = {
-  visible: boolean;
-  onClose: () => void;
-  courseId: number;
-  courseName: string;
-  batchId: number | null;
-  onSubmitted?: () => void;
-};
-
 function friendlyDate(ymd: string) {
   const [y, m, d] = ymd.split('-').map(Number);
   if (!y || !m || !d) return ymd;
@@ -38,8 +30,14 @@ function friendlyDate(ymd: string) {
   return dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-export default function CallbackBookingModal({ visible, onClose, courseId, courseName, batchId, onSubmitted }: Props) {
-  const [loading, setLoading] = useState(false);
+export default function ApplyCallbackScreen({ navigation, route }: any) {
+  const insets = useSafeAreaInsets();
+  const courseId = Number(route.params?.courseId);
+  const courseName = String(route.params?.courseName || 'Course');
+  const batchId = route.params?.batch_id ?? route.params?.batchId;
+  const batchIdNorm = batchId === null || batchId === undefined || batchId === '' ? null : Number(batchId);
+
+  const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [holidays, setHolidays] = useState<string[]>([]);
   const [timeSlots, setTimeSlots] = useState<TimeSlot[]>([]);
@@ -50,7 +48,7 @@ export default function CallbackBookingModal({ visible, onClose, courseId, cours
   const [callbackSlot, setCallbackSlot] = useState('');
   const [countryModal, setCountryModal] = useState(false);
 
-  const dateOptions = useMemo(() => buildCallbackDateOptions(holidays, 45, 200), [holidays]);
+  const dateOptions = useMemo(() => buildCallbackDateOptions(holidays, 7), [holidays]);
 
   const dialCode = useMemo(() => {
     const c = ALL_COUNTRIES.find((x) => x.isoCode === countryIso);
@@ -66,7 +64,11 @@ export default function CallbackBookingModal({ visible, onClose, courseId, cours
   }, []);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!Number.isFinite(courseId)) {
+      Alert.alert('Callback', 'Invalid course.');
+      navigation.goBack();
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     resetForm();
@@ -99,14 +101,14 @@ export default function CallbackBookingModal({ visible, onClose, courseId, cours
     return () => {
       cancelled = true;
     };
-  }, [visible, resetForm]);
+  }, [courseId, navigation, resetForm]);
 
   useEffect(() => {
-    if (!visible || !dateOptions.length) return;
+    if (!dateOptions.length) return;
     if (!callbackDate || !dateOptions.includes(callbackDate)) {
       setCallbackDate(dateOptions[0]);
     }
-  }, [visible, dateOptions, callbackDate]);
+  }, [dateOptions, callbackDate]);
 
   async function submit() {
     const name = displayName.trim();
@@ -131,7 +133,7 @@ export default function CallbackBookingModal({ visible, onClose, courseId, cours
     try {
       await api.post('/payments/apply/enquiries', {
         course_id: courseId,
-        batch_id: batchId == null ? null : batchId,
+        batch_id: batchIdNorm,
         display_name: name,
         phone_country_code: dialCode,
         phone_local: digits,
@@ -139,8 +141,7 @@ export default function CallbackBookingModal({ visible, onClose, courseId, cours
         callback_slot: callbackSlot,
       });
       Alert.alert('Request sent', 'We will call you back at your chosen time. Thank you.');
-      onSubmitted?.();
-      onClose();
+      navigation.goBack();
     } catch (e: any) {
       Alert.alert('Callback', e?.message || 'Could not submit request');
     } finally {
@@ -149,41 +150,44 @@ export default function CallbackBookingModal({ visible, onClose, courseId, cours
   }
 
   return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <View style={styles.overlay}>
-        <View style={styles.card}>
-          <Text style={styles.title}>Book a callback</Text>
-          <Text style={styles.sub}>{courseName}</Text>
-          {batchId != null ? <Text style={styles.hint}>Regarding batch #{batchId}</Text> : null}
-          {loading ? <ActivityIndicator color={BRAND_RED} style={{ marginVertical: 12 }} /> : null}
-          {!loading ? (
-            <ScrollView style={styles.scroll} keyboardShouldPersistTaps="handled">
-              <Text style={styles.label}>Your name</Text>
+    <View style={[styles.page, { paddingBottom: 12 + insets.bottom }]}>
+      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+        <Text style={styles.sub}>{courseName}</Text>
+        {batchIdNorm != null ? <Text style={styles.hint}>Regarding batch #{batchIdNorm}</Text> : null}
+        {loading ? <ActivityIndicator color={BRAND_RED} style={{ marginVertical: 16 }} /> : null}
+        {!loading ? (
+          <>
+            <Text style={styles.label}>Your name</Text>
+            <TextInput
+              style={styles.input}
+              value={displayName}
+              onChangeText={setDisplayName}
+              placeholder="Full name"
+              placeholderTextColor="#94a3b8"
+            />
+
+            <Text style={styles.label}>Phone</Text>
+            <View style={styles.phoneRow}>
+              <TouchableOpacity style={styles.codeBtn} onPress={() => setCountryModal(true)}>
+                <Text style={styles.codeBtnText}>{dialCode}</Text>
+              </TouchableOpacity>
               <TextInput
-                style={styles.input}
-                value={displayName}
-                onChangeText={setDisplayName}
-                placeholder="Full name"
+                style={[styles.input, styles.phoneInput]}
+                value={phoneLocal}
+                onChangeText={(t) => setPhoneLocal(t.replace(/[^\d\s-]/g, ''))}
+                placeholder="Mobile number"
+                keyboardType="phone-pad"
                 placeholderTextColor="#94a3b8"
               />
+            </View>
 
-              <Text style={styles.label}>Phone</Text>
-              <View style={styles.phoneRow}>
-                <TouchableOpacity style={styles.codeBtn} onPress={() => setCountryModal(true)}>
-                  <Text style={styles.codeBtnText}>{dialCode}</Text>
-                </TouchableOpacity>
-                <TextInput
-                  style={[styles.input, styles.phoneInput]}
-                  value={phoneLocal}
-                  onChangeText={(t) => setPhoneLocal(t.replace(/[^\d\s-]/g, ''))}
-                  placeholder="Mobile number"
-                  keyboardType="phone-pad"
-                  placeholderTextColor="#94a3b8"
-                />
-              </View>
-
-              <Text style={styles.label}>Preferred date (IST)</Text>
-              <Text style={styles.hintSmall}>Sundays, second Saturdays, and academy holidays are excluded.</Text>
+            <Text style={styles.label}>Preferred date (IST)</Text>
+            <Text style={styles.hintSmall}>
+              Next 7 days only. Sundays, second Saturdays, and academy holidays are excluded.
+            </Text>
+            {dateOptions.length === 0 ? (
+              <Text style={styles.noDatesHint}>No bookable days in this week. Please try again later.</Text>
+            ) : (
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
                 {dateOptions.map((ymd) => (
                   <TouchableOpacity
@@ -195,30 +199,34 @@ export default function CallbackBookingModal({ visible, onClose, courseId, cours
                   </TouchableOpacity>
                 ))}
               </ScrollView>
+            )}
 
-              <Text style={styles.label}>Time slot</Text>
-              {timeSlots.map((slot) => (
-                <TouchableOpacity
-                  key={slot.id}
-                  style={[styles.slotBtn, callbackSlot === slot.id && styles.slotBtnOn]}
-                  onPress={() => setCallbackSlot(slot.id)}
-                >
-                  <Text style={[styles.slotText, callbackSlot === slot.id && styles.slotTextOn]}>{slot.label}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          ) : null}
+            <Text style={styles.label}>Time slot</Text>
+            {timeSlots.map((slot) => (
+              <TouchableOpacity
+                key={slot.id}
+                style={[styles.slotBtn, callbackSlot === slot.id && styles.slotBtnOn]}
+                onPress={() => setCallbackSlot(slot.id)}
+              >
+                <Text style={[styles.slotText, callbackSlot === slot.id && styles.slotTextOn]}>{slot.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </>
+        ) : null}
 
-          <View style={styles.actions}>
-            <TouchableOpacity style={styles.btnOutline} onPress={onClose} disabled={submitting}>
-              <Text style={styles.btnOutlineText}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.btnPrimary} onPress={() => void submit()} disabled={submitting || loading}>
-              <Text style={styles.btnPrimaryText}>{submitting ? 'Sending…' : 'Submit'}</Text>
-            </TouchableOpacity>
-          </View>
+        <View style={styles.actions}>
+          <TouchableOpacity style={styles.btnOutline} onPress={() => navigation.goBack()} disabled={submitting}>
+            <Text style={styles.btnOutlineText}>Cancel</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.btnPrimary}
+            onPress={() => void submit()}
+            disabled={submitting || loading || dateOptions.length === 0}
+          >
+            <Text style={styles.btnPrimaryText}>{submitting ? 'Sending…' : 'Submit'}</Text>
+          </TouchableOpacity>
         </View>
-      </View>
+      </ScrollView>
 
       <Modal visible={countryModal} animationType="fade" transparent onRequestClose={() => setCountryModal(false)}>
         <TouchableOpacity style={styles.countryOverlay} activeOpacity={1} onPress={() => setCountryModal(false)}>
@@ -241,23 +249,17 @@ export default function CallbackBookingModal({ visible, onClose, courseId, cours
           </View>
         </TouchableOpacity>
       </Modal>
-    </Modal>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: 'rgba(15,23,42,0.5)', justifyContent: 'center', padding: 14 },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 14,
-    padding: 14,
-    maxHeight: '88%',
-  },
-  scroll: { maxHeight: 420 },
-  title: { fontSize: 18, fontWeight: '800', color: BRAND_BLUE },
-  sub: { fontSize: 14, color: '#475569', marginTop: 4 },
+  page: { flex: 1, backgroundColor: '#f5f5f5' },
+  scroll: { padding: 16, paddingBottom: 32 },
+  sub: { fontSize: 16, fontWeight: '700', color: BRAND_BLUE },
   hint: { fontSize: 12, color: '#64748b', marginTop: 4 },
   hintSmall: { fontSize: 12, color: '#94a3b8', marginBottom: 6 },
+  noDatesHint: { fontSize: 13, color: '#b45309', marginTop: 6, marginBottom: 4 },
   label: { fontSize: 13, fontWeight: '700', color: '#0f172a', marginTop: 12 },
   input: {
     borderWidth: 1,
@@ -268,6 +270,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#0f172a',
     marginTop: 6,
+    backgroundColor: '#fff',
   },
   phoneRow: { flexDirection: 'row', gap: 8, marginTop: 6, alignItems: 'center' },
   codeBtn: {
@@ -276,6 +279,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
+    backgroundColor: '#fff',
   },
   codeBtnText: { fontWeight: '700', color: BRAND_BLUE, fontSize: 14 },
   phoneInput: { flex: 1, marginTop: 0 },
@@ -287,6 +291,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
     marginRight: 8,
+    backgroundColor: '#fff',
   },
   chipOn: { backgroundColor: BRAND_BLUE, borderColor: BRAND_BLUE },
   chipText: { fontSize: 12, color: '#334155', fontWeight: '600' },
@@ -298,11 +303,12 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 12,
     marginTop: 8,
+    backgroundColor: '#fff',
   },
   slotBtnOn: { borderColor: BRAND_BLUE, backgroundColor: '#e8eaf6' },
   slotText: { fontSize: 14, color: '#334155' },
   slotTextOn: { color: BRAND_BLUE, fontWeight: '700' },
-  actions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 14 },
+  actions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 20 },
   btnOutline: { borderWidth: 1.5, borderColor: BRAND_BLUE, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 14 },
   btnOutlineText: { color: BRAND_BLUE, fontWeight: '700' },
   btnPrimary: { backgroundColor: BRAND_RED, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 16 },

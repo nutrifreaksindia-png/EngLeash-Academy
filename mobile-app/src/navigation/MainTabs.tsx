@@ -9,6 +9,8 @@ import { appStackScreenOptions } from './stackHeaderOptions';
 
 import LandingHomeScreen from '../screens/LandingHomeScreen';
 import PublicCourseDetailScreen from '../screens/PublicCourseDetailScreen';
+import ApplyCourseBatchesScreen from '../screens/ApplyCourseBatchesScreen';
+import ApplyCallbackScreen from '../screens/ApplyCallbackScreen';
 import CoursePurchaseSummaryScreen from '../screens/CoursePurchaseSummaryScreen';
 import CourseSubscribePackagesScreen from '../screens/CourseSubscribePackagesScreen';
 import MyCoursesScreen from '../screens/MyCoursesScreen';
@@ -55,6 +57,14 @@ function HomeStackNavigator() {
           title: route.params?.courseName || 'Course',
         })}
       />
+      <HomeStack.Screen
+        name="ApplyCourseBatches"
+        component={ApplyCourseBatchesScreen}
+        options={({ route }: { route: { params?: { course?: { name?: string } } } }) => ({
+          title: route.params?.course?.name ? `Apply — ${route.params.course.name}` : 'Apply',
+        })}
+      />
+      <HomeStack.Screen name="ApplyCallback" component={ApplyCallbackScreen} options={{ title: 'Book a callback' }} />
       <HomeStack.Screen name="CoursePurchaseSummary" component={CoursePurchaseSummaryScreen} options={{ title: 'Purchase' }} />
       <HomeStack.Screen
         name="CourseSubscribePackages"

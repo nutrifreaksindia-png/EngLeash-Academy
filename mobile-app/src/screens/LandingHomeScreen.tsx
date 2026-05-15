@@ -4,9 +4,7 @@ import {
   Alert,
   FlatList,
   Image,
-  Modal,
   RefreshControl,
-  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -18,8 +16,6 @@ import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { API_BASE } from '../config';
-import { alertApplyPaymentError, payApplyDueWithRazorpay } from '../payments/razorpayApplyBilling';
-import CallbackBookingModal from '../components/CallbackBookingModal';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -43,20 +39,6 @@ export type PublicCourse = {
   apply_grace_days?: number;
   apply_enquiry_enabled?: boolean | number;
   enrolled?: boolean;
-};
-
-type OpenBatch = {
-  id: number;
-  batch_number?: number;
-  title?: string;
-  name?: string;
-  session_type: 'group' | 'one_to_one';
-  duration_days?: number | null;
-  training_schedule_json?: string | null;
-  batch_status?: string;
-  planned_start_date?: string | null;
-  actual_start_date?: string | null;
-  sessions_passed?: number;
 };
 
 const SERVICES = [
@@ -86,65 +68,13 @@ function primaryCta(typeRaw?: string) {
   return { label: 'Join Free', kind: 'free' as const };
 }
 
-function localYmd(value?: string | null) {
-  if (!value) return null;
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
-}
-
-function startDateForBatch(batch: OpenBatch) {
-  return batch.actual_start_date || batch.planned_start_date || null;
-}
-
-function allowedApplyPlansForBatch(batch: OpenBatch) {
-  const startYmd = startDateForBatch(batch);
-  if (!startYmd) return ['single_payment', 'first_installment'] as const;
-  const today = localYmd(new Date().toISOString()) || startYmd;
-  const startMs = new Date(`${startYmd}T00:00:00`).getTime();
-  const todayMs = new Date(`${today}T00:00:00`).getTime();
-  const days = Math.floor((startMs - todayMs) / (24 * 60 * 60 * 1000));
-  return days > 7
-    ? (['registration', 'single_payment', 'first_installment'] as const)
-    : (['single_payment', 'first_installment'] as const);
-}
-
-function applyPlanLabel(plan: 'registration' | 'single_payment' | 'first_installment') {
-  if (plan === 'registration') return 'Registration fee';
-  if (plan === 'single_payment') return 'Single payment';
-  return 'First installment';
-}
-
-function applyPlanAmount(course: PublicCourse, plan: 'registration' | 'single_payment' | 'first_installment') {
-  const total = Math.max(0, Number(course.fee_inr || 0));
-  const registration = Math.min(total, Number(course.apply_registration_fee_inr ?? 999));
-  const singleDiscount = Math.max(0, Number(course.apply_single_payment_discount_inr || 0));
-  const installmentCount = Math.max(1, Number(course.apply_installment_count || 2));
-  if (plan === 'registration') return registration;
-  if (plan === 'single_payment') return Math.max(0, total - singleDiscount);
-  return Math.ceil((total * 100) / installmentCount) / 100;
-}
-
 export default function LandingHomeScreen({ navigation, route }: any) {
-  function formatDateFriendly(value: string | null | undefined) {
-    if (!value) return '—';
-    const d = new Date(value);
-    if (Number.isNaN(d.getTime())) return String(value);
-    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-  }
-
   const { user, refreshUser } = useAuth();
   const insets = useSafeAreaInsets();
   const [courses, setCourses] = useState<PublicCourse[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [enrollingId, setEnrollingId] = useState<number | null>(null);
-  const [applyCourse, setApplyCourse] = useState<PublicCourse | null>(null);
-  const [openBatches, setOpenBatches] = useState<OpenBatch[]>([]);
-  const [openBatchesLoading, setOpenBatchesLoading] = useState(false);
-  const [applyBusyKey, setApplyBusyKey] = useState<string | null>(null);
-  const [callbackTarget, setCallbackTarget] = useState<{ batchId: number | null } | null>(null);
-  const applyResumeKeyRef = useRef<string | null>(null);
   const subscribeResumeKeyRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
@@ -165,18 +95,6 @@ export default function LandingHomeScreen({ navigation, route }: any) {
     }, [load])
   );
 
-  /** Load open batches modal for Apply (authenticated). */
-  const openApplyModalForCourse = useCallback((course: PublicCourse) => {
-    setApplyCourse(course);
-    setOpenBatches([]);
-    setOpenBatchesLoading(true);
-    api
-      .get(`/enrollments/courses/${course.id}/open-batches`)
-      .then((data) => setOpenBatches(Array.isArray(data?.batches) ? data.batches : []))
-      .catch((e: any) => Alert.alert('Apply', e?.message || 'Could not load open batches'))
-      .finally(() => setOpenBatchesLoading(false));
-  }, []);
-
   const goAccount = () => navigation.getParent()?.navigate?.('Account');
 
   const goToCourse = useCallback((course: PublicCourse) => {
@@ -188,34 +106,6 @@ export default function LandingHomeScreen({ navigation, route }: any) {
       },
     });
   }, [navigation]);
-
-  useFocusEffect(
-    useCallback(() => {
-      const rawId = route.params?.applyAfterAuthCourseId;
-      if (!user || rawId == null) return;
-
-      const id = Number(rawId);
-      const nameRaw = route.params?.applyAfterAuthCourseName;
-      const resumeKey = `${user.id}:${id}:${String(nameRaw || '')}`;
-      if (!Number.isFinite(id) || applyResumeKeyRef.current === resumeKey) return;
-      applyResumeKeyRef.current = resumeKey;
-
-      navigation.setParams({
-        applyAfterAuthCourseId: undefined,
-        applyAfterAuthCourseName: undefined,
-      });
-
-      const fromList = courses.find((c) => c.id === id);
-      const course: PublicCourse =
-        fromList ||
-        ({
-          id,
-          name: String(nameRaw || 'Course'),
-          enrollment_type: 'apply',
-        } as PublicCourse);
-      openApplyModalForCourse(course);
-    }, [user, route.params?.applyAfterAuthCourseId, route.params?.applyAfterAuthCourseName, courses, navigation, openApplyModalForCourse])
-  );
 
   useFocusEffect(
     useCallback(() => {
@@ -281,37 +171,8 @@ export default function LandingHomeScreen({ navigation, route }: any) {
       });
       return;
     }
-    applyResumeKeyRef.current = null;
-    openApplyModalForCourse(course);
+    navigation.navigate('ApplyCourseBatches', { course });
   };
-
-  async function applyToBatch(batch: OpenBatch, selectedPlan: 'registration' | 'single_payment' | 'first_installment') {
-    if (!applyCourse) return;
-    if (!user) return;
-    const busyKey = `${batch.id}:${selectedPlan}`;
-    setApplyBusyKey(busyKey);
-    try {
-      const result = await payApplyDueWithRazorpay({
-        courseId: applyCourse.id,
-        batchId: batch.id,
-        selectedPlan,
-        userEmail: user.email,
-        userName: user.name,
-        userMobileDigits: user.mobile_number ?? undefined,
-        checkoutTitle: `${applyCourse.name} — ${applyPlanLabel(selectedPlan)}`,
-      });
-      if (!result?.ok) return;
-      Alert.alert('Application sent', 'Payment successful. Your application is now pending review.');
-      setApplyCourse(null);
-      setOpenBatches([]);
-      refreshUser();
-      load();
-    } catch (e: any) {
-      alertApplyPaymentError(e);
-    } finally {
-      setApplyBusyKey(null);
-    }
-  }
 
   const onPurchase = (course: PublicCourse) => {
     if (!user) {
@@ -476,92 +337,6 @@ export default function LandingHomeScreen({ navigation, route }: any) {
           );
         }}
       />
-      <Modal visible={!!applyCourse} animationType="slide" transparent onRequestClose={() => setApplyCourse(null)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Apply - {applyCourse?.name}</Text>
-            {openBatchesLoading ? <ActivityIndicator color={BRAND_RED} /> : null}
-            {!openBatchesLoading && openBatches.length === 0 ? (
-              applyCourse?.apply_enquiry_enabled === false || applyCourse?.apply_enquiry_enabled === 0 ? null : (
-                <TouchableOpacity style={styles.batchEnquiryBtn} onPress={() => setCallbackTarget({ batchId: null })}>
-                  <Text style={styles.batchEnquiryText}>Enquiry</Text>
-                </TouchableOpacity>
-              )
-            ) : (
-              <ScrollView style={styles.batchListScroll}>
-                {openBatches.map((b) => {
-                  const allowedPlans = allowedApplyPlansForBatch(b);
-                  let sched = {};
-                  try {
-                    sched = b.training_schedule_json ? JSON.parse(b.training_schedule_json) : {};
-                  } catch {
-                    sched = {};
-                  }
-                  const days = Array.isArray((sched as any).daysOfWeek) ? (sched as any).daysOfWeek.join(', ') : '—';
-                  const timing = (sched as any).startTime && (sched as any).endTime ? `${(sched as any).startTime}-${(sched as any).endTime}` : '—';
-                  return (
-                    <View key={b.id} style={styles.batchCard}>
-                      <Text style={styles.batchCardTitle}>
-                        Batch {b.batch_number || b.id} - {b.title || b.name}
-                      </Text>
-                      <Text style={styles.batchMeta}>Type: {b.session_type === 'one_to_one' ? '1:1' : 'Group'}</Text>
-                      <Text style={styles.batchMeta}>Duration: {b.duration_days || '—'} days</Text>
-                      <Text style={styles.batchMeta}>Days: {days}</Text>
-                      <Text style={styles.batchMeta}>Live timing: {timing}</Text>
-                      <Text style={styles.batchMeta}>Status: {b.batch_status === 'started' ? 'Started' : 'Not started'}</Text>
-                      {b.batch_status === 'started' ? (
-                        <>
-                          <Text style={styles.batchMeta}>Date started: {formatDateFriendly(b.actual_start_date)}</Text>
-                          <Text style={styles.batchMeta}>Sessions passed: {b.sessions_passed || 0}</Text>
-                        </>
-                      ) : (
-                        <Text style={styles.batchMeta}>Expected start: {formatDateFriendly(b.planned_start_date)}</Text>
-                      )}
-                      <Text style={styles.batchPlanHint}>Choose a payment option to apply:</Text>
-                      <View style={styles.batchPlanRow}>
-                        {allowedPlans.map((plan) => {
-                          const busy = applyBusyKey === `${b.id}:${plan}`;
-                          return (
-                            <TouchableOpacity
-                              key={plan}
-                              style={[styles.batchPlanBtn, busy && styles.batchPlanBtnDisabled]}
-                              disabled={!!applyBusyKey}
-                              onPress={() => void applyToBatch(b, plan)}
-                            >
-                              <Text style={styles.batchPlanBtnText}>
-                                {busy
-                                  ? 'Opening…'
-                                  : `${applyPlanLabel(plan)} · ${formatInr(applyCourse ? applyPlanAmount(applyCourse, plan) : 0)}`}
-                              </Text>
-                            </TouchableOpacity>
-                          );
-                        })}
-                      </View>
-                      {applyCourse?.apply_enquiry_enabled === false || applyCourse?.apply_enquiry_enabled === 0 ? null : (
-                        <TouchableOpacity style={styles.batchEnquiryBtn} onPress={() => setCallbackTarget({ batchId: b.id })}>
-                          <Text style={styles.batchEnquiryText}>Enquiry</Text>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  );
-                })}
-              </ScrollView>
-            )}
-            <TouchableOpacity style={styles.btnOutline} onPress={() => setApplyCourse(null)}>
-              <Text style={styles.btnOutlineText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-      {applyCourse ? (
-        <CallbackBookingModal
-          visible={callbackTarget != null}
-          onClose={() => setCallbackTarget(null)}
-          courseId={applyCourse.id}
-          courseName={applyCourse.name}
-          batchId={callbackTarget?.batchId ?? null}
-        />
-      ) : null}
     </View>
   );
 }
@@ -626,47 +401,4 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
   },
   activeTagText: { color: '#2e7d32', fontWeight: '700', fontSize: 13 },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(15,23,42,0.45)',
-    justifyContent: 'center',
-    padding: 16,
-  },
-  modalCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 14,
-    maxHeight: '84%',
-  },
-  modalTitle: { fontSize: 16, fontWeight: '700', color: BRAND_BLUE, marginBottom: 10 },
-  batchListScroll: { marginBottom: 12 },
-  batchCard: {
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-    borderRadius: 10,
-    padding: 10,
-    marginBottom: 10,
-    backgroundColor: '#f8fafc',
-  },
-  batchCardTitle: { fontSize: 14, fontWeight: '700', color: '#111827' },
-  batchMeta: { fontSize: 12, color: '#334155', marginTop: 2 },
-  batchPlanHint: { marginTop: 10, fontSize: 12, color: '#475569', fontWeight: '700' },
-  batchPlanRow: { marginTop: 8, gap: 8 },
-  batchPlanBtn: {
-    backgroundColor: BRAND_RED,
-    borderRadius: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 10,
-  },
-  batchPlanBtnDisabled: { opacity: 0.6 },
-  batchPlanBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
-  batchEnquiryBtn: {
-    marginTop: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: BRAND_BLUE,
-    paddingVertical: 10,
-    paddingHorizontal: 10,
-  },
-  batchEnquiryText: { color: BRAND_BLUE, fontSize: 12, fontWeight: '700', textAlign: 'center' },
 });

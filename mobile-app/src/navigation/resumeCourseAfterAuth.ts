@@ -1,4 +1,4 @@
-/** Apply / Subscribe resume: after auth, reopen Home → LandingHome with continuation params. Purchase goes to CoursePurchaseSummary (see navigatePurchaseSummaryAfterAuth). */
+/** Apply: after auth, open Apply batches screen. Subscribe: LandingHome params. Purchase: CoursePurchaseSummary (navigatePurchaseSummaryAfterAuth). */
 
 export type ResumeCourseAuthNavParams = {
   redirectAfterSignup: 'apply' | 'subscribe';
@@ -28,16 +28,25 @@ export function navigateLandingResumeCourseAfterAuth(
   const courseIdNum = Number(normalized.courseId);
   if (!Number.isFinite(courseIdNum)) return false;
   const courseNameStr = normalized.courseName ?? '';
-  const landingParams =
-    normalized.redirectAfterSignup === 'apply'
-      ? { applyAfterAuthCourseId: courseIdNum, applyAfterAuthCourseName: courseNameStr }
-      : {
-          subscribeAfterAuthCourseId: courseIdNum,
-          subscribeAfterAuthCourseName: courseNameStr,
-        };
+  if (normalized.redirectAfterSignup === 'apply') {
+    tabNav?.navigate?.('Home', {
+      screen: 'ApplyCourseBatches',
+      params: {
+        course: {
+          id: courseIdNum,
+          name: courseNameStr,
+          enrollment_type: 'apply',
+        },
+      },
+    });
+    return true;
+  }
   tabNav?.navigate?.('Home', {
     screen: 'LandingHome',
-    params: landingParams,
+    params: {
+      subscribeAfterAuthCourseId: courseIdNum,
+      subscribeAfterAuthCourseName: courseNameStr,
+    },
   });
   return true;
 }

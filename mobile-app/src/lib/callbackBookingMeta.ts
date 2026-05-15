@@ -50,11 +50,12 @@ export function addDaysIstFromYmd(startYmd: string, deltaDays: number): string {
   }).format(new Date(t));
 }
 
-export function buildCallbackDateOptions(holidayList: string[], maxPick = 40, searchDays = 180): string[] {
+/** Valid dates in the next `calendarDayCount` IST calendar days starting today (e.g. 7 → today through +6). */
+export function buildCallbackDateOptions(holidayList: string[], calendarDayCount = 7): string[] {
   const holidays = new Set((holidayList || []).map((h) => String(h).trim()).filter(Boolean));
   const out: string[] = [];
   let ymd = formatIstYmd();
-  for (let i = 0; i < searchDays && out.length < maxPick; i++) {
+  for (let i = 0; i < calendarDayCount; i++) {
     if (isCallbackDateAllowed(ymd, holidays)) out.push(ymd);
     ymd = addDaysIstFromYmd(ymd, 1);
   }
