@@ -9,6 +9,44 @@ const { isSpacesConfigured, deleteObjectsUnderPrefix } = require('../services/sp
 
 const router = express.Router();
 
+function numberOrDefault(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function netCourseFeeInr(feeInr, discountInr) {
+  return Math.max(0, numberOrDefault(feeInr, 0) - numberOrDefault(discountInr, 0));
+}
+
+function splitEvenlyInr(totalInr, count) {
+  const totalPaise = Math.round(Math.max(0, numberOrDefault(totalInr, 0)) * 100);
+  const n = Math.max(1, Math.trunc(numberOrDefault(count, 1)));
+  const base = Math.floor(totalPaise / n);
+  let remainder = totalPaise - base * n;
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    const extra = remainder > 0 ? 1 : 0;
+    if (remainder > 0) remainder -= 1;
+    out.push((base + extra) / 100);
+  }
+  return out;
+}
+
+function normalizeApplyInstallmentAmounts(raw, count, netFeeInr) {
+  const n = Math.max(1, Math.trunc(numberOrDefault(count, 1)));
+  const values = Array.isArray(raw) ? raw : [];
+  const amounts = values.map((x) => numberOrDefault(x, NaN));
+  if (amounts.length !== n || amounts.some((x) => !Number.isFinite(x) || x < 0)) {
+    return { ok: false, error: `Enter ${n} installment amount${n === 1 ? '' : 's'}.` };
+  }
+  const amountPaiseTotal = amounts.reduce((sum, amount) => sum + Math.round(amount * 100), 0);
+  const netPaise = Math.round(Math.max(0, numberOrDefault(netFeeInr, 0)) * 100);
+  if (amountPaiseTotal !== netPaise) {
+    return { ok: false, error: 'Installment amounts must add up to the net course fee.' };
+  }
+  return { ok: true, json: JSON.stringify(amounts) };
+}
+
 router.get('/', auth, (req, res) => {
   const { role } = req.user;
   if (role === 'Admin' || role === 'Creator') {
@@ -17,7 +55,7 @@ router.get('/', auth, (req, res) => {
               highlights, specifications_html, duration_days, lesson_schedule_json, modes_json, languages_json,
               fee_inr, discount_inr, course_status, enrollment_type, progression_type,
               apply_registration_fee_inr, apply_single_payment_discount_inr,
-              apply_installment_count, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
+              apply_installment_count, apply_installment_amounts_json, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
        FROM courses ORDER BY sort_order, id`
     ).all();
     return res.json(courses);
@@ -30,7 +68,7 @@ router.get('/', auth, (req, res) => {
            c.highlights, c.specifications_html, c.duration_days, c.lesson_schedule_json, c.modes_json, c.languages_json,
            c.fee_inr, c.discount_inr, c.course_status, c.enrollment_type, c.progression_type,
            c.apply_registration_fee_inr, c.apply_single_payment_discount_inr,
-           c.apply_installment_count, c.apply_installment_gap_days, c.apply_grace_days, c.apply_enquiry_enabled
+           c.apply_installment_count, c.apply_installment_amounts_json, c.apply_installment_gap_days, c.apply_grace_days, c.apply_enquiry_enabled
     FROM courses c
     WHERE c.is_published = 1 AND COALESCE(c.course_status, 'Active') = 'Active'
     ORDER BY c.sort_order, c.id
@@ -58,7 +96,7 @@ router.get('/catalog', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), 
     `SELECT id, name, description, image_url, sort_order, highlights, duration_days, modes_json, languages_json,
             fee_inr, discount_inr, course_status, enrollment_type, progression_type,
             apply_registration_fee_inr, apply_single_payment_discount_inr,
-            apply_installment_count, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
+            apply_installment_count, apply_installment_amounts_json, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
      FROM courses WHERE is_published = 1 AND COALESCE(course_status, 'Active') = 'Active' ORDER BY sort_order, id`
   ).all();
   const uid = req.user.id;
@@ -120,7 +158,7 @@ router.get('/public', (req, res) => {
     `SELECT id, name, description, image_url, sort_order, highlights, duration_days, modes_json, languages_json,
             fee_inr, discount_inr, course_status, enrollment_type, progression_type,
             apply_registration_fee_inr, apply_single_payment_discount_inr,
-            apply_installment_count, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
+            apply_installment_count, apply_installment_amounts_json, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
      FROM courses WHERE is_published = 1 AND COALESCE(course_status, 'Active') = 'Active' ORDER BY sort_order, id`
   ).all();
   res.json(courses);
@@ -133,7 +171,7 @@ router.get('/public/:id', (req, res) => {
     `SELECT id, name, description, image_url, sort_order, highlights, duration_days, modes_json, languages_json,
             fee_inr, discount_inr, course_status, enrollment_type, progression_type, specifications_html,
             apply_registration_fee_inr, apply_single_payment_discount_inr,
-            apply_installment_count, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
+            apply_installment_count, apply_installment_amounts_json, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
      FROM courses WHERE id = ? AND is_published = 1 AND COALESCE(course_status, 'Active') = 'Active'`
   ).get(id);
   if (!c) return res.status(404).json({ error: 'Course not found' });
@@ -146,7 +184,7 @@ router.get('/:id', auth, (req, res) => {
            highlights, specifications_html, duration_days, lesson_schedule_json, modes_json, languages_json,
            fee_inr, discount_inr, course_status, enrollment_type, progression_type,
            apply_registration_fee_inr, apply_single_payment_discount_inr,
-           apply_installment_count, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
+           apply_installment_count, apply_installment_amounts_json, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
     FROM courses WHERE id = ?
   `).get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Course not found' });
@@ -166,6 +204,7 @@ router.post('/', auth, requireRole('Admin'), (req, res) => {
     applyRegistrationFeeInr,
     applySinglePaymentDiscountInr,
     applyInstallmentCount,
+    applyInstallmentAmounts,
     applyInstallmentGapDays,
     applyGraceDays,
     applyEnquiryEnabled,
@@ -178,13 +217,25 @@ router.post('/', auth, requireRole('Admin'), (req, res) => {
       : isPublishedBody === true || isPublishedBody === 1 || isPublishedBody === '1'
         ? 1
         : 0;
+  const enrollmentTypeValue = enrollmentType || 'free';
+  const installmentCount = Math.max(1, Math.trunc(numberOrDefault(applyInstallmentCount ?? 2, 2)));
+  let installmentAmountsJson = null;
+  if (String(enrollmentTypeValue).toLowerCase() === 'apply') {
+    const installmentAmounts = normalizeApplyInstallmentAmounts(
+      applyInstallmentAmounts,
+      installmentCount,
+      netCourseFeeInr(feeInr ?? 0, discountInr ?? 0),
+    );
+    if (!installmentAmounts.ok) return res.status(400).json({ error: installmentAmounts.error });
+    installmentAmountsJson = installmentAmounts.json;
+  }
   db.prepare(
     `INSERT INTO courses (
       name, description, image_url, sort_order, is_published, highlights, specifications_html, duration_days, lesson_schedule_json, modes_json, languages_json,
       fee_inr, discount_inr, course_status, enrollment_type, progression_type,
-      apply_registration_fee_inr, apply_single_payment_discount_inr, apply_installment_count,
+      apply_registration_fee_inr, apply_single_payment_discount_inr, apply_installment_count, apply_installment_amounts_json,
       apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     name || '',
     description || '',
@@ -200,11 +251,12 @@ router.post('/', auth, requireRole('Admin'), (req, res) => {
     feeInr ?? 0,
     discountInr ?? 0,
     courseStatus || 'Active',
-    enrollmentType || 'free',
+    enrollmentTypeValue,
     progressionType === 'day_wise' ? 'day_wise' : 'unlock_all',
     applyRegistrationFeeInr ?? 999,
     applySinglePaymentDiscountInr ?? 0,
-    applyInstallmentCount ?? 2,
+    installmentCount,
+    installmentAmountsJson,
     applyInstallmentGapDays ?? 30,
     applyGraceDays ?? 7,
     applyEnquiryEnabled === false || applyEnquiryEnabled === 0 ? 0 : 1
@@ -223,10 +275,44 @@ router.put('/:id', auth, requireRole('Admin'), (req, res) => {
     applyRegistrationFeeInr,
     applySinglePaymentDiscountInr,
     applyInstallmentCount,
+    applyInstallmentAmounts,
     applyInstallmentGapDays,
     applyGraceDays,
     applyEnquiryEnabled,
   } = req.body;
+
+  const current = db.prepare('SELECT * FROM courses WHERE id = ?').get(req.params.id);
+  if (!current) return res.status(404).json({ error: 'Course not found' });
+  const nextFeeInr = feeInr === undefined ? current.fee_inr : feeInr;
+  const nextDiscountInr = discountInr === undefined ? current.discount_inr : discountInr;
+  const nextEnrollmentType = enrollmentType === undefined ? current.enrollment_type : enrollmentType;
+  const nextInstallmentCount = Math.max(
+    1,
+    Math.trunc(numberOrDefault(applyInstallmentCount === undefined ? current.apply_installment_count : applyInstallmentCount, 1)),
+  );
+  let nextInstallmentRaw =
+    applyInstallmentAmounts === undefined
+      ? (() => {
+          try {
+            return JSON.parse(current.apply_installment_amounts_json || '[]');
+          } catch (_) {
+            return [];
+          }
+        })()
+      : applyInstallmentAmounts;
+  let installmentAmountsJson = current.apply_installment_amounts_json || null;
+  if (String(nextEnrollmentType || 'free').toLowerCase() === 'apply') {
+    if (!Array.isArray(nextInstallmentRaw) || nextInstallmentRaw.length === 0) {
+      nextInstallmentRaw = splitEvenlyInr(netCourseFeeInr(nextFeeInr, nextDiscountInr), nextInstallmentCount);
+    }
+    const installmentAmounts = normalizeApplyInstallmentAmounts(
+      nextInstallmentRaw,
+      nextInstallmentCount,
+      netCourseFeeInr(nextFeeInr, nextDiscountInr),
+    );
+    if (!installmentAmounts.ok) return res.status(400).json({ error: installmentAmounts.error });
+    installmentAmountsJson = installmentAmounts.json;
+  }
 
   db.prepare(
     `UPDATE courses SET
@@ -248,6 +334,7 @@ router.put('/:id', auth, requireRole('Admin'), (req, res) => {
       apply_registration_fee_inr = COALESCE(?, apply_registration_fee_inr),
       apply_single_payment_discount_inr = COALESCE(?, apply_single_payment_discount_inr),
       apply_installment_count = COALESCE(?, apply_installment_count),
+      apply_installment_amounts_json = COALESCE(?, apply_installment_amounts_json),
       apply_installment_gap_days = COALESCE(?, apply_installment_gap_days),
       apply_grace_days = COALESCE(?, apply_grace_days),
       apply_enquiry_enabled = COALESCE(?, apply_enquiry_enabled)
@@ -270,7 +357,8 @@ router.put('/:id', auth, requireRole('Admin'), (req, res) => {
     enrollmentType,
     applyRegistrationFeeInr,
     applySinglePaymentDiscountInr,
-    applyInstallmentCount,
+    nextInstallmentCount,
+    installmentAmountsJson,
     applyInstallmentGapDays,
     applyGraceDays,
     applyEnquiryEnabled === undefined ? undefined : (applyEnquiryEnabled ? 1 : 0),
@@ -281,7 +369,6 @@ router.put('/:id', auth, requireRole('Admin'), (req, res) => {
     db.prepare('UPDATE courses SET progression_type = ? WHERE id = ?').run(pt, req.params.id);
   }
   const c = db.prepare('SELECT * FROM courses WHERE id = ?').get(req.params.id);
-  if (!c) return res.status(404).json({ error: 'Course not found' });
   syncCourseLessonSlots(Number(req.params.id));
   res.json(c);
 });

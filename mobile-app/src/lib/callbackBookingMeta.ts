@@ -9,6 +9,37 @@ export function formatIstYmd(d = new Date()): string {
   }).format(d);
 }
 
+export function currentIstMinutes(d = new Date()): number {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(d);
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return 0;
+  return hour * 60 + minute;
+}
+
+export function slotStartMinutes(slotId: string): number | null {
+  const m = /^(\d{1,2})-(\d{1,2})$/.exec(String(slotId || '').trim());
+  if (!m) return null;
+  const hour = Number(m[1]);
+  return Number.isFinite(hour) ? hour * 60 : null;
+}
+
+export function isCallbackSlotBookableForDate(slotId: string, ymd: string, now = new Date()): boolean {
+  if (String(ymd || '').trim() !== formatIstYmd(now)) return true;
+  const start = slotStartMinutes(slotId);
+  if (start == null) return false;
+  return start > currentIstMinutes(now);
+}
+
+export function filterCallbackTimeSlotsForDate<T extends { id: string }>(slots: T[], ymd: string, now = new Date()): T[] {
+  return (slots || []).filter((slot) => isCallbackSlotBookableForDate(slot.id, ymd, now));
+}
+
 export function istWeekdayFromYmd(ymd: string): number | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '').trim());
   if (!m) return null;

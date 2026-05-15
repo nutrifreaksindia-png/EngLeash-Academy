@@ -12,6 +12,34 @@ const CALLBACK_TIME_SLOTS = [
 
 const SLOT_IDS = new Set(CALLBACK_TIME_SLOTS.map((s) => s.id));
 
+function currentIstMinutes(ms = Date.now()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(ms));
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return 0;
+  return hour * 60 + minute;
+}
+
+function slotStartMinutes(slotId) {
+  const m = /^(\d{1,2})-(\d{1,2})$/.exec(String(slotId || '').trim());
+  if (!m) return null;
+  const hour = Number(m[1]);
+  return Number.isFinite(hour) ? hour * 60 : null;
+}
+
+function isCallbackSlotBookableForDate(slotId, ymd, nowMs = Date.now()) {
+  if (!SLOT_IDS.has(String(slotId || '').trim())) return false;
+  if (String(ymd || '').trim() !== formatIstYmd(nowMs)) return true;
+  const start = slotStartMinutes(slotId);
+  if (start == null) return false;
+  return start > currentIstMinutes(nowMs);
+}
+
 function formatIstYmd(ms = Date.now()) {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Kolkata',
@@ -94,6 +122,15 @@ function validateCallbackSlot(slotId) {
   return { ok: true };
 }
 
+function validateCallbackSlotForDate(slotId, ymd) {
+  const base = validateCallbackSlot(slotId);
+  if (!base.ok) return base;
+  if (!isCallbackSlotBookableForDate(slotId, ymd)) {
+    return { ok: false, reason: 'This time slot has already passed' };
+  }
+  return { ok: true };
+}
+
 function normalizePhoneLocal(raw) {
   return String(raw || '').replace(/\D/g, '');
 }
@@ -109,11 +146,15 @@ module.exports = {
   CALLBACK_TIME_SLOTS,
   SLOT_IDS,
   formatIstYmd,
+  currentIstMinutes,
+  slotStartMinutes,
+  isCallbackSlotBookableForDate,
   istWeekdayFromYmd,
   isSecondSaturdayYmd,
   isDisallowedCalendarDay,
   validateCallbackDate,
   validateCallbackSlot,
+  validateCallbackSlotForDate,
   normalizePhoneLocal,
   normalizeCountryDialCode,
 };

@@ -43,7 +43,7 @@ const {
   normalizeCountryDialCode,
   normalizePhoneLocal,
   validateCallbackDate,
-  validateCallbackSlot,
+  validateCallbackSlotForDate,
 } = require('../lib/callbackBookingRules');
 const { streamInvoicePdf } = require('../lib/invoicePdf');
 
@@ -506,7 +506,7 @@ router.post('/apply/enquiries', auth, requireRole('Student', 'Lab'), (req, res) 
   if (!dateCheck.ok) {
     return res.status(400).json({ error: dateCheck.reason || 'Invalid callback date' });
   }
-  const slotCheck = validateCallbackSlot(callbackSlot);
+  const slotCheck = validateCallbackSlotForDate(callbackSlot, callbackDate);
   if (!slotCheck.ok) {
     return res.status(400).json({ error: slotCheck.reason || 'Invalid time slot' });
   }

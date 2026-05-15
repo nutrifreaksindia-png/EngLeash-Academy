@@ -67,12 +67,19 @@ function applyPlanLabel(plan: 'registration' | 'single_payment' | 'first_install
 }
 
 function applyPlanAmount(course: PublicCourse, plan: 'registration' | 'single_payment' | 'first_installment') {
-  const total = Math.max(0, Number(course.fee_inr || 0));
+  const total = Math.max(0, Number(course.fee_inr || 0) - Number(course.discount_inr || 0));
   const registration = Math.min(total, Number(course.apply_registration_fee_inr ?? 999));
   const singleDiscount = Math.max(0, Number(course.apply_single_payment_discount_inr || 0));
   const installmentCount = Math.max(1, Number(course.apply_installment_count || 2));
   if (plan === 'registration') return registration;
   if (plan === 'single_payment') return Math.max(0, total - singleDiscount);
+  try {
+    const amounts = JSON.parse(String(course.apply_installment_amounts_json || '[]'));
+    const first = Array.isArray(amounts) ? Number(amounts[0]) : NaN;
+    if (Number.isFinite(first)) return first;
+  } catch {
+    /* fall back to legacy even split */
+  }
   return Math.ceil((total * 100) / installmentCount) / 100;
 }
 

@@ -66,12 +66,22 @@ function splitEvenlyPaise(totalPaise, count) {
   return pieces;
 }
 
+function parseInstallmentAmountsPaise(raw, expectedCount, totalPaise) {
+  const parsed = parseJson(raw, []);
+  if (!Array.isArray(parsed)) return null;
+  const amounts = parsed.map((x) => toPaise(x));
+  const count = Math.max(1, Number(expectedCount || 1));
+  if (amounts.length !== count) return null;
+  const sum = amounts.reduce((acc, amount) => acc + amount, 0);
+  return sum === Math.max(0, Number(totalPaise || 0)) ? amounts : null;
+}
+
 function loadApplyCourse(courseId) {
   const row = db.prepare(
     `SELECT
        id, name, enrollment_type, fee_inr, discount_inr, course_status, is_published,
        apply_registration_fee_inr, apply_single_payment_discount_inr,
-       apply_installment_count, apply_installment_gap_days,
+       apply_installment_count, apply_installment_amounts_json, apply_installment_gap_days,
        apply_grace_days, apply_enquiry_enabled
      FROM courses
      WHERE id = ?`,
@@ -148,7 +158,9 @@ function dueKindLabel(kind) {
 }
 
 function computeInitialBillingPlan({ course, batch, selectedPlan, nowMs = Date.now() }) {
-  const totalCourseFeePaise = toPaise(course.fee_inr);
+  const grossCourseFeePaise = toPaise(course.fee_inr);
+  const courseDiscountPaise = Math.min(grossCourseFeePaise, toPaise(course.discount_inr));
+  const totalCourseFeePaise = Math.max(0, grossCourseFeePaise - courseDiscountPaise);
   const registrationFeePaise = Math.min(totalCourseFeePaise, toPaise(course.apply_registration_fee_inr));
   const singlePaymentDiscountPaise = Math.min(totalCourseFeePaise, toPaise(course.apply_single_payment_discount_inr));
   const installmentCount = Math.max(1, Number(course.apply_installment_count || 1));
@@ -172,7 +184,7 @@ function computeInitialBillingPlan({ course, batch, selectedPlan, nowMs = Date.n
       amountPaise: registrationFeePaise,
       discountPaise: 0,
       isInitialDue: 1,
-      metaJson: stringifyJson({ selectedPlan: plan }),
+      metaJson: stringifyJson({ selectedPlan: plan, grossCourseFeePaise, courseDiscountPaise }),
     });
     dues.push({
       sequenceNo: 2,
@@ -183,7 +195,7 @@ function computeInitialBillingPlan({ course, batch, selectedPlan, nowMs = Date.n
       amountPaise: remainingPaise,
       discountPaise: Math.min(singlePaymentDiscountPaise, remainingPaise),
       isInitialDue: 0,
-      metaJson: stringifyJson({ selectedPlan: plan, batchStartDate }),
+      metaJson: stringifyJson({ selectedPlan: plan, batchStartDate, grossCourseFeePaise, courseDiscountPaise }),
     });
     upfrontPaidPaise = registrationFeePaise;
   } else if (plan === 'single_payment') {
@@ -197,11 +209,18 @@ function computeInitialBillingPlan({ course, batch, selectedPlan, nowMs = Date.n
       amountPaise: discountedTotal,
       discountPaise: 0,
       isInitialDue: 1,
-      metaJson: stringifyJson({ selectedPlan: plan, originalCourseFeePaise: totalCourseFeePaise }),
+      metaJson: stringifyJson({
+        selectedPlan: plan,
+        grossCourseFeePaise,
+        courseDiscountPaise,
+        netCourseFeePaise: totalCourseFeePaise,
+      }),
     });
     upfrontPaidPaise = discountedTotal;
   } else if (plan === 'first_installment') {
-    const pieces = splitEvenlyPaise(totalCourseFeePaise, installmentCount);
+    const pieces =
+      parseInstallmentAmountsPaise(course.apply_installment_amounts_json, installmentCount, totalCourseFeePaise) ||
+      splitEvenlyPaise(totalCourseFeePaise, installmentCount);
     for (let index = 0; index < pieces.length; index += 1) {
       const dueDate = addDaysYmd(todayYmd, installmentGapDays * index) || todayYmd;
       dues.push({
@@ -217,6 +236,9 @@ function computeInitialBillingPlan({ course, batch, selectedPlan, nowMs = Date.n
           selectedPlan: plan,
           installmentIndex: index + 1,
           installmentCount: pieces.length,
+          grossCourseFeePaise,
+          courseDiscountPaise,
+          netCourseFeePaise: totalCourseFeePaise,
         }),
       });
     }

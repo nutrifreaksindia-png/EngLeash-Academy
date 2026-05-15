@@ -31,6 +31,7 @@ function ensureV1Tables(db) {
   safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_registration_fee_inr REAL DEFAULT 999");
   safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_single_payment_discount_inr REAL DEFAULT 0");
   safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_installment_count INTEGER DEFAULT 2");
+  safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_installment_amounts_json TEXT");
   safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_installment_gap_days INTEGER DEFAULT 30");
   safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_grace_days INTEGER DEFAULT 7");
   safeAlter(db, "ALTER TABLE courses ADD COLUMN apply_enquiry_enabled INTEGER DEFAULT 1");

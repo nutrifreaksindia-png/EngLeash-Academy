@@ -35,6 +35,7 @@ export type PublicCourse = {
   apply_registration_fee_inr?: number;
   apply_single_payment_discount_inr?: number;
   apply_installment_count?: number;
+  apply_installment_amounts_json?: string | null;
   apply_installment_gap_days?: number;
   apply_grace_days?: number;
   apply_enquiry_enabled?: boolean | number;

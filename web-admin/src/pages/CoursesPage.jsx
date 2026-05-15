@@ -30,10 +30,43 @@ const emptyForm = {
   applyRegistrationFeeInr: 999,
   applySinglePaymentDiscountInr: 0,
   applyInstallmentCount: 2,
+  applyInstallmentAmounts: [0, 0],
   applyInstallmentGapDays: 30,
   applyGraceDays: 7,
   applyEnquiryEnabled: true,
 };
+
+function netCourseFeeInr(form) {
+  return Math.max(0, Number(form.feeInr || 0) - Number(form.discountInr || 0));
+}
+
+function parseInstallmentAmounts(json, count, fallbackNet = 0) {
+  const n = Math.max(1, Number(count || 1));
+  try {
+    const parsed = JSON.parse(json || '[]');
+    if (Array.isArray(parsed) && parsed.length) {
+      const out = parsed.slice(0, n).map((x) => Number(x || 0));
+      while (out.length < n) out.push(0);
+      return out;
+    }
+  } catch (_) {
+    /* fall through */
+  }
+  const base = Math.floor((Math.max(0, Number(fallbackNet || 0)) * 100) / n);
+  let remainder = Math.round(Math.max(0, Number(fallbackNet || 0)) * 100) - base * n;
+  return Array.from({ length: n }, () => {
+    const extra = remainder > 0 ? 1 : 0;
+    if (remainder > 0) remainder -= 1;
+    return (base + extra) / 100;
+  });
+}
+
+function resizeInstallmentAmounts(amounts, count) {
+  const n = Math.max(1, Number(count || 1));
+  const next = Array.isArray(amounts) ? amounts.slice(0, n).map((x) => Number(x || 0)) : [];
+  while (next.length < n) next.push(0);
+  return next;
+}
 
 function enrollmentLabel(value) {
   const v = (value || 'free').toLowerCase();
@@ -219,6 +252,11 @@ export default function CoursesPage({
       applyRegistrationFeeInr: c.apply_registration_fee_inr ?? 999,
       applySinglePaymentDiscountInr: c.apply_single_payment_discount_inr ?? 0,
       applyInstallmentCount: c.apply_installment_count ?? 2,
+      applyInstallmentAmounts: parseInstallmentAmounts(
+        c.apply_installment_amounts_json,
+        c.apply_installment_count ?? 2,
+        Math.max(0, Number(c.fee_inr || 0) - Number(c.discount_inr || 0))
+      ),
       applyInstallmentGapDays: c.apply_installment_gap_days ?? 30,
       applyGraceDays: c.apply_grace_days ?? 7,
       applyEnquiryEnabled: c.apply_enquiry_enabled !== 0 && c.apply_enquiry_enabled !== false,
@@ -264,6 +302,11 @@ export default function CoursesPage({
       applyRegistrationFeeInr: c.apply_registration_fee_inr ?? 999,
       applySinglePaymentDiscountInr: c.apply_single_payment_discount_inr ?? 0,
       applyInstallmentCount: c.apply_installment_count ?? 2,
+      applyInstallmentAmounts: parseInstallmentAmounts(
+        c.apply_installment_amounts_json,
+        c.apply_installment_count ?? 2,
+        Math.max(0, Number(c.fee_inr || 0) - Number(c.discount_inr || 0))
+      ),
       applyInstallmentGapDays: c.apply_installment_gap_days ?? 30,
       applyGraceDays: c.apply_grace_days ?? 7,
       applyEnquiryEnabled: c.apply_enquiry_enabled !== 0 && c.apply_enquiry_enabled !== false,
@@ -275,6 +318,8 @@ export default function CoursesPage({
   }
 
   const isApplyCourse = form.enrollmentType === 'apply';
+  const netFee = netCourseFeeInr(form);
+  const installmentTotal = (form.applyInstallmentAmounts || []).reduce((sum, amount) => sum + Number(amount || 0), 0);
 
   function setHighlightLine(index, value) {
     setForm((prev) => {
@@ -503,6 +548,8 @@ export default function CoursesPage({
                 <dd>INR {viewCourse.fee_inr ?? 0}</dd>
                 <dt>Discount</dt>
                 <dd>INR {viewCourse.discount_inr ?? 0}</dd>
+                <dt>Net fee</dt>
+                <dd>INR {Math.max(0, Number(viewCourse.fee_inr || 0) - Number(viewCourse.discount_inr || 0))}</dd>
                 <dt>Enrollment</dt>
                 <dd>{enrollmentLabel(viewCourse.enrollment_type)}</dd>
                 {String(viewCourse.enrollment_type || '').toLowerCase() === 'apply' ? (
@@ -514,6 +561,16 @@ export default function CoursesPage({
                     <dt>Installments</dt>
                     <dd>
                       {viewCourse.apply_installment_count ?? 2} every {viewCourse.apply_installment_gap_days ?? 30} day(s)
+                    </dd>
+                    <dt>Installment amounts</dt>
+                    <dd>
+                      {parseInstallmentAmounts(
+                        viewCourse.apply_installment_amounts_json,
+                        viewCourse.apply_installment_count ?? 2,
+                        Math.max(0, Number(viewCourse.fee_inr || 0) - Number(viewCourse.discount_inr || 0))
+                      )
+                        .map((amount, index) => `#${index + 1}: INR ${amount}`)
+                        .join(', ')}
                     </dd>
                     <dt>Grace period</dt>
                     <dd>{viewCourse.apply_grace_days ?? 7} day(s)</dd>
@@ -833,8 +890,8 @@ export default function CoursesPage({
               <div className="courseFormField">
                 <span className="fieldLabel">Apply billing rules</span>
                 <p className="fieldHint">
-                  Registration is used before the 7-day window. Single payment discount, installment count, day gap, and grace period
-                  drive the apply revenue flow.
+                  Net fee is Fee minus Discount. Single payment applies its own discount on that net fee. Installment amounts must
+                  add up to the net fee.
                 </p>
               </div>
 
@@ -874,10 +931,44 @@ export default function CoursesPage({
                   id="course-apply-installment-count"
                   className="courseInput courseInputNarrow"
                   value={form.applyInstallmentCount}
-                  onChange={(e) => setForm({ ...form, applyInstallmentCount: Number(e.target.value || 1) })}
+                  onChange={(e) => {
+                    const count = Math.max(1, Number(e.target.value || 1));
+                    setForm({
+                      ...form,
+                      applyInstallmentCount: count,
+                      applyInstallmentAmounts: resizeInstallmentAmounts(form.applyInstallmentAmounts, count),
+                    });
+                  }}
                   type="number"
                   min={1}
                 />
+              </div>
+
+              <div className="courseFormField courseFormWide">
+                <span className="fieldLabel">Installment amounts (INR)</span>
+                <p className="fieldHint">
+                  Net course fee: INR {netFee}. Enter each installment amount manually. Current total: INR {installmentTotal}.
+                </p>
+                {resizeInstallmentAmounts(form.applyInstallmentAmounts, form.applyInstallmentCount).map((amount, index) => (
+                  <label key={index} className="fieldLabel" htmlFor={`course-apply-installment-amount-${index}`}>
+                    Installment {index + 1}
+                    <input
+                      id={`course-apply-installment-amount-${index}`}
+                      className="courseInput courseInputNarrow"
+                      value={amount}
+                      onChange={(e) => {
+                        const next = resizeInstallmentAmounts(form.applyInstallmentAmounts, form.applyInstallmentCount);
+                        next[index] = Number(e.target.value || 0);
+                        setForm({ ...form, applyInstallmentAmounts: next });
+                      }}
+                      type="number"
+                      min={0}
+                    />
+                  </label>
+                ))}
+                {Math.round(installmentTotal * 100) !== Math.round(netFee * 100) ? (
+                  <p className="fieldHint">Installment total must equal the net course fee before saving.</p>
+                ) : null}
               </div>
 
               <div className="courseFormField">

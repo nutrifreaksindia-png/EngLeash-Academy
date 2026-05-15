@@ -64,9 +64,9 @@ async function main() {
     `INSERT OR REPLACE INTO courses (
       id, name, description, is_published, fee_inr, discount_inr, course_status, enrollment_type,
       duration_days, apply_registration_fee_inr, apply_single_payment_discount_inr,
-      apply_installment_count, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled, created_at
-    ) VALUES (?, ?, ?, 1, 12000, 0, 'Active', 'apply', 30, 999, 1000, 2, 10, 3, 1, datetime('now'))`,
-  ).run(applyCourseId, 'Career English Intensive', 'Apply revenue validation course');
+      apply_installment_count, apply_installment_amounts_json, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled, created_at
+    ) VALUES (?, ?, ?, 1, 12000, 2000, 'Active', 'apply', 30, 999, 1000, 2, ?, 10, 3, 1, datetime('now'))`,
+  ).run(applyCourseId, 'Career English Intensive', 'Apply revenue validation course', JSON.stringify([3000, 7000]));
 
   const today = new Date();
   const todayYmd = today.toISOString().slice(0, 10);
@@ -179,6 +179,21 @@ async function main() {
   if (installmentDueCount !== 2) {
     throw new Error('Installment schedule was not generated with the configured count');
   }
+  const installmentAmounts = tempDb.prepare(
+    'SELECT amount_paise FROM apply_course_due_items WHERE billing_profile_id = ? ORDER BY sequence_no',
+  ).all(installmentPrepared.billingProfileId).map((r) => Number(r.amount_paise));
+  if (JSON.stringify(installmentAmounts) !== JSON.stringify([300000, 700000])) {
+    throw new Error(`Installment schedule did not use configured amounts: ${JSON.stringify(installmentAmounts)}`);
+  }
+  const singleDue = tempDb.prepare(
+    'SELECT amount_paise FROM apply_course_due_items WHERE billing_profile_id = ? AND due_kind = ?',
+  ).get(
+    tempDb.prepare('SELECT id FROM apply_course_billing_profiles WHERE user_id = ?').get(studentSingleId).id,
+    'single_payment',
+  );
+  if (Number(singleDue?.amount_paise || 0) !== 900000) {
+    throw new Error('Single payment did not use net fee minus single-payment discount');
+  }
 
   tempDb.prepare(
     `INSERT INTO razorpay_apply_due_orders (
@@ -229,7 +244,7 @@ async function main() {
   tempDb.prepare(
     `INSERT INTO razorpay_apply_due_orders (
       id, razorpay_order_id, user_id, billing_profile_id, due_item_id, amount_paise, currency, status, payment_id, created_at, updated_at
-    ) VALUES (2, 'apply_late_order', ?, ?, ?, 600000, 'INR', 'created', NULL, datetime('now'), datetime('now'))`,
+    ) VALUES (2, 'apply_late_order', ?, ?, ?, 300000, 'INR', 'created', NULL, datetime('now'), datetime('now'))`,
   ).run(studentLateId, latePrepared.billingProfileId, latePrepared.dueItemId);
   const latePaymentId = 'apply_late_payment';
   await jsonRequest(`${base}/api/payments/razorpay/verify`, lateToken, 'POST', {

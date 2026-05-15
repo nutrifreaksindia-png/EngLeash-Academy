@@ -536,6 +536,9 @@ export default function App() {
           applyRegistrationFeeInr: Number(payload.applyRegistrationFeeInr ?? 999),
           applySinglePaymentDiscountInr: Number(payload.applySinglePaymentDiscountInr ?? 0),
           applyInstallmentCount: Number(payload.applyInstallmentCount ?? 2),
+          applyInstallmentAmounts: Array.isArray(payload.applyInstallmentAmounts)
+            ? payload.applyInstallmentAmounts.map((x) => Number(x || 0))
+            : [],
           applyInstallmentGapDays: Number(payload.applyInstallmentGapDays ?? 30),
           applyGraceDays: Number(payload.applyGraceDays ?? 7),
           applyEnquiryEnabled: payload.applyEnquiryEnabled !== false,
@@ -575,6 +578,9 @@ export default function App() {
           applyRegistrationFeeInr: Number(payload.applyRegistrationFeeInr ?? 999),
           applySinglePaymentDiscountInr: Number(payload.applySinglePaymentDiscountInr ?? 0),
           applyInstallmentCount: Number(payload.applyInstallmentCount ?? 2),
+          applyInstallmentAmounts: Array.isArray(payload.applyInstallmentAmounts)
+            ? payload.applyInstallmentAmounts.map((x) => Number(x || 0))
+            : [],
           applyInstallmentGapDays: Number(payload.applyInstallmentGapDays ?? 30),
           applyGraceDays: Number(payload.applyGraceDays ?? 7),
           applyEnquiryEnabled: payload.applyEnquiryEnabled !== false,

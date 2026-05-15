@@ -13,7 +13,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Country } from 'country-state-city';
 import { api } from '../api/client';
-import { buildCallbackDateOptions } from '../lib/callbackBookingMeta';
+import { buildCallbackDateOptions, filterCallbackTimeSlotsForDate } from '../lib/callbackBookingMeta';
 
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
@@ -47,8 +47,22 @@ export default function ApplyCallbackScreen({ navigation, route }: any) {
   const [callbackDate, setCallbackDate] = useState('');
   const [callbackSlot, setCallbackSlot] = useState('');
   const [countryModal, setCountryModal] = useState(false);
+  const [now, setNow] = useState(() => new Date());
 
-  const dateOptions = useMemo(() => buildCallbackDateOptions(holidays, 7), [holidays]);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const rawDateOptions = useMemo(() => buildCallbackDateOptions(holidays, 7), [holidays]);
+  const dateOptions = useMemo(
+    () => rawDateOptions.filter((ymd) => filterCallbackTimeSlotsForDate(timeSlots, ymd, now).length > 0),
+    [rawDateOptions, timeSlots, now],
+  );
+  const availableTimeSlots = useMemo(
+    () => filterCallbackTimeSlotsForDate(timeSlots, callbackDate, now),
+    [timeSlots, callbackDate, now],
+  );
 
   const dialCode = useMemo(() => {
     const c = ALL_COUNTRIES.find((x) => x.isoCode === countryIso);
@@ -109,6 +123,13 @@ export default function ApplyCallbackScreen({ navigation, route }: any) {
       setCallbackDate(dateOptions[0]);
     }
   }, [dateOptions, callbackDate]);
+
+  useEffect(() => {
+    if (!callbackSlot) return;
+    if (!availableTimeSlots.some((slot) => slot.id === callbackSlot)) {
+      setCallbackSlot('');
+    }
+  }, [availableTimeSlots, callbackSlot]);
 
   async function submit() {
     const name = displayName.trim();
@@ -186,7 +207,7 @@ export default function ApplyCallbackScreen({ navigation, route }: any) {
               Next 7 days only. Sundays, second Saturdays, and academy holidays are excluded.
             </Text>
             {dateOptions.length === 0 ? (
-              <Text style={styles.noDatesHint}>No bookable days in this week. Please try again later.</Text>
+              <Text style={styles.noDatesHint}>No bookable slots in this week. Please try again later.</Text>
             ) : (
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
                 {dateOptions.map((ymd) => (
@@ -202,15 +223,19 @@ export default function ApplyCallbackScreen({ navigation, route }: any) {
             )}
 
             <Text style={styles.label}>Time slot</Text>
-            {timeSlots.map((slot) => (
-              <TouchableOpacity
-                key={slot.id}
-                style={[styles.slotBtn, callbackSlot === slot.id && styles.slotBtnOn]}
-                onPress={() => setCallbackSlot(slot.id)}
-              >
-                <Text style={[styles.slotText, callbackSlot === slot.id && styles.slotTextOn]}>{slot.label}</Text>
-              </TouchableOpacity>
-            ))}
+            {availableTimeSlots.length === 0 ? (
+              <Text style={styles.noDatesHint}>No remaining slots for this date. Please choose another date.</Text>
+            ) : (
+              availableTimeSlots.map((slot) => (
+                <TouchableOpacity
+                  key={slot.id}
+                  style={[styles.slotBtn, callbackSlot === slot.id && styles.slotBtnOn]}
+                  onPress={() => setCallbackSlot(slot.id)}
+                >
+                  <Text style={[styles.slotText, callbackSlot === slot.id && styles.slotTextOn]}>{slot.label}</Text>
+                </TouchableOpacity>
+              ))
+            )}
           </>
         ) : null}
 
@@ -221,7 +246,7 @@ export default function ApplyCallbackScreen({ navigation, route }: any) {
           <TouchableOpacity
             style={styles.btnPrimary}
             onPress={() => void submit()}
-            disabled={submitting || loading || dateOptions.length === 0}
+            disabled={submitting || loading || dateOptions.length === 0 || availableTimeSlots.length === 0}
           >
             <Text style={styles.btnPrimaryText}>{submitting ? 'Sending…' : 'Submit'}</Text>
           </TouchableOpacity>
