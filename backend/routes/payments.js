@@ -601,7 +601,7 @@ router.post('/razorpay/create-apply-order', auth, requireRole('Student', 'Lab'),
 
   const amountPaise = dueAmountToCollectNow(dueRow);
   if (amountPaise < 100) {
-    return res.status(400).json({ error: 'Payable amount must be at least Rs. 1' });
+    return res.status(400).json({ error: 'Payable amount must be at least ₹1' });
   }
 
   try {
@@ -700,7 +700,7 @@ router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin
         ? Math.round(Number(req.body.amountInr) * 100)
         : expectedAmountPaise;
   if (!Number.isFinite(bodyAmountPaise) || bodyAmountPaise < 1 || Number(bodyAmountPaise) > Number(expectedAmountPaise)) {
-    return res.status(400).json({ error: `Enter an amount up to Rs. ${(expectedAmountPaise / 100).toFixed(2)}` });
+    return res.status(400).json({ error: `Enter an amount up to ₹${Math.round(expectedAmountPaise / 100).toLocaleString('en-IN')}` });
   }
 
   const tx = db.transaction(() => {

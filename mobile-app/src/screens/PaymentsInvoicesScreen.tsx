@@ -22,7 +22,7 @@ const BRAND_RED = '#c41e3a';
 function formatAmount(amountInr?: number, currency = 'INR') {
   const value = Number(amountInr || 0);
   if (String(currency || '').toUpperCase() === 'INR') {
-    return `Rs. ${Math.round(value).toLocaleString('en-IN')}`;
+    return `₹${Math.round(value).toLocaleString('en-IN')}`;
   }
   return `${String(currency || '').toUpperCase()} ${Math.round(value).toLocaleString('en-IN')}`;
 }
@@ -66,6 +66,8 @@ type ApplyDueRow = {
   paidAmountInr?: number;
   dueStatus?: string;
   isInitialDue?: boolean;
+  satisfiedAt?: string | null;
+  invoicePayments?: { paymentRecordId: number; hasInvoice: boolean }[];
   meta?: {
     dueOffsetDays?: number;
     batchStarted?: boolean;
@@ -113,7 +115,7 @@ export default function PaymentsInvoicesScreen() {
   const [applyProfiles, setApplyProfiles] = useState<ApplyBillingRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [downloadingId, setDownloadingId] = useState<number | null>(null);
+  const [invoiceDownloadingKey, setInvoiceDownloadingKey] = useState<string | null>(null);
   const [payingDueId, setPayingDueId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
@@ -140,7 +142,8 @@ export default function PaymentsInvoicesScreen() {
   );
 
   async function openInvoice(paymentId: number) {
-    setDownloadingId(paymentId);
+    const key = `inv:${paymentId}`;
+    setInvoiceDownloadingKey(key);
     try {
       const data = await api.get(`/payments/my/${paymentId}/invoice-link`);
       const url = String(data?.url || '').trim();
@@ -149,7 +152,7 @@ export default function PaymentsInvoicesScreen() {
     } catch (error: any) {
       Alert.alert('Invoice', error?.message || 'Could not open invoice PDF');
     } finally {
-      setDownloadingId(null);
+      setInvoiceDownloadingKey(null);
     }
   }
 
@@ -262,31 +265,65 @@ export default function PaymentsInvoicesScreen() {
                   </Text>
                 </View>
               ) : null}
-              {(profile.dueItems || []).filter(shouldShowDue).map((due) => (
-                <View key={due.id} style={styles.dueCard}>
-                  <Text style={styles.dueTitle}>{due.dueLabel}</Text>
-                  {dueTimingText(due) ? <Text style={styles.detail}>{dueTimingText(due)}</Text> : null}
-                  {Number(due.paidAmountInr || 0) > 0 ? (
-                    <Text style={styles.detail}>Paid so far: {formatAmount(due.paidAmountInr, 'INR')}</Text>
-                  ) : null}
-                  <Text style={styles.dueAmount}>{formatAmount(due.amountDueNowInr, 'INR')}</Text>
-                  {due.dueStatus === 'paid' ? null : (
-                    <TouchableOpacity
-                      style={[styles.downloadBtn, payingDueId === due.id && styles.downloadBtnDisabled]}
-                      disabled={payingDueId === due.id}
-                      onPress={() => payDue(profile, due)}
-                    >
-                      <Text style={styles.downloadText}>
-                        {payingDueId === due.id
-                          ? 'Opening payment...'
-                          : String(due.dueKind || '').toLowerCase() === 'installment'
-                            ? 'Pay this part'
-                            : 'Pay this due'}
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-              ))}
+              {(profile.dueItems || []).filter(shouldShowDue).map((due) => {
+                const invList = Array.isArray(due.invoicePayments) ? due.invoicePayments : [];
+                const hasRecorded = due.dueStatus === 'paid' || Number(due.paidAmountInr || 0) > 0;
+                return (
+                  <View key={due.id} style={styles.dueCard}>
+                    <Text style={styles.dueTitle}>{due.dueLabel}</Text>
+                    {dueTimingText(due) && due.dueStatus !== 'paid' ? (
+                      <Text style={styles.detail}>{dueTimingText(due)}</Text>
+                    ) : null}
+                    {due.dueStatus === 'paid' ? (
+                      <Text style={styles.detail}>Paid on: {formatDate(due.satisfiedAt)}</Text>
+                    ) : (
+                      <>
+                        {Number(due.paidAmountInr || 0) > 0 ? (
+                          <Text style={styles.detail}>Paid so far: {formatAmount(due.paidAmountInr, 'INR')}</Text>
+                        ) : null}
+                        <Text style={styles.dueAmount}>{formatAmount(due.amountDueNowInr, 'INR')}</Text>
+                        <TouchableOpacity
+                          style={[styles.downloadBtn, payingDueId === due.id && styles.downloadBtnDisabled]}
+                          disabled={payingDueId === due.id}
+                          onPress={() => payDue(profile, due)}
+                        >
+                          <Text style={styles.downloadText}>
+                            {payingDueId === due.id
+                              ? 'Opening payment...'
+                              : String(due.dueKind || '').toLowerCase() === 'installment'
+                                ? 'Pay this part'
+                                : 'Pay this due'}
+                          </Text>
+                        </TouchableOpacity>
+                      </>
+                    )}
+                    {invList.map((inv, invIdx) => (
+                      <TouchableOpacity
+                        key={`inv-${due.id}-${inv.paymentRecordId}`}
+                        style={[
+                          styles.dueInvoiceBtn,
+                          (!inv.hasInvoice || invoiceDownloadingKey !== null) && styles.downloadBtnDisabled,
+                        ]}
+                        disabled={!inv.hasInvoice || invoiceDownloadingKey !== null}
+                        onPress={() => openInvoice(inv.paymentRecordId)}
+                      >
+                        <Text style={styles.downloadText}>
+                          {!inv.hasInvoice
+                            ? 'Invoice pending'
+                            : invoiceDownloadingKey === `inv:${inv.paymentRecordId}`
+                              ? 'Opening PDF...'
+                              : invList.length > 1
+                                ? `Download invoice (${invIdx + 1})`
+                                : 'Download invoice PDF'}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                    {hasRecorded && invList.length === 0 ? (
+                      <Text style={styles.detail}>Invoice not linked for this payment yet.</Text>
+                    ) : null}
+                  </View>
+                );
+              })}
             </View>
           ))}
           {payments.map((payment) => (
@@ -307,12 +344,12 @@ export default function PaymentsInvoicesScreen() {
               {payment.gatewayOrderId ? <Text style={styles.detail}>Order ID: {payment.gatewayOrderId}</Text> : null}
               {payment.gatewayPaymentId ? <Text style={styles.detail}>Payment ID: {payment.gatewayPaymentId}</Text> : null}
               <TouchableOpacity
-                style={[styles.downloadBtn, (!payment.hasInvoice || downloadingId === payment.id) && styles.downloadBtnDisabled]}
-                disabled={!payment.hasInvoice || downloadingId === payment.id}
+                style={[styles.downloadBtn, (!payment.hasInvoice || invoiceDownloadingKey !== null) && styles.downloadBtnDisabled]}
+                disabled={!payment.hasInvoice || invoiceDownloadingKey !== null}
                 onPress={() => openInvoice(payment.id)}
               >
                 <Text style={styles.downloadText}>
-                  {downloadingId === payment.id ? 'Opening PDF...' : 'View / Download Invoice PDF'}
+                  {invoiceDownloadingKey === `inv:${payment.id}` ? 'Opening PDF...' : 'View / Download Invoice PDF'}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -372,6 +409,13 @@ const styles = StyleSheet.create({
   dueAmount: { marginTop: 8, fontSize: 20, fontWeight: '900', color: BRAND_RED },
   downloadBtn: {
     marginTop: 16,
+    backgroundColor: BRAND_BLUE,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  dueInvoiceBtn: {
+    marginTop: 10,
     backgroundColor: BRAND_BLUE,
     borderRadius: 10,
     paddingVertical: 12,

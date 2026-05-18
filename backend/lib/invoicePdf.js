@@ -12,9 +12,9 @@ const SOFT = '#f8fafc';
 function formatCurrency(amountPaise, currency = 'INR') {
   const amount = Number(amountPaise || 0) / 100;
   if (String(currency || '').toUpperCase() === 'INR') {
-    return `Rs. ${amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return `₹${Math.round(amount).toLocaleString('en-IN')}`;
   }
-  return `${String(currency || '').toUpperCase()} ${amount.toFixed(2)}`;
+  return `${String(currency || '').toUpperCase()} ${Math.round(amount).toLocaleString('en-IN')}`;
 }
 
 function formatDate(value) {

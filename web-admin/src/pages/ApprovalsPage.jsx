@@ -12,7 +12,7 @@ export default function ApprovalsPage({
 
   function formatInrFromPaise(paise) {
     const value = Number(paise || 0) / 100;
-    return `Rs. ${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return `₹${Math.round(value).toLocaleString('en-IN')}`;
   }
 
   function planLabel(plan) {

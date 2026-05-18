@@ -17,9 +17,9 @@ function fmtDate(iso) {
 function fmtAmount(amountInr, currency = 'INR') {
   const value = Number(amountInr || 0);
   if (String(currency || '').toUpperCase() === 'INR') {
-    return `Rs. ${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return `₹${Math.round(value).toLocaleString('en-IN')}`;
   }
-  return `${String(currency || '').toUpperCase()} ${value.toFixed(2)}`;
+  return `${String(currency || '').toUpperCase()} ${Math.round(value).toLocaleString('en-IN')}`;
 }
 
 export default function PaymentsPage({

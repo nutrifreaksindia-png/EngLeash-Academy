@@ -7,6 +7,7 @@ import {
   Alert,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   ScrollView,
   StyleSheet,
@@ -25,6 +26,7 @@ import { alertBillingPaymentError, payBillingPackage } from '../payments/razorpa
 
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
+const DISCOUNT_GREEN = '#1b5e20';
 
 function formatSubsDate(iso?: string | null) {
   if (!iso) return '—';
@@ -40,7 +42,7 @@ function formatSubsDate(iso?: string | null) {
 }
 
 function formatMoney(amount?: number | null) {
-  return `Rs. ${Math.round(Number(amount || 0)).toLocaleString('en-IN')}`;
+  return `₹${Math.round(Number(amount || 0)).toLocaleString('en-IN')}`;
 }
 
 function formatTime12h(value?: string | null) {
@@ -117,6 +119,7 @@ export default function AccountScreen({ navigation }: any) {
   const [expandedBatchId, setExpandedBatchId] = useState<number | null>(null);
   const [expandedSubscriptionId, setExpandedSubscriptionId] = useState<number | null>(null);
   const [paymentBusyKey, setPaymentBusyKey] = useState<string | null>(null);
+  const [invoiceDownloadKey, setInvoiceDownloadKey] = useState<string | null>(null);
   const [partPaymentProfiles, setPartPaymentProfiles] = useState<Record<string, boolean>>({});
 
   const [form, setForm] = useState({
@@ -195,6 +198,8 @@ export default function AccountScreen({ navigation }: any) {
   useFocusEffect(
     useCallback(() => {
       if (!user) return undefined;
+      setExpandedBatchId(null);
+      setExpandedSubscriptionId(null);
       let cancelled = false;
       setSubsLoading(true);
       setBatchesLoading(true);
@@ -346,17 +351,17 @@ export default function AccountScreen({ navigation }: any) {
   }
 
   function applyProfileForBatch(batch: any) {
-    return applyProfiles.find((profile) => Number(profile.batchId) === Number(batch.id));
+    return applyProfiles.find((billingProfile) => Number(billingProfile.batchId) === Number(batch.id));
   }
 
-  function nextPayableDue(profile?: any) {
-    return (profile?.dueItems || []).find(
+  function nextPayableDue(billingProfile?: any) {
+    return (billingProfile?.dueItems || []).find(
       (due: any) => due?.dueStatus !== 'paid' && due?.dueStatus !== 'cancelled' && Number(due?.amountDueNowInr || 0) > 0,
     );
   }
 
-  function profileHasUnpaidParts(profile?: any) {
-    return (profile?.dueItems || []).some(
+  function profileHasUnpaidParts(billingProfile?: any) {
+    return (billingProfile?.dueItems || []).some(
       (due: any) =>
         String(due?.dueKind || '').toLowerCase() === 'installment' &&
         due?.dueStatus !== 'paid' &&
@@ -365,7 +370,31 @@ export default function AccountScreen({ navigation }: any) {
     );
   }
 
-  async function payApplyDue(profile: any, due: any) {
+  function profileHasPaidFirstPart(billingProfile?: any) {
+    return (billingProfile?.dueItems || []).some(
+      (due: any) =>
+        String(due?.dueKind || '').toLowerCase() === 'installment' &&
+        Number(due?.paidAmountInr || 0) > 0,
+    );
+  }
+
+  function partPaymentsSelected(billingProfile?: any) {
+    if (!billingProfile?.id) return false;
+    return !!partPaymentProfiles[String(billingProfile.id)];
+  }
+
+  function fullPaymentAmountInr(billingProfile?: any) {
+    const remaining = Number(billingProfile?.remainingBalanceInr || 0);
+    const discount = profileHasPaidFirstPart(billingProfile) ? 0 : Number(billingProfile?.singlePaymentDiscountInr || 0);
+    return Math.max(0, remaining - discount);
+  }
+
+  function fullPaymentDueText(billingProfile?: any, batch?: any) {
+    const startDate = billingProfile?.batchStartDate || batch?.planned_start_date || batch?.actual_start_date;
+    return startDate ? `Due: ${formatAccountDate(startDate)}` : 'Due: When you pay';
+  }
+
+  async function payApplyDue(billingProfile: any, due: any) {
     if (!user || !due?.id) return;
     const key = `apply:${due.id}`;
     setPaymentBusyKey(key);
@@ -375,7 +404,7 @@ export default function AccountScreen({ navigation }: any) {
         userEmail: user.email,
         userName: user.name,
         userMobileDigits: user.mobile_number ?? undefined,
-        checkoutTitle: `${profile?.courseName || 'Course'} — ${due.dueLabel || 'Payment'}`,
+        checkoutTitle: `${billingProfile?.courseName || 'Course'} — ${due.dueLabel || 'Payment'}`,
       });
       if (!result?.ok) return;
       Alert.alert('Payment successful', 'Your payment has been recorded.');
@@ -389,12 +418,12 @@ export default function AccountScreen({ navigation }: any) {
     }
   }
 
-  async function payRemainingFully(profile: any) {
-    if (!user || !profile?.id) return;
-    const key = `profile-full:${profile.id}`;
+  async function payRemainingFully(billingProfile: any) {
+    if (!user || !billingProfile?.id) return;
+    const key = `profile-full:${billingProfile.id}`;
     setPaymentBusyKey(key);
     try {
-      const prepared = await api.post(`/payments/apply/${profile.id}/pay-remaining-full`, {});
+      const prepared = await api.post(`/payments/apply/${billingProfile.id}/pay-remaining-full`, {});
       const dueItemId = Number(prepared?.dueItemId);
       if (!Number.isFinite(dueItemId)) throw new Error('Remaining payment could not be prepared');
       const result = await payApplyDueWithRazorpay({
@@ -402,7 +431,7 @@ export default function AccountScreen({ navigation }: any) {
         userEmail: user.email,
         userName: user.name,
         userMobileDigits: user.mobile_number ?? undefined,
-        checkoutTitle: `${profile.courseName || 'Course'} — Full payment`,
+        checkoutTitle: `${billingProfile.courseName || 'Course'} — Full payment`,
       });
       if (!result?.ok) return;
       Alert.alert('Payment successful', 'Your remaining fee has been paid.');
@@ -416,15 +445,15 @@ export default function AccountScreen({ navigation }: any) {
     }
   }
 
-  async function preparePartPayments(profile: any) {
-    if (!profile?.id) return;
-    const key = `profile-parts:${profile.id}`;
+  async function preparePartPayments(billingProfile: any) {
+    if (!billingProfile?.id) return;
+    const key = `profile-parts:${billingProfile.id}`;
     setPaymentBusyKey(key);
     try {
-      await api.post(`/payments/apply/${profile.id}/parts`, {});
+      await api.post(`/payments/apply/${billingProfile.id}/parts`, {});
       const rows = await api.get('/payments/apply/my');
       setApplyProfiles(Array.isArray(rows) ? rows : []);
-      setPartPaymentProfiles((current) => ({ ...current, [String(profile.id)]: true }));
+      setPartPaymentProfiles((current) => ({ ...current, [String(billingProfile.id)]: true }));
     } catch (error) {
       alertApplyPaymentError(error);
     } finally {
@@ -432,19 +461,19 @@ export default function AccountScreen({ navigation }: any) {
     }
   }
 
-  async function togglePartPayments(profile: any) {
-    if (!profile?.id) return;
-    const profileId = String(profile.id);
-    const currentlySelected = !!partPaymentProfiles[profileId] || profileHasUnpaidParts(profile);
+  async function togglePartPayments(billingProfile: any) {
+    if (!billingProfile?.id) return;
+    const profileId = String(billingProfile.id);
+    const currentlySelected = partPaymentsSelected(billingProfile);
     if (currentlySelected) {
       setPartPaymentProfiles((current) => ({ ...current, [profileId]: false }));
       return;
     }
-    if (profileHasUnpaidParts(profile)) {
+    if (profileHasUnpaidParts(billingProfile)) {
       setPartPaymentProfiles((current) => ({ ...current, [profileId]: true }));
       return;
     }
-    await preparePartPayments(profile);
+    await preparePartPayments(billingProfile);
   }
 
   async function payRenewalPackage(subscription: any, pkg: any) {
@@ -468,6 +497,21 @@ export default function AccountScreen({ navigation }: any) {
       alertBillingPaymentError(error);
     } finally {
       setPaymentBusyKey(null);
+    }
+  }
+
+  async function openStudentInvoice(paymentRecordId: number) {
+    const key = `inv:${paymentRecordId}`;
+    setInvoiceDownloadKey(key);
+    try {
+      const data = await api.get(`/payments/my/${paymentRecordId}/invoice-link`);
+      const url = String(data?.url || '').trim();
+      if (!url) throw new Error('Invoice link not available');
+      await Linking.openURL(url);
+    } catch (error: any) {
+      Alert.alert('Invoice', error?.message || 'Could not open invoice PDF');
+    } finally {
+      setInvoiceDownloadKey(null);
     }
   }
 
@@ -559,32 +603,81 @@ export default function AccountScreen({ navigation }: any) {
               <Text style={styles.value}>You are not added to any batch yet.</Text>
             ) : (
               batches.map((batch, idx) => {
-                const profile = applyProfileForBatch(batch);
-                const due = nextPayableDue(profile);
+                const billingProfile = applyProfileForBatch(batch);
+                const due = nextPayableDue(billingProfile);
                 const expanded = expandedBatchId === Number(batch.id);
-                const dueKey = due ? `apply:${due.id}` : '';
+                const partSelected = partPaymentsSelected(billingProfile);
+                const shouldPayFully = !!billingProfile && Number(billingProfile.remainingBalanceInr || 0) > 0 && !partSelected;
+                const payableAmount = shouldPayFully ? fullPaymentAmountInr(billingProfile) : Number(due?.amountDueNowInr || 0);
+                const paymentKey = shouldPayFully && billingProfile ? `profile-full:${billingProfile.id}` : due ? `apply:${due.id}` : '';
+                const remainingBal = Number(billingProfile?.remainingBalanceInr || 0);
+                const extraDiscountInr = Math.max(0, Math.round(Number(billingProfile?.singlePaymentDiscountInr || 0)));
+                const extraDiscountApplies =
+                  !!billingProfile &&
+                  remainingBal > 0 &&
+                  !partSelected &&
+                  !profileHasPaidFirstPart(billingProfile) &&
+                  extraDiscountInr > 0;
+                const expandedDueItems = billingProfile
+                  ? (() => {
+                      const all = (billingProfile.dueItems || []).filter((item: any) => item.dueStatus !== 'cancelled');
+                      if (remainingBal > 0 && !partSelected) {
+                        return all.filter((item: any) => item.dueStatus === 'paid');
+                      }
+                      return all;
+                    })()
+                  : [];
                 return (
                   <View key={batch.id} style={[styles.subCard, idx > 0 ? styles.subCardSpaced : null]}>
                     <Text style={styles.subCourse}>
                       {batch.title || batch.name || `Batch #${batch.batch_number || batch.id}`}
                     </Text>
-                    <Text style={styles.subMeta}>{batch.course_name || profile?.courseName || 'Course'}</Text>
-                    {due ? (
+                    <Text style={styles.subMeta}>{batch.course_name || billingProfile?.courseName || 'Course'}</Text>
+                    {payableAmount > 0 && (shouldPayFully || due) ? (
                       <>
                         <TouchableOpacity
-                          style={[styles.payBtn, paymentBusyKey === dueKey && styles.disabledBtn]}
+                          style={[styles.payBtn, paymentBusyKey === paymentKey && styles.disabledBtn]}
                           disabled={!!paymentBusyKey}
-                          onPress={() => payApplyDue(profile, due)}
+                          onPress={() => shouldPayFully ? payRemainingFully(billingProfile) : payApplyDue(billingProfile, due)}
                         >
                           <Text style={styles.payBtnText}>
-                            {paymentBusyKey === dueKey ? 'Opening payment...' : `Pay ${formatMoney(due.amountDueNowInr)}`}
+                            {paymentBusyKey === paymentKey ? 'Opening payment...' : `Pay ${formatMoney(payableAmount)}`}
                           </Text>
                         </TouchableOpacity>
-                        <Text style={styles.payDueOutside}>Due: {dueTimingText(due)}</Text>
+                        <Text style={styles.payDueOutside}>
+                          {shouldPayFully ? fullPaymentDueText(billingProfile, batch) : `Due: ${dueTimingText(due)}`}
+                        </Text>
                       </>
                     ) : (
                       <Text style={styles.subDates}>No payable batch dues right now.</Text>
                     )}
+                    {billingProfile && Number(billingProfile.remainingBalanceInr || 0) > 0 ? (
+                      <View style={styles.partPaymentWrap}>
+                        <View style={styles.partPaymentRow}>
+                          <TouchableOpacity
+                            style={[styles.partPaymentLeft, paymentBusyKey === `profile-parts:${billingProfile.id}` && styles.disabledBtn]}
+                            disabled={!!paymentBusyKey}
+                            onPress={() => togglePartPayments(billingProfile)}
+                          >
+                            <View style={[styles.checkbox, partSelected && styles.checkboxChecked]}>
+                              {partSelected ? <Text style={styles.checkboxTick}>✓</Text> : null}
+                            </View>
+                            <Text style={styles.checkboxText}>Part payments</Text>
+                          </TouchableOpacity>
+                          <Text
+                            style={extraDiscountApplies ? styles.discountBadgeApplied : styles.discountBadgeDisabled}
+                            numberOfLines={2}
+                          >
+                            {extraDiscountApplies
+                              ? `Extra Discount ${formatMoney(extraDiscountInr)} Applied`
+                              : 'Extra Discount Disabled'}
+                          </Text>
+                        </View>
+                        <Text style={styles.partPaymentDescription}>
+                          {`Extra Discount ${formatMoney(extraDiscountInr)} is applicable for full payments.`}
+                        </Text>
+                      </View>
+                    ) : null}
                     <TouchableOpacity style={styles.detailsBtn} onPress={() => setExpandedBatchId(expanded ? null : Number(batch.id))}>
                       <Text style={styles.detailsBtnText}>{expanded ? 'Hide Details' : 'More Details'}</Text>
                     </TouchableOpacity>
@@ -599,11 +692,15 @@ export default function AccountScreen({ navigation }: any) {
                             ? `Started ${formatBatchDate(batch.actual_start_date || batch.planned_start_date)}`
                             : `Starts ${formatBatchDate(batch.planned_start_date)}`}
                         </Text>
-                        {profile ? (
+                        {billingProfile ? (
                           <>
-                            {(profile.dueItems || [])
-                              .filter((item: any) => item.dueStatus !== 'cancelled')
-                              .map((item: any) => (
+                            {remainingBal > 0 && partSelected ? (
+                              <Text style={styles.partScheduleHeading}>Part payment schedule</Text>
+                            ) : null}
+                            {expandedDueItems.map((item: any) => {
+                              const invList = Array.isArray(item.invoicePayments) ? item.invoicePayments : [];
+                              const hasAnyPaymentRecorded = item.dueStatus === 'paid' || Number(item.paidAmountInr || 0) > 0;
+                              return (
                                 <View key={item.id} style={styles.dueLine}>
                                   <Text style={styles.dueLineTitle}>{item.dueLabel || 'Payment'}</Text>
                                   {item.dueStatus === 'paid' ? (
@@ -613,38 +710,37 @@ export default function AccountScreen({ navigation }: any) {
                                     </>
                                   ) : (
                                     <>
+                                      {Number(item.paidAmountInr || 0) > 0 ? (
+                                        <Text style={styles.subfine}>Paid so far: {formatMoney(item.paidAmountInr)}</Text>
+                                      ) : null}
                                       <Text style={styles.dueLineAmount}>{formatMoney(item.amountDueNowInr)}</Text>
                                       <Text style={styles.subfine}>{dueTimingText(item)}</Text>
                                     </>
                                   )}
+                                  {invList.map((inv: any, invIdx: number) => (
+                                    <TouchableOpacity
+                                      key={`inv-${item.id}-${inv.paymentRecordId}`}
+                                      style={[styles.invoiceDlBtn, (!inv.hasInvoice || invoiceDownloadKey !== null) && styles.disabledBtn]}
+                                      disabled={!inv.hasInvoice || invoiceDownloadKey !== null}
+                                      onPress={() => openStudentInvoice(inv.paymentRecordId)}
+                                    >
+                                      <Text style={styles.invoiceDlText}>
+                                        {!inv.hasInvoice
+                                          ? 'Invoice pending'
+                                          : invoiceDownloadKey === `inv:${inv.paymentRecordId}`
+                                            ? 'Opening…'
+                                            : invList.length > 1
+                                              ? `Download invoice (${invIdx + 1})`
+                                              : 'Download invoice'}
+                                      </Text>
+                                    </TouchableOpacity>
+                                  ))}
+                                  {hasAnyPaymentRecorded && invList.length === 0 ? (
+                                    <Text style={styles.subfine}>Invoice not linked for this payment yet.</Text>
+                                  ) : null}
                                 </View>
-                              ))}
-                            {Number(profile.remainingBalanceInr || 0) > 0 ? (
-                              <View style={styles.paymentOptionsBox}>
-                                <TouchableOpacity
-                                  style={[styles.smallActionBtn, paymentBusyKey === `profile-full:${profile.id}` && styles.disabledBtn]}
-                                  disabled={!!paymentBusyKey}
-                                  onPress={() => payRemainingFully(profile)}
-                                >
-                                  <Text style={styles.smallActionText}>Pay Fully</Text>
-                                </TouchableOpacity>
-                                <TouchableOpacity
-                                  style={[styles.checkboxRow, paymentBusyKey === `profile-parts:${profile.id}` && styles.disabledBtn]}
-                                  disabled={!!paymentBusyKey}
-                                  onPress={() => togglePartPayments(profile)}
-                                >
-                                  <View style={[
-                                    styles.checkbox,
-                                    (!!partPaymentProfiles[String(profile.id)] || profileHasUnpaidParts(profile)) && styles.checkboxChecked,
-                                  ]}>
-                                    {(!!partPaymentProfiles[String(profile.id)] || profileHasUnpaidParts(profile)) ? (
-                                      <Text style={styles.checkboxTick}>✓</Text>
-                                    ) : null}
-                                  </View>
-                                  <Text style={styles.checkboxText}>Part payments</Text>
-                                </TouchableOpacity>
-                              </View>
-                            ) : null}
+                              );
+                            })}
                           </>
                         ) : null}
                       </View>
@@ -989,13 +1085,24 @@ const styles = StyleSheet.create({
   subfine: { fontSize: 11, color: '#94a3b8', marginTop: 4 },
   payBtn: {
     marginTop: 10,
-    backgroundColor: BRAND_BLUE,
+    backgroundColor: BRAND_RED,
     borderRadius: 10,
     paddingVertical: 11,
-    paddingHorizontal: 12,
+    paddingHorizontal: 22,
+    alignSelf: 'center',
+    minWidth: 180,
+    alignItems: 'center',
   },
   payBtnText: { color: '#fff', fontWeight: '900', fontSize: 15 },
-  payDueOutside: { color: '#334155', fontWeight: '700', fontSize: 12, marginTop: 6 },
+  payDueOutside: {
+    color: '#334155',
+    fontWeight: '700',
+    fontSize: 12,
+    marginTop: 6,
+    textAlign: 'center',
+    alignSelf: 'center',
+    width: '100%',
+  },
   disabledBtn: { opacity: 0.55 },
   detailsBtn: {
     marginTop: 10,
@@ -1025,34 +1132,55 @@ const styles = StyleSheet.create({
   dueLineAmount: { color: BRAND_RED, fontWeight: '900', fontSize: 17, marginTop: 4 },
   paidText: { color: '#2e7d32', fontWeight: '900', fontSize: 17, marginTop: 4 },
   inlineActions: { flexDirection: 'row', gap: 8, marginTop: 10 },
-  paymentOptionsBox: { marginTop: 10, gap: 10 },
-  smallActionBtn: {
-    backgroundColor: BRAND_RED,
-    borderRadius: 9,
-    paddingVertical: 10,
+  partPaymentRow: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    alignSelf: 'stretch',
+    gap: 8,
   },
-  smallActionText: { color: '#fff', fontWeight: '800', fontSize: 12 },
-  smallOutlineBtn: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: BRAND_BLUE,
-    borderRadius: 9,
-    paddingVertical: 10,
-    alignItems: 'center',
+  partPaymentWrap: {
+    alignSelf: 'stretch',
+    marginTop: 10,
   },
-  smallOutlineText: { color: BRAND_BLUE, fontWeight: '800', fontSize: 12 },
-  checkboxRow: {
+  partPaymentLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    borderWidth: 1,
-    borderColor: '#c7d2fe',
-    borderRadius: 9,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    backgroundColor: '#fff',
   },
+  discountBadgeApplied: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: '800',
+    color: DISCOUNT_GREEN,
+    textAlign: 'right',
+    lineHeight: 16,
+  },
+  discountBadgeDisabled: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: '800',
+    color: BRAND_RED,
+    textAlign: 'right',
+    lineHeight: 16,
+  },
+  partPaymentDescription: {
+    fontSize: 11,
+    color: '#64748b',
+    marginTop: 6,
+    lineHeight: 16,
+    alignSelf: 'stretch',
+  },
+  invoiceDlBtn: {
+    marginTop: 8,
+    alignSelf: 'flex-start',
+    backgroundColor: BRAND_BLUE,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+  },
+  invoiceDlText: { color: '#fff', fontWeight: '800', fontSize: 12 },
+  partScheduleHeading: { fontSize: 13, fontWeight: '800', color: '#475569', marginTop: 8 },
   checkbox: {
     width: 20,
     height: 20,

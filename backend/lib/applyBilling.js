@@ -349,6 +349,38 @@ function serializeDueItem(row, nowMs = Date.now()) {
   };
 }
 
+function attachApplyDueInvoicePayments(dues, userId) {
+  const dueIds = dues.map((d) => Number(d.id)).filter((id) => Number.isFinite(id));
+  if (!dueIds.length || userId == null) {
+    return dues.map((d) => ({ ...d, invoicePayments: [] }));
+  }
+  const placeholders = dueIds.map(() => '?').join(',');
+  const rows = db
+    .prepare(
+      `SELECT p.apply_due_item_id AS dueItemId, p.id AS paymentRecordId,
+              CASE WHEN i.id IS NOT NULL THEN 1 ELSE 0 END AS hasInvoice
+       FROM payment_records p
+       LEFT JOIN invoice_records i ON i.payment_record_id = p.id
+       WHERE p.user_id = ? AND p.apply_due_item_id IN (${placeholders})
+       ORDER BY datetime(p.paid_at) ASC, p.id ASC`,
+    )
+    .all(Number(userId), ...dueIds);
+  const byDue = new Map();
+  for (const r of rows) {
+    const id = Number(r.dueItemId);
+    if (!Number.isFinite(id)) continue;
+    if (!byDue.has(id)) byDue.set(id, []);
+    byDue.get(id).push({
+      paymentRecordId: Number(r.paymentRecordId),
+      hasInvoice: Number(r.hasInvoice) === 1,
+    });
+  }
+  return dues.map((d) => ({
+    ...d,
+    invoicePayments: byDue.get(Number(d.id)) || [],
+  }));
+}
+
 function blockingApplyProfile(userId, courseId) {
   return db.prepare(
     `SELECT *
@@ -581,7 +613,7 @@ function settleDueItem({ dueItemId, amountPaise, paidAtIso = new Date().toISOStr
   const outstandingPaise = dueAmountToCollectNow(due, paidAtIso);
   const collectedPaise = Math.max(0, Number(amountPaise || 0));
   if (collectedPaise < 1 || collectedPaise > outstandingPaise) {
-    throw new Error(`Expected up to Rs. ${(outstandingPaise / 100).toFixed(2)} for this due item.`);
+    throw new Error(`Expected up to ₹${Math.round(outstandingPaise / 100).toLocaleString('en-IN')} for this due item.`);
   }
 
   const tx = db.transaction(() => {
@@ -684,7 +716,8 @@ function loadDueItemWithProfile(dueItemId) {
 }
 
 function serializeProfileRow(row, nowMs = Date.now()) {
-  const dues = dueRowsForProfile(row.id).map((due) => serializeDueItem(due, nowMs));
+  const rawDues = dueRowsForProfile(row.id).map((due) => serializeDueItem(due, nowMs));
+  const dues = attachApplyDueInvoicePayments(rawDues, row.user_id);
   const nextUnpaidDue = dues.find((due) => due.dueStatus !== 'paid' && due.dueStatus !== 'cancelled') || null;
   return {
     id: row.id,
@@ -903,7 +936,7 @@ function normalizeManualPartSchedule(rawParts, outstandingPaise, graceDays) {
   });
   const total = normalized.reduce((sum, part) => sum + part.amountPaise, 0);
   if (total !== Number(outstandingPaise)) {
-    throw new Error(`Parts must total Rs. ${(Number(outstandingPaise) / 100).toFixed(2)}`);
+    throw new Error(`Parts must total ₹${Math.round(Number(outstandingPaise) / 100).toLocaleString('en-IN')}`);
   }
   return normalized;
 }
