@@ -20,6 +20,8 @@ import LoginForm from '../components/LoginForm';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../api/client';
+import { alertApplyPaymentError, payApplyDueWithRazorpay } from '../payments/razorpayApplyBilling';
+import { alertBillingPaymentError, payBillingPackage } from '../payments/razorpayBillingPackage';
 
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
@@ -37,6 +39,22 @@ function formatSubsDate(iso?: string | null) {
   });
 }
 
+function formatMoney(amount?: number | null) {
+  return `Rs. ${Math.round(Number(amount || 0)).toLocaleString('en-IN')}`;
+}
+
+function formatTime12h(value?: string | null) {
+  const raw = String(value || '').trim();
+  const match = /^(\d{1,2}):(\d{2})/.exec(raw);
+  if (!match) return raw;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return raw;
+  const suffix = hours >= 12 ? 'PM' : 'AM';
+  const hour12 = hours % 12 || 12;
+  return `${hour12}:${String(minutes).padStart(2, '0')} ${suffix}`;
+}
+
 function formatBatchDate(value?: string | null) {
   if (!value) return '—';
   const d = new Date(`${String(value).slice(0, 10)}T00:00:00`);
@@ -44,15 +62,41 @@ function formatBatchDate(value?: string | null) {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+function formatAccountDate(value?: string | null) {
+  if (!value) return '—';
+  const text = String(value);
+  const d = new Date(text.length === 10 ? `${text}T00:00:00` : text);
+  if (Number.isNaN(d.getTime())) return text;
+  return d.toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
 function batchScheduleText(raw?: string | null) {
   try {
     const schedule = raw ? JSON.parse(raw) : {};
     const days = Array.isArray(schedule.daysOfWeek) ? schedule.daysOfWeek.join(', ') : '';
-    const time = schedule.startTime && schedule.endTime ? `${schedule.startTime}-${schedule.endTime}` : '';
+    const time = schedule.startTime && schedule.endTime
+      ? `${formatTime12h(schedule.startTime)} - ${formatTime12h(schedule.endTime)}`
+      : '';
     return [days, time].filter(Boolean).join(' · ') || 'Schedule not set';
   } catch {
     return 'Schedule not set';
   }
+}
+
+function dueTimingText(due?: any) {
+  if (!due) return '—';
+  if (due.dueDate) return formatAccountDate(due.dueDate);
+  const offset = Number(due.meta?.dueOffsetDays);
+  if (String(due.dueKind || '').toLowerCase() === 'installment' && Number.isFinite(offset)) {
+    if (offset <= 0) return 'Course start date';
+    return `${offset} day${offset === 1 ? '' : 's'} after course start`;
+  }
+  return '—';
+}
+
+function packageAmountInr(pkg?: any) {
+  if (!pkg) return 0;
+  return Math.max(0, Number(pkg.fee_inr || 0) - Number(pkg.discount_inr || 0));
 }
 
 export default function AccountScreen({ navigation }: any) {
@@ -68,6 +112,12 @@ export default function AccountScreen({ navigation }: any) {
   const [subsLoading, setSubsLoading] = useState(false);
   const [batches, setBatches] = useState<any[]>([]);
   const [batchesLoading, setBatchesLoading] = useState(false);
+  const [applyProfiles, setApplyProfiles] = useState<any[]>([]);
+  const [renewalPackagesByCourse, setRenewalPackagesByCourse] = useState<Record<string, any[]>>({});
+  const [expandedBatchId, setExpandedBatchId] = useState<number | null>(null);
+  const [expandedSubscriptionId, setExpandedSubscriptionId] = useState<number | null>(null);
+  const [paymentBusyKey, setPaymentBusyKey] = useState<string | null>(null);
+  const [partPaymentProfiles, setPartPaymentProfiles] = useState<Record<string, boolean>>({});
 
   const [form, setForm] = useState({
     name: '',
@@ -148,11 +198,25 @@ export default function AccountScreen({ navigation }: any) {
       let cancelled = false;
       setSubsLoading(true);
       setBatchesLoading(true);
-      Promise.allSettled([api.get('/subscriptions/my'), api.get('/batch-manager')])
-        .then(([subsResult, batchesResult]) => {
+      Promise.allSettled([api.get('/subscriptions/my'), api.get('/batch-manager'), api.get('/payments/apply/my')])
+        .then(async ([subsResult, batchesResult, applyResult]) => {
           if (cancelled) return;
-          setSubscriptions(subsResult.status === 'fulfilled' && Array.isArray(subsResult.value) ? subsResult.value : []);
+          const nextSubscriptions = subsResult.status === 'fulfilled' && Array.isArray(subsResult.value) ? subsResult.value : [];
+          setSubscriptions(nextSubscriptions);
           setBatches(batchesResult.status === 'fulfilled' && Array.isArray(batchesResult.value) ? batchesResult.value : []);
+          setApplyProfiles(applyResult.status === 'fulfilled' && Array.isArray(applyResult.value) ? applyResult.value : []);
+          const courseIds = [...new Set(nextSubscriptions.map((s: any) => Number(s.courseId)).filter((id: number) => Number.isFinite(id)))];
+          const packagePairs = await Promise.all(
+            courseIds.map(async (courseId) => {
+              try {
+                const data = await api.publicGet(`/billing/public/course/${courseId}`);
+                return [String(courseId), Array.isArray(data?.renewalPackages) ? data.renewalPackages : []] as const;
+              } catch {
+                return [String(courseId), []] as const;
+              }
+            }),
+          );
+          if (!cancelled) setRenewalPackagesByCourse(Object.fromEntries(packagePairs));
         })
         .finally(() => {
           if (!cancelled) {
@@ -163,7 +227,7 @@ export default function AccountScreen({ navigation }: any) {
       return () => {
         cancelled = true;
       };
-    }, [user?.id]),
+    }, [user]),
   );
 
   useEffect(() => {
@@ -281,6 +345,132 @@ export default function AccountScreen({ navigation }: any) {
     }
   }
 
+  function applyProfileForBatch(batch: any) {
+    return applyProfiles.find((profile) => Number(profile.batchId) === Number(batch.id));
+  }
+
+  function nextPayableDue(profile?: any) {
+    return (profile?.dueItems || []).find(
+      (due: any) => due?.dueStatus !== 'paid' && due?.dueStatus !== 'cancelled' && Number(due?.amountDueNowInr || 0) > 0,
+    );
+  }
+
+  function profileHasUnpaidParts(profile?: any) {
+    return (profile?.dueItems || []).some(
+      (due: any) =>
+        String(due?.dueKind || '').toLowerCase() === 'installment' &&
+        due?.dueStatus !== 'paid' &&
+        due?.dueStatus !== 'cancelled' &&
+        Number(due?.amountDueNowInr || 0) > 0,
+    );
+  }
+
+  async function payApplyDue(profile: any, due: any) {
+    if (!user || !due?.id) return;
+    const key = `apply:${due.id}`;
+    setPaymentBusyKey(key);
+    try {
+      const result = await payApplyDueWithRazorpay({
+        dueItemId: due.id,
+        userEmail: user.email,
+        userName: user.name,
+        userMobileDigits: user.mobile_number ?? undefined,
+        checkoutTitle: `${profile?.courseName || 'Course'} — ${due.dueLabel || 'Payment'}`,
+      });
+      if (!result?.ok) return;
+      Alert.alert('Payment successful', 'Your payment has been recorded.');
+      refreshUser();
+      const rows = await api.get('/payments/apply/my');
+      setApplyProfiles(Array.isArray(rows) ? rows : []);
+    } catch (error) {
+      alertApplyPaymentError(error);
+    } finally {
+      setPaymentBusyKey(null);
+    }
+  }
+
+  async function payRemainingFully(profile: any) {
+    if (!user || !profile?.id) return;
+    const key = `profile-full:${profile.id}`;
+    setPaymentBusyKey(key);
+    try {
+      const prepared = await api.post(`/payments/apply/${profile.id}/pay-remaining-full`, {});
+      const dueItemId = Number(prepared?.dueItemId);
+      if (!Number.isFinite(dueItemId)) throw new Error('Remaining payment could not be prepared');
+      const result = await payApplyDueWithRazorpay({
+        dueItemId,
+        userEmail: user.email,
+        userName: user.name,
+        userMobileDigits: user.mobile_number ?? undefined,
+        checkoutTitle: `${profile.courseName || 'Course'} — Full payment`,
+      });
+      if (!result?.ok) return;
+      Alert.alert('Payment successful', 'Your remaining fee has been paid.');
+      refreshUser();
+      const rows = await api.get('/payments/apply/my');
+      setApplyProfiles(Array.isArray(rows) ? rows : []);
+    } catch (error) {
+      alertApplyPaymentError(error);
+    } finally {
+      setPaymentBusyKey(null);
+    }
+  }
+
+  async function preparePartPayments(profile: any) {
+    if (!profile?.id) return;
+    const key = `profile-parts:${profile.id}`;
+    setPaymentBusyKey(key);
+    try {
+      await api.post(`/payments/apply/${profile.id}/parts`, {});
+      const rows = await api.get('/payments/apply/my');
+      setApplyProfiles(Array.isArray(rows) ? rows : []);
+      setPartPaymentProfiles((current) => ({ ...current, [String(profile.id)]: true }));
+    } catch (error) {
+      alertApplyPaymentError(error);
+    } finally {
+      setPaymentBusyKey(null);
+    }
+  }
+
+  async function togglePartPayments(profile: any) {
+    if (!profile?.id) return;
+    const profileId = String(profile.id);
+    const currentlySelected = !!partPaymentProfiles[profileId] || profileHasUnpaidParts(profile);
+    if (currentlySelected) {
+      setPartPaymentProfiles((current) => ({ ...current, [profileId]: false }));
+      return;
+    }
+    if (profileHasUnpaidParts(profile)) {
+      setPartPaymentProfiles((current) => ({ ...current, [profileId]: true }));
+      return;
+    }
+    await preparePartPayments(profile);
+  }
+
+  async function payRenewalPackage(subscription: any, pkg: any) {
+    if (!user || !pkg?.id) return;
+    const key = `renewal:${subscription.id}:${pkg.id}`;
+    setPaymentBusyKey(key);
+    try {
+      const ok = await payBillingPackage({
+        billingPackageId: pkg.id,
+        userEmail: user.email,
+        userName: user.name,
+        userMobileDigits: user.mobile_number ?? undefined,
+        checkoutTitle: `${subscription.courseName || 'Course'} — Renewal`,
+      });
+      if (!ok) return;
+      Alert.alert('Payment successful', 'Your renewal payment has been recorded.');
+      refreshUser();
+      const rows = await api.get('/subscriptions/my');
+      setSubscriptions(Array.isArray(rows) ? rows : []);
+    } catch (error) {
+      alertBillingPaymentError(error);
+    } finally {
+      setPaymentBusyKey(null);
+    }
+  }
+
   if (user) {
     return (
       <View style={styles.profileRoot}>
@@ -330,85 +520,12 @@ export default function AccountScreen({ navigation }: any) {
           </View>
 
           <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>Payments & Invoices</Text>
-            <Text style={styles.sectionCopy}>
-              See your payment history for purchased and subscribed courses, and download invoice PDFs.
-            </Text>
-            <TouchableOpacity style={styles.primaryActionBtn} onPress={() => navigation.navigate('PaymentsInvoices')}>
-              <Text style={styles.primaryActionBtnText}>Open Payments & Invoices</Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>Batches</Text>
-            {batchesLoading ? (
-              <ActivityIndicator style={styles.spaceTop} color={BRAND_RED} />
-            ) : batches.length === 0 ? (
-              <Text style={styles.value}>You are not added to any batch yet.</Text>
-            ) : (
-              batches.map((batch, idx) => (
-                <View key={batch.id} style={[styles.subCard, idx > 0 ? styles.subCardSpaced : null]}>
-                  <Text style={styles.subCourse}>
-                    {batch.title || batch.name || `Batch #${batch.batch_number || batch.id}`}
-                  </Text>
-                  <Text style={styles.subMeta}>{batch.course_name || 'Course'}</Text>
-                  <Text style={styles.subDetail}>
-                    Batch {batch.batch_number || batch.id} · {batch.session_type === 'one_to_one' ? '1:1' : 'Group'}
-                  </Text>
-                  <Text style={styles.subDetail}>{batchScheduleText(batch.training_schedule_json)}</Text>
-                  <Text style={styles.subDates}>
-                    {String(batch.batch_status || '').toLowerCase() === 'started'
-                      ? `Started ${formatBatchDate(batch.actual_start_date || batch.planned_start_date)}`
-                      : `Starts ${formatBatchDate(batch.planned_start_date)}`}
-                  </Text>
-                </View>
-              ))
-            )}
-          </View>
-
-          <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>Subscriptions & access</Text>
-            {subsLoading ? (
-              <ActivityIndicator style={styles.spaceTop} color={BRAND_RED} />
-            ) : subscriptions.length === 0 ? (
-              <Text style={styles.value}>No subscription or access grants on file.</Text>
-            ) : (
-              subscriptions.map((s, idx) => (
-                <View key={s.id} style={[styles.subCard, idx > 0 ? styles.subCardSpaced : null]}>
-                  <Text style={styles.subCourse}>{s.courseName || `Course #${s.courseId}`}</Text>
-                  <Text style={styles.subMeta}>{s.sourceLabel || s.source}</Text>
-                  {(s.durationUnit || s.durationCount != null) && !s.isLifetime ? (
-                    <Text style={styles.subDetail}>
-                      Plan:{' '}
-                      {String(s.durationUnit || '').toLowerCase() === 'day'
-                        ? `${s.durationCount} day(s)`
-                        : String(s.durationUnit || '').toLowerCase() === 'year'
-                          ? `${s.durationCount} year(s)`
-                          : `${s.durationCount} mo`}{' '}
-                      · {String(s.packageKind || '') || 'subscription'}
-                    </Text>
-                  ) : null}
-                  {s.batchTitle ? (
-                    <Text style={styles.subDetail}>Batch: {s.batchTitle}</Text>
-                  ) : null}
-                  <Text style={styles.subDates}>
-                    {s.isLifetime
-                      ? 'Full access · no end date'
-                      : `${formatSubsDate(s.startsAtIso)} → ends ${formatSubsDate(s.endsAtIso)}`}
-                  </Text>
-                  {!s.isLifetime ? (
-                    <Text style={styles.subfine}>Grace until {formatSubsDate(s.graceEndsAtIso)}</Text>
-                  ) : null}
-                  {s.razorpayOrderId ? (
-                    <Text style={styles.subfine}>Order: {s.razorpayOrderId}</Text>
-                  ) : null}
-                </View>
-              ))
-            )}
-          </View>
-
-          <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>Student profile</Text>
+            <View style={styles.cardHeaderRow}>
+              <Text style={styles.sectionTitle}>Profile</Text>
+              <TouchableOpacity style={styles.iconBtn} onPress={() => setEditing((v) => !v)}>
+                <Text style={styles.iconBtnText}>{editing ? 'Cancel' : 'Edit'}</Text>
+              </TouchableOpacity>
+            </View>
             <Text style={[styles.label, styles.spaceTop]}>Gender</Text>
             {editing ? <TextInput style={styles.input} value={form.gender} onChangeText={(value) => setForm((s) => ({ ...s, gender: value }))} /> : <Text style={styles.value}>{studentProfile.gender || '-'}</Text>}
             <Text style={[styles.label, styles.spaceTop]}>Birth Date</Text>
@@ -427,17 +544,191 @@ export default function AccountScreen({ navigation }: any) {
             )}
             <Text style={[styles.label, styles.spaceTop]}>Occupation</Text>
             {editing ? <TextInput style={styles.input} value={form.occupation} onChangeText={(value) => setForm((s) => ({ ...s, occupation: value }))} /> : <Text style={styles.value}>{studentProfile.occupation || '-'}</Text>}
-          </View>
-
-          <View style={styles.actionRow}>
-            <TouchableOpacity style={styles.ghostBtn} onPress={() => setEditing((v) => !v)}>
-              <Text style={styles.ghostBtnText}>{editing ? 'Cancel edit' : 'Edit profile'}</Text>
-            </TouchableOpacity>
             {editing ? (
-              <TouchableOpacity style={styles.primaryBtnSmall} onPress={saveProfile} disabled={busy}>
+              <TouchableOpacity style={styles.primaryBtnSmallFull} onPress={saveProfile} disabled={busy}>
                 <Text style={styles.primaryBtnText}>{busy ? 'Saving...' : 'Save profile'}</Text>
               </TouchableOpacity>
             ) : null}
+          </View>
+
+          <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>Batches you're in</Text>
+            {batchesLoading ? (
+              <ActivityIndicator style={styles.spaceTop} color={BRAND_RED} />
+            ) : batches.length === 0 ? (
+              <Text style={styles.value}>You are not added to any batch yet.</Text>
+            ) : (
+              batches.map((batch, idx) => {
+                const profile = applyProfileForBatch(batch);
+                const due = nextPayableDue(profile);
+                const expanded = expandedBatchId === Number(batch.id);
+                const dueKey = due ? `apply:${due.id}` : '';
+                return (
+                  <View key={batch.id} style={[styles.subCard, idx > 0 ? styles.subCardSpaced : null]}>
+                    <Text style={styles.subCourse}>
+                      {batch.title || batch.name || `Batch #${batch.batch_number || batch.id}`}
+                    </Text>
+                    <Text style={styles.subMeta}>{batch.course_name || profile?.courseName || 'Course'}</Text>
+                    {due ? (
+                      <>
+                        <TouchableOpacity
+                          style={[styles.payBtn, paymentBusyKey === dueKey && styles.disabledBtn]}
+                          disabled={!!paymentBusyKey}
+                          onPress={() => payApplyDue(profile, due)}
+                        >
+                          <Text style={styles.payBtnText}>
+                            {paymentBusyKey === dueKey ? 'Opening payment...' : `Pay ${formatMoney(due.amountDueNowInr)}`}
+                          </Text>
+                        </TouchableOpacity>
+                        <Text style={styles.payDueOutside}>Due: {dueTimingText(due)}</Text>
+                      </>
+                    ) : (
+                      <Text style={styles.subDates}>No payable batch dues right now.</Text>
+                    )}
+                    <TouchableOpacity style={styles.detailsBtn} onPress={() => setExpandedBatchId(expanded ? null : Number(batch.id))}>
+                      <Text style={styles.detailsBtnText}>{expanded ? 'Hide Details' : 'More Details'}</Text>
+                    </TouchableOpacity>
+                    {expanded ? (
+                      <View style={styles.expandedBox}>
+                        <Text style={styles.subDetail}>
+                          Batch {batch.batch_number || batch.id} · {batch.session_type === 'one_to_one' ? '1:1' : 'Group'}
+                        </Text>
+                        <Text style={styles.subDetail}>{batchScheduleText(batch.training_schedule_json)}</Text>
+                        <Text style={styles.subDates}>
+                          {String(batch.batch_status || '').toLowerCase() === 'started'
+                            ? `Started ${formatBatchDate(batch.actual_start_date || batch.planned_start_date)}`
+                            : `Starts ${formatBatchDate(batch.planned_start_date)}`}
+                        </Text>
+                        {profile ? (
+                          <>
+                            {(profile.dueItems || [])
+                              .filter((item: any) => item.dueStatus !== 'cancelled')
+                              .map((item: any) => (
+                                <View key={item.id} style={styles.dueLine}>
+                                  <Text style={styles.dueLineTitle}>{item.dueLabel || 'Payment'}</Text>
+                                  {item.dueStatus === 'paid' ? (
+                                    <>
+                                      <Text style={styles.paidText}>Paid</Text>
+                                      <Text style={styles.subfine}>Paid on: {formatAccountDate(item.satisfiedAt)}</Text>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Text style={styles.dueLineAmount}>{formatMoney(item.amountDueNowInr)}</Text>
+                                      <Text style={styles.subfine}>{dueTimingText(item)}</Text>
+                                    </>
+                                  )}
+                                </View>
+                              ))}
+                            {Number(profile.remainingBalanceInr || 0) > 0 ? (
+                              <View style={styles.paymentOptionsBox}>
+                                <TouchableOpacity
+                                  style={[styles.smallActionBtn, paymentBusyKey === `profile-full:${profile.id}` && styles.disabledBtn]}
+                                  disabled={!!paymentBusyKey}
+                                  onPress={() => payRemainingFully(profile)}
+                                >
+                                  <Text style={styles.smallActionText}>Pay Fully</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                  style={[styles.checkboxRow, paymentBusyKey === `profile-parts:${profile.id}` && styles.disabledBtn]}
+                                  disabled={!!paymentBusyKey}
+                                  onPress={() => togglePartPayments(profile)}
+                                >
+                                  <View style={[
+                                    styles.checkbox,
+                                    (!!partPaymentProfiles[String(profile.id)] || profileHasUnpaidParts(profile)) && styles.checkboxChecked,
+                                  ]}>
+                                    {(!!partPaymentProfiles[String(profile.id)] || profileHasUnpaidParts(profile)) ? (
+                                      <Text style={styles.checkboxTick}>✓</Text>
+                                    ) : null}
+                                  </View>
+                                  <Text style={styles.checkboxText}>Part payments</Text>
+                                </TouchableOpacity>
+                              </View>
+                            ) : null}
+                          </>
+                        ) : null}
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              })
+            )}
+          </View>
+
+          <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>Subscriptions & access</Text>
+            {subsLoading ? (
+              <ActivityIndicator style={styles.spaceTop} color={BRAND_RED} />
+            ) : subscriptions.length === 0 ? (
+              <Text style={styles.value}>No subscription or access grants on file.</Text>
+            ) : (
+              subscriptions.map((s, idx) => {
+                const renewalPackages = renewalPackagesByCourse[String(s.courseId)] || [];
+                const renewalPackage = renewalPackages[0] || null;
+                const expanded = expandedSubscriptionId === Number(s.id);
+                return (
+                  <View key={s.id} style={[styles.subCard, idx > 0 ? styles.subCardSpaced : null]}>
+                    <Text style={styles.subCourse}>{s.courseName || `Course #${s.courseId}`}</Text>
+                    {renewalPackage ? (
+                      <>
+                        <TouchableOpacity
+                          style={[styles.payBtn, paymentBusyKey === `renewal:${s.id}:${renewalPackage.id}` && styles.disabledBtn]}
+                          disabled={!!paymentBusyKey}
+                          onPress={() => payRenewalPackage(s, renewalPackage)}
+                        >
+                          <Text style={styles.payBtnText}>
+                            {paymentBusyKey === `renewal:${s.id}:${renewalPackage.id}`
+                              ? 'Opening payment...'
+                              : `Pay ${formatMoney(packageAmountInr(renewalPackage))}`}
+                          </Text>
+                        </TouchableOpacity>
+                        <Text style={styles.payDueOutside}>
+                          Due: {s.isLifetime ? 'When you want to renew' : formatAccountDate(s.endsAtIso)}
+                        </Text>
+                      </>
+                    ) : (
+                      <Text style={styles.subDates}>No renewal package available.</Text>
+                    )}
+                    <TouchableOpacity style={styles.detailsBtn} onPress={() => setExpandedSubscriptionId(expanded ? null : Number(s.id))}>
+                      <Text style={styles.detailsBtnText}>{expanded ? 'Hide Details' : 'More Details'}</Text>
+                    </TouchableOpacity>
+                    {expanded ? (
+                      <View style={styles.expandedBox}>
+                        <Text style={styles.subMeta}>{s.sourceLabel || s.source}</Text>
+                        {(s.durationUnit || s.durationCount != null) && !s.isLifetime ? (
+                          <Text style={styles.subDetail}>
+                            Subscription:{' '}
+                            {String(s.durationUnit || '').toLowerCase() === 'day'
+                              ? `${s.durationCount} day(s)`
+                              : String(s.durationUnit || '').toLowerCase() === 'year'
+                                ? `${s.durationCount} year(s)`
+                                : `${s.durationCount} month(s)`}{' '}
+                            · {String(s.packageKind || '') || 'subscription'}
+                          </Text>
+                        ) : null}
+                        {s.batchTitle ? <Text style={styles.subDetail}>Batch: {s.batchTitle}</Text> : null}
+                        <Text style={styles.subDates}>
+                          {s.isLifetime
+                            ? 'Full access · no end date'
+                            : `${formatSubsDate(s.startsAtIso)} → ends ${formatSubsDate(s.endsAtIso)}`}
+                        </Text>
+                        {renewalPackages.length > 0 ? (
+                          <View style={styles.renewalList}>
+                            <Text style={styles.label}>Renewal details</Text>
+                            {renewalPackages.map((pkg: any) => (
+                              <Text key={pkg.id} style={styles.subDetail}>
+                                {formatMoney(packageAmountInr(pkg))} · {pkg.duration_count}{' '}
+                                {String(pkg.duration_unit || 'month').toLowerCase()}(s)
+                              </Text>
+                            ))}
+                          </View>
+                        ) : null}
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              })
+            )}
           </View>
           <TouchableOpacity style={styles.logoutBtn} onPress={() => logout()}>
             <Text style={styles.logoutText}>Log out</Text>
@@ -602,6 +893,21 @@ const styles = StyleSheet.create({
     color: '#1f2a44',
     marginBottom: 6,
   },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  iconBtn: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#c7d2fe',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    backgroundColor: '#eef2ff',
+  },
+  iconBtnText: { color: BRAND_BLUE, fontWeight: '800', fontSize: 12 },
   sectionCopy: { fontSize: 14, color: '#475569', lineHeight: 20 },
   label: { fontSize: 12, fontWeight: '700', color: '#6b7280', textTransform: 'uppercase' },
   value: { fontSize: 16, color: '#111827', marginTop: 4 },
@@ -623,6 +929,13 @@ const styles = StyleSheet.create({
   },
   primaryBtnSmall: {
     flex: 1,
+    backgroundColor: BRAND_RED,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  primaryBtnSmallFull: {
+    marginTop: 14,
     backgroundColor: BRAND_RED,
     borderRadius: 10,
     paddingVertical: 12,
@@ -674,4 +987,83 @@ const styles = StyleSheet.create({
   subDetail: { fontSize: 13, color: '#64748b', marginTop: 4, lineHeight: 18 },
   subDates: { fontSize: 12, color: '#334155', marginTop: 6, lineHeight: 18 },
   subfine: { fontSize: 11, color: '#94a3b8', marginTop: 4 },
+  payBtn: {
+    marginTop: 10,
+    backgroundColor: BRAND_BLUE,
+    borderRadius: 10,
+    paddingVertical: 11,
+    paddingHorizontal: 12,
+  },
+  payBtnText: { color: '#fff', fontWeight: '900', fontSize: 15 },
+  payDueOutside: { color: '#334155', fontWeight: '700', fontSize: 12, marginTop: 6 },
+  disabledBtn: { opacity: 0.55 },
+  detailsBtn: {
+    marginTop: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#c7d2fe',
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: '#fff',
+  },
+  detailsBtnText: { color: BRAND_BLUE, fontWeight: '800', fontSize: 13 },
+  expandedBox: {
+    marginTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    paddingTop: 10,
+  },
+  dueLine: {
+    marginTop: 8,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e8ecf6',
+    padding: 10,
+  },
+  dueLineTitle: { color: '#334155', fontWeight: '800', fontSize: 13 },
+  dueLineAmount: { color: BRAND_RED, fontWeight: '900', fontSize: 17, marginTop: 4 },
+  paidText: { color: '#2e7d32', fontWeight: '900', fontSize: 17, marginTop: 4 },
+  inlineActions: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  paymentOptionsBox: { marginTop: 10, gap: 10 },
+  smallActionBtn: {
+    backgroundColor: BRAND_RED,
+    borderRadius: 9,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  smallActionText: { color: '#fff', fontWeight: '800', fontSize: 12 },
+  smallOutlineBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: BRAND_BLUE,
+    borderRadius: 9,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  smallOutlineText: { color: BRAND_BLUE, fontWeight: '800', fontSize: 12 },
+  checkboxRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderWidth: 1,
+    borderColor: '#c7d2fe',
+    borderRadius: 9,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: '#fff',
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 5,
+    borderWidth: 1.5,
+    borderColor: BRAND_BLUE,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkboxChecked: { backgroundColor: BRAND_BLUE },
+  checkboxTick: { color: '#fff', fontSize: 13, fontWeight: '900' },
+  checkboxText: { color: BRAND_BLUE, fontWeight: '800', fontSize: 13 },
+  renewalList: { marginTop: 10 },
 });

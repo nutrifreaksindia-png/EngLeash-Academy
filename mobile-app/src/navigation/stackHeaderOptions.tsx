@@ -1,6 +1,6 @@
 import React from 'react';
 import { Alert, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { HeaderBackButton } from '@react-navigation/elements';
+import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationOptions } from '@react-navigation/native-stack';
 import Ionicons from '@expo/vector-icons/Ionicons';
 
@@ -20,6 +20,42 @@ function HeaderBrandTitle() {
   );
 }
 
+function HeaderLeft({ canGoBack }: { canGoBack?: boolean }) {
+  const navigation = useNavigation();
+
+  function goBack() {
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+      return;
+    }
+    navigation.getParent()?.goBack?.();
+  }
+
+  return (
+    <View style={[styles.leftRow, !canGoBack && styles.leftRowRoot]}>
+      {canGoBack ? (
+        <TouchableOpacity
+          onPress={goBack}
+          style={styles.backBtn}
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+        >
+          <Ionicons name="chevron-back" size={28} color="#fff" />
+        </TouchableOpacity>
+      ) : null}
+      <View style={[styles.logoWrap, canGoBack ? styles.logoAfterBack : null]} accessibilityLabel="EngLeash Academy logo">
+        <Image
+          source={require('../../../brand/logo_icon.png')}
+          style={styles.logo}
+          resizeMode="cover"
+          accessibilityIgnoresInvertColors
+        />
+      </View>
+    </View>
+  );
+}
+
 export function appStackScreenOptions(): NativeStackNavigationOptions {
   return {
     headerStyle: {
@@ -28,21 +64,7 @@ export function appStackScreenOptions(): NativeStackNavigationOptions {
     },
     headerTintColor: '#fff',
     headerTitleAlign: 'left',
-    headerLeft: (props) => (
-      <View style={[styles.leftRow, !props.canGoBack && styles.leftRowRoot]}>
-        {props.canGoBack ? (
-          <HeaderBackButton {...props} tintColor="#fff" label="" labelVisible={false} />
-        ) : null}
-        <View style={[styles.logoWrap, props.canGoBack ? styles.logoAfterBack : null]} accessibilityLabel="EngLeash Academy logo">
-          <Image
-            source={require('../../../brand/logo_icon.png')}
-            style={styles.logo}
-            resizeMode="cover"
-            accessibilityIgnoresInvertColors
-          />
-        </View>
-      </View>
-    ),
+    headerLeft: (props) => <HeaderLeft canGoBack={props.canGoBack} />,
     headerRight: () => (
       <TouchableOpacity
         onPress={onNotificationsPress}
@@ -65,6 +87,13 @@ const styles = StyleSheet.create({
   },
   leftRowRoot: {
     marginLeft: 12,
+  },
+  backBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: -6,
+    paddingHorizontal: 2,
+    paddingVertical: 4,
   },
   logoWrap: {
     justifyContent: 'center',

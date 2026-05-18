@@ -22,9 +22,9 @@ const BRAND_RED = '#c41e3a';
 function formatAmount(amountInr?: number, currency = 'INR') {
   const value = Number(amountInr || 0);
   if (String(currency || '').toUpperCase() === 'INR') {
-    return `Rs. ${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return `Rs. ${Math.round(value).toLocaleString('en-IN')}`;
   }
-  return `${String(currency || '').toUpperCase()} ${value.toFixed(2)}`;
+  return `${String(currency || '').toUpperCase()} ${Math.round(value).toLocaleString('en-IN')}`;
 }
 
 function formatDate(value?: string | null) {

@@ -167,6 +167,7 @@ export default function MainTabNavigator() {
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
+        popToTopOnBlur: true,
         tabBarActiveTintColor: '#c41e3a',
         tabBarInactiveTintColor: '#666',
         tabBarStyle: {
