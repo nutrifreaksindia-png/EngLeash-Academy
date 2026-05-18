@@ -101,6 +101,16 @@ function packageAmountInr(pkg?: any) {
   return Math.max(0, Number(pkg.fee_inr || 0) - Number(pkg.discount_inr || 0));
 }
 
+/** Time-limited access period has ended (now is after endsAt). Lifetime grants are never "ended" here. */
+function subscriptionPeriodEnded(sub?: any) {
+  if (!sub || sub.isLifetime) return false;
+  const raw = sub.endsAtIso;
+  if (!raw) return false;
+  const endMs = new Date(String(raw)).getTime();
+  if (!Number.isFinite(endMs)) return false;
+  return Date.now() > endMs;
+}
+
 export default function AccountScreen({ navigation }: any) {
   const { user, logout, refreshUser } = useAuth();
   const insets = useSafeAreaInsets();
@@ -355,8 +365,19 @@ export default function AccountScreen({ navigation }: any) {
   }
 
   function nextPayableDue(billingProfile?: any) {
-    return (billingProfile?.dueItems || []).find(
-      (due: any) => due?.dueStatus !== 'paid' && due?.dueStatus !== 'cancelled' && Number(due?.amountDueNowInr || 0) > 0,
+    const open = (billingProfile?.dueItems || []).filter(
+      (due: any) => due?.dueStatus !== 'paid' && due?.dueStatus !== 'cancelled',
+    );
+    return (
+      open.find((due: any) => Number(due?.amountDueNowInr || 0) > 0) ||
+      open[0] ||
+      undefined
+    );
+  }
+
+  function profileHasOutstandingApplyDues(billingProfile?: any) {
+    return (billingProfile?.dueItems || []).some(
+      (d: any) => d?.dueStatus !== 'paid' && d?.dueStatus !== 'cancelled',
     );
   }
 
@@ -392,6 +413,30 @@ export default function AccountScreen({ navigation }: any) {
   function fullPaymentDueText(billingProfile?: any, batch?: any) {
     const startDate = billingProfile?.batchStartDate || batch?.planned_start_date || batch?.actual_start_date;
     return startDate ? `Due: ${formatAccountDate(startDate)}` : 'Due: When you pay';
+  }
+
+  function applyFullPayDiscountDescription(
+    billingProfile: any,
+    extraDiscountInr: number,
+    extraDiscountApplies: boolean,
+  ) {
+    if (extraDiscountInr <= 0) {
+      return 'Pay the full remaining balance at once, or turn on Part payments to pay each installment from the schedule.';
+    }
+    if (extraDiscountApplies) {
+      return `Pay the full remaining balance in one payment to save ${formatMoney(extraDiscountInr)} (extra discount is applied at checkout).`;
+    }
+    if (profileHasPaidFirstPart(billingProfile)) {
+      return `Extra discount (${formatMoney(extraDiscountInr)}) is not available after a part payment has been recorded. You can still pay the rest in full or continue part by part.`;
+    }
+    return `Extra discount ${formatMoney(extraDiscountInr)} applies when you pay the full remaining balance in one payment. Turn off Part payments to pay in full.`;
+  }
+
+  function applyFullPayDiscountBadgeText(billingProfile: any, extraDiscountInr: number, extraDiscountApplies: boolean) {
+    if (extraDiscountInr <= 0) return '';
+    if (extraDiscountApplies) return `Extra discount on · saves ${formatMoney(extraDiscountInr)}`;
+    if (profileHasPaidFirstPart(billingProfile)) return 'Extra discount off · part paid';
+    return 'Extra discount off · pay fully to save';
   }
 
   async function payApplyDue(billingProfile: any, due: any) {
@@ -618,6 +663,13 @@ export default function AccountScreen({ navigation }: any) {
                   !partSelected &&
                   !profileHasPaidFirstPart(billingProfile) &&
                   extraDiscountInr > 0;
+                const showPartPaymentPromo =
+                  !!billingProfile &&
+                  !profileHasPaidFirstPart(billingProfile) &&
+                  (remainingBal > 0 || profileHasOutstandingApplyDues(billingProfile));
+                const discountBadgeText = billingProfile
+                  ? applyFullPayDiscountBadgeText(billingProfile, extraDiscountInr, extraDiscountApplies)
+                  : '';
                 const expandedDueItems = billingProfile
                   ? (() => {
                       const all = (billingProfile.dueItems || []).filter((item: any) => item.dueStatus !== 'cancelled');
@@ -661,7 +713,7 @@ export default function AccountScreen({ navigation }: any) {
                     ) : (
                       <Text style={styles.subDates}>No payable batch dues right now.</Text>
                     )}
-                    {billingProfile && Number(billingProfile.remainingBalanceInr || 0) > 0 ? (
+                    {showPartPaymentPromo ? (
                       <View style={styles.partPaymentWrap}>
                         <View style={styles.partPaymentRow}>
                           <TouchableOpacity
@@ -674,17 +726,21 @@ export default function AccountScreen({ navigation }: any) {
                             </View>
                             <Text style={styles.checkboxText}>Part payments</Text>
                           </TouchableOpacity>
-                          <Text
-                            style={extraDiscountApplies ? styles.discountBadgeApplied : styles.discountBadgeDisabled}
-                            numberOfLines={2}
-                          >
-                            {extraDiscountApplies
-                              ? `Extra Discount ${formatMoney(extraDiscountInr)} Applied`
-                              : 'Extra Discount Disabled'}
-                          </Text>
+                          {discountBadgeText ? (
+                            <Text
+                              style={extraDiscountApplies ? styles.discountBadgeApplied : styles.discountBadgeDisabled}
+                              numberOfLines={2}
+                            >
+                              {discountBadgeText}
+                            </Text>
+                          ) : (
+                            <Text style={styles.discountBadgeNeutral} numberOfLines={2}>
+                              Pay full or by part
+                            </Text>
+                          )}
                         </View>
                         <Text style={styles.partPaymentDescription}>
-                          {`Extra Discount ${formatMoney(extraDiscountInr)} is applicable for full payments.`}
+                          {applyFullPayDiscountDescription(billingProfile, extraDiscountInr, extraDiscountApplies)}
                         </Text>
                       </View>
                     ) : null}
@@ -763,25 +819,36 @@ export default function AccountScreen({ navigation }: any) {
                 const renewalPackages = renewalPackagesByCourse[String(s.courseId)] || [];
                 const renewalPackage = renewalPackages[0] || null;
                 const expanded = expandedSubscriptionId === Number(s.id);
+                const renewalEnded = subscriptionPeriodEnded(s);
                 return (
                   <View key={s.id} style={[styles.subCard, idx > 0 ? styles.subCardSpaced : null]}>
                     <Text style={styles.subCourse}>{s.courseName || `Course #${s.courseId}`}</Text>
                     {renewalPackage ? (
                       <>
-                        <TouchableOpacity
-                          style={[styles.payBtn, paymentBusyKey === `renewal:${s.id}:${renewalPackage.id}` && styles.disabledBtn]}
-                          disabled={!!paymentBusyKey}
-                          onPress={() => payRenewalPackage(s, renewalPackage)}
-                        >
-                          <Text style={styles.payBtnText}>
-                            {paymentBusyKey === `renewal:${s.id}:${renewalPackage.id}`
-                              ? 'Opening payment...'
-                              : `Pay ${formatMoney(packageAmountInr(renewalPackage))}`}
+                        {renewalEnded ? (
+                          <>
+                            <TouchableOpacity
+                              style={[styles.payBtn, paymentBusyKey === `renewal:${s.id}:${renewalPackage.id}` && styles.disabledBtn]}
+                              disabled={!!paymentBusyKey}
+                              onPress={() => payRenewalPackage(s, renewalPackage)}
+                            >
+                              <Text style={styles.payBtnText}>
+                                {paymentBusyKey === `renewal:${s.id}:${renewalPackage.id}`
+                                  ? 'Opening payment...'
+                                  : `Pay ${formatMoney(packageAmountInr(renewalPackage))}`}
+                              </Text>
+                            </TouchableOpacity>
+                            <Text style={styles.payDueOutside}>
+                              Ended {formatAccountDate(s.endsAtIso)} · tap Pay to renew
+                            </Text>
+                          </>
+                        ) : (
+                          <Text style={styles.subDates}>
+                            {s.isLifetime
+                              ? 'Full access · no end date'
+                              : `Active until ${formatAccountDate(s.endsAtIso)}`}
                           </Text>
-                        </TouchableOpacity>
-                        <Text style={styles.payDueOutside}>
-                          Due: {s.isLifetime ? 'When you want to renew' : formatAccountDate(s.endsAtIso)}
-                        </Text>
+                        )}
                       </>
                     ) : (
                       <Text style={styles.subDates}>No renewal package available.</Text>
@@ -1164,6 +1231,14 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     color: BRAND_RED,
+    textAlign: 'right',
+    lineHeight: 16,
+  },
+  discountBadgeNeutral: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748b',
     textAlign: 'right',
     lineHeight: 16,
   },

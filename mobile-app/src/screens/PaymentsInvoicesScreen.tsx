@@ -18,6 +18,7 @@ import { alertApplyPaymentError, payApplyDueWithRazorpay } from '../payments/raz
 
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
+const DISCOUNT_GREEN = '#1b5e20';
 
 function formatAmount(amountInr?: number, currency = 'INR') {
   const value = Number(amountInr || 0);
@@ -82,6 +83,7 @@ type ApplyBillingRow = {
   selectedPlanLabel?: string;
   status?: string;
   remainingBalanceInr?: number;
+  singlePaymentDiscountInr?: number;
   dueItems?: ApplyDueRow[];
 };
 
@@ -93,6 +95,21 @@ function hasUnpaidPart(profile: ApplyBillingRow) {
   return (profile.dueItems || []).some(
     (due) => String(due.dueKind || '').toLowerCase() === 'installment' && due.dueStatus !== 'paid' && due.dueStatus !== 'cancelled',
   );
+}
+
+/** Recorded any payment toward an installment (part) line. */
+function profileHasPaidInstallmentPart(profile: ApplyBillingRow) {
+  return (profile.dueItems || []).some(
+    (due) =>
+      String(due.dueKind || '').toLowerCase() === 'installment' &&
+      Number(due.paidAmountInr || 0) > 0,
+  );
+}
+
+function showApplyBalanceActions(profile: ApplyBillingRow) {
+  if (!hasPaidInitialDue(profile)) return false;
+  if (Number(profile.remainingBalanceInr || 0) > 0) return true;
+  return hasUnpaidPart(profile);
 }
 
 function shouldShowDue(due: ApplyDueRow) {
@@ -233,14 +250,32 @@ export default function PaymentsInvoicesScreen() {
           <Text style={styles.intro}>
             View your payment history, invoice PDFs, and apply-course due schedules in one place.
           </Text>
-          {applyProfiles.map((profile) => (
+              {applyProfiles.map((profile) => {
+                const showDiscountPromo =
+                  showApplyBalanceActions(profile) && !profileHasPaidInstallmentPart(profile);
+                const extraDiscountInr = Math.max(0, Math.round(Number(profile.singlePaymentDiscountInr || 0)));
+                const discountApplies = showDiscountPromo && extraDiscountInr > 0;
+                const discountBadgeText =
+                  !showDiscountPromo || extraDiscountInr <= 0
+                    ? ''
+                    : discountApplies
+                      ? `Extra discount on · saves ${formatAmount(extraDiscountInr, 'INR')}`
+                      : 'Extra discount off · pay fully to save';
+                const discountDescription = !showDiscountPromo
+                  ? ''
+                  : extraDiscountInr <= 0
+                    ? 'Pay the full remaining balance at once, or pay each part using the buttons below.'
+                    : discountApplies
+                      ? `Pay the full remaining balance in one payment to save ${formatAmount(extraDiscountInr, 'INR')} (extra discount is applied at checkout).`
+                      : `Extra discount ${formatAmount(extraDiscountInr, 'INR')} applies when you pay the full remaining balance in one payment.`;
+                return (
             <View key={`apply-${profile.id}`} style={styles.card}>
               <Text style={styles.title}>{profile.courseName || 'Apply course'}</Text>
               <Text style={styles.meta}>
                 {profile.selectedPlanLabel || 'Apply plan'}
                 {profile.batchTitle ? ` · ${profile.batchTitle}${profile.batchNumber ? ` (#${profile.batchNumber})` : ''}` : ''}
               </Text>
-              {hasPaidInitialDue(profile) && Number(profile.remainingBalanceInr || 0) > 0 ? (
+              {showApplyBalanceActions(profile) ? (
                 <View style={styles.balanceActions}>
                   <TouchableOpacity
                     style={[styles.downloadBtn, payingDueId === -profile.id && styles.downloadBtnDisabled]}
@@ -260,9 +295,23 @@ export default function PaymentsInvoicesScreen() {
                       <Text style={styles.outlineText}>Pay in parts</Text>
                     </TouchableOpacity>
                   ) : null}
-                  <Text style={styles.detail}>
-                    Full remaining payment keeps the extra single-payment discount unless you have already paid the first part.
-                  </Text>
+                  {showDiscountPromo ? (
+                    <View style={styles.discountPromoBox}>
+                      {discountBadgeText ? (
+                        <Text
+                          style={discountApplies ? styles.discountBadgeApplied : styles.discountBadgeDisabled}
+                          numberOfLines={2}
+                        >
+                          {discountBadgeText}
+                        </Text>
+                      ) : (
+                        <Text style={styles.discountBadgeNeutral} numberOfLines={2}>
+                          Remaining balance options
+                        </Text>
+                      )}
+                      <Text style={styles.partPaymentDescription}>{discountDescription}</Text>
+                    </View>
+                  ) : null}
                 </View>
               ) : null}
               {(profile.dueItems || []).filter(shouldShowDue).map((due) => {
@@ -325,7 +374,8 @@ export default function PaymentsInvoicesScreen() {
                 );
               })}
             </View>
-          ))}
+                );
+              })}
           {payments.map((payment) => (
             <View key={payment.id} style={styles.card}>
               <View style={styles.rowBetween}>
@@ -399,6 +449,36 @@ const styles = StyleSheet.create({
   amount: { marginTop: 12, fontSize: 21, fontWeight: '800', color: BRAND_RED },
   detail: { marginTop: 6, fontSize: 13, color: '#475569', lineHeight: 18 },
   balanceActions: { marginTop: 10 },
+  discountPromoBox: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    gap: 6,
+  },
+  discountBadgeApplied: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: DISCOUNT_GREEN,
+    lineHeight: 17,
+  },
+  discountBadgeDisabled: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: BRAND_RED,
+    lineHeight: 17,
+  },
+  discountBadgeNeutral: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#64748b',
+    lineHeight: 17,
+  },
+  partPaymentDescription: {
+    fontSize: 12,
+    color: '#64748b',
+    lineHeight: 18,
+  },
   dueCard: {
     marginTop: 12,
     paddingTop: 12,

@@ -25,6 +25,65 @@ function packageAmountPaise(pkg) {
   return Math.round(inr * 100);
 }
 
+/** End of local calendar day for YYYY-MM-DD (23:59:59.999). */
+function endOfDayFromYmd(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '').trim());
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  return new Date(y, mo, d, 23, 59, 59, 999).getTime();
+}
+
+/** Last teaching day from current session table (excludes cancelled). Access ends end of that day. */
+function batchAccessEndMsFromSessions(batchId) {
+  const bid = Number(batchId);
+  if (!Number.isFinite(bid)) return null;
+  const row = db
+    .prepare(
+      `SELECT MAX(session_date) AS d
+       FROM batch_sessions
+       WHERE batch_id = ? AND COALESCE(status, '') != 'cancelled'`,
+    )
+    .get(bid);
+  const ymd = row?.d != null ? String(row.d).trim() : '';
+  return endOfDayFromYmd(ymd);
+}
+
+/** Recompute ends_at / grace for all grants tied to this batch (session schedule is source of truth). */
+function refreshBatchLinkedAccessEnds(batchId) {
+  const bid = Number(batchId);
+  if (!Number.isFinite(bid)) return;
+  const endMs = batchAccessEndMsFromSessions(bid);
+  if (endMs == null || !Number.isFinite(endMs)) return;
+  const graceMs = endMs + GRACE_MS;
+
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE course_access_grants
+       SET ends_at_ms = ?, grace_ends_at_ms = ?
+       WHERE batch_id = ? AND revoked_at_ms IS NULL
+         AND source IN ('subscribe_batch', 'batch_course')`,
+    ).run(endMs, graceMs, bid);
+
+    db.prepare(
+      `UPDATE course_access_grants AS g
+       SET ends_at_ms = ?, grace_ends_at_ms = ?, batch_id = ?
+       WHERE g.source = 'batch_course'
+         AND g.revoked_at_ms IS NULL
+         AND (g.batch_id IS NULL OR g.batch_id = ?)
+         AND EXISTS (
+           SELECT 1 FROM batch_members bm
+           WHERE bm.batch_id = ? AND bm.student_id = g.user_id
+             AND (
+               EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = bm.batch_id AND bc.course_id = g.course_id)
+               OR EXISTS (SELECT 1 FROM batches b WHERE b.id = bm.batch_id AND b.course_id IS NOT NULL AND b.course_id = g.course_id)
+             )
+         )`,
+    ).run(endMs, graceMs, bid, bid, bid);
+  })();
+}
+
 /** Start of local calendar day for YYYY-MM-DD in server local TZ; fallback now. */
 function startOfDayFromYmd(ymd) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '').trim());
@@ -301,11 +360,15 @@ function applyPackageGrantsForPayment({
   courseIds,
   workflowEnrollmentType = 'subscribe',
   mirrorLegacyEnrollment = true,
+  endsAtMsOverride = null,
 }) {
   const dur = packageDurationMs(pkg);
   if (dur <= 0) throw new Error('Invalid package duration');
   const st = startMs != null ? Number(startMs) : Date.now();
-  const en = st + dur;
+  let en = st + dur;
+  if (endsAtMsOverride != null && Number.isFinite(Number(endsAtMsOverride))) {
+    en = Math.max(st, Number(endsAtMsOverride));
+  }
   const ge = en + GRACE_MS;
 
   for (const cid of courseIds) {
@@ -389,16 +452,49 @@ function grantNonSubscribeBatchCourseForSingleCourse(userId, courseId, options =
 
   const batchStarted = Boolean(options.batchStarted);
   const accessStartMs = options.accessStartMs != null ? Number(options.accessStartMs) : null;
+  const batchIdOpt = options.batchId != null ? Number(options.batchId) : null;
+  const accessEndMs = options.accessEndMs != null ? Number(options.accessEndMs) : null;
 
   if (et === 'apply') {
     if (!batchStarted || !Number.isFinite(accessStartMs)) return;
-    const existed = db
+
+    const existing = db
       .prepare(
         `SELECT id FROM course_access_grants
-         WHERE user_id = ? AND course_id = ? AND revoked_at_ms IS NULL AND ends_at_ms IS NULL AND source = 'batch_course'`,
+         WHERE user_id = ? AND course_id = ? AND revoked_at_ms IS NULL AND source = 'batch_course'`,
       )
       .get(userId, cid);
-    if (existed) return;
+
+    if (Number.isFinite(accessEndMs)) {
+      const graceMs = accessEndMs + GRACE_MS;
+      if (existing?.id) {
+        db.prepare(
+          `UPDATE course_access_grants
+           SET starts_at_ms = ?, ends_at_ms = ?, grace_ends_at_ms = ?, batch_id = COALESCE(?, batch_id)
+           WHERE id = ?`,
+        ).run(accessStartMs, accessEndMs, graceMs, Number.isFinite(batchIdOpt) ? batchIdOpt : null, existing.id);
+      } else {
+        insertGrant({
+          userId,
+          courseId: cid,
+          source: 'batch_course',
+          startsAtMs: accessStartMs,
+          endsAtMs: accessEndMs,
+          graceEndsAtMs: graceMs,
+          billingPackageId: null,
+          batchId: Number.isFinite(batchIdOpt) ? batchIdOpt : null,
+          comboId: null,
+          razorpayOrderId: null,
+          paymentId: null,
+        });
+      }
+      const ts = new Date(accessStartMs).toISOString();
+      upsertApprovedEnrollment(userId, cid, 'apply', ts);
+      syncLegacyEnrollmentMirror(userId, cid);
+      return;
+    }
+
+    if (existing) return;
     insertGrant({
       userId,
       courseId: cid,
@@ -407,7 +503,7 @@ function grantNonSubscribeBatchCourseForSingleCourse(userId, courseId, options =
       endsAtMs: null,
       graceEndsAtMs: null,
       billingPackageId: null,
-      batchId: null,
+      batchId: Number.isFinite(batchIdOpt) ? batchIdOpt : null,
       comboId: null,
       razorpayOrderId: null,
       paymentId: null,
@@ -454,6 +550,7 @@ function syncBatchMemberCourseAccess(batchId, userId) {
     .get(bid);
   const batchStarted = isBatchStartedForAccess(batchMeta);
   const cohortStartMs = batchCohortAccessStartMs(batchMeta);
+  const batchEndMs = batchAccessEndMsFromSessions(bid);
 
   db.transaction(() => {
     for (const row of rows) {
@@ -496,6 +593,7 @@ function syncBatchMemberCourseAccess(batchId, userId) {
                 comboId: null,
                 courseIds: [cid],
                 workflowEnrollmentType: isApply ? 'apply' : 'subscribe',
+                endsAtMsOverride: batchEndMs,
               });
               appliedPkg = true;
             }
@@ -511,6 +609,7 @@ function syncBatchMemberCourseAccess(batchId, userId) {
               comboId: null,
               courseIds: [cid],
               workflowEnrollmentType: et === 'purchase' ? 'purchase' : 'free',
+              endsAtMsOverride: batchEndMs,
             });
             appliedPkg = true;
           }
@@ -521,6 +620,8 @@ function syncBatchMemberCourseAccess(batchId, userId) {
         grantNonSubscribeBatchCourseForSingleCourse(uid, cid, {
           batchStarted,
           accessStartMs: cohortStartMs,
+          batchId: bid,
+          accessEndMs: batchEndMs,
         });
       }
     }
@@ -588,6 +689,8 @@ module.exports = {
   loadComboCourses,
   syncBatchMemberCourseAccess,
   syncAllBatchMembersCourseAccess,
+  refreshBatchLinkedAccessEnds,
+  batchAccessEndMsFromSessions,
   upsertLifetimeGrant,
   startOfDayFromYmd,
   hasActiveSubscribeWindow,

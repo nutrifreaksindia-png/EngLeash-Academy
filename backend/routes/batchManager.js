@@ -12,6 +12,7 @@ const {
   syncAllBatchMembersCourseAccess,
   removeBatchStudentAccess,
   purgeAllMembersAccessForDeletingBatch,
+  refreshBatchLinkedAccessEnds,
 } = require('../lib/courseAccess');
 const { syncApplyBillingDatesForBatch } = require('../lib/applyBilling');
 
@@ -289,6 +290,11 @@ function generateSessionsForBatch(batchId, startDate, actorId) {
     syncApplyBillingDatesForBatch(batchId);
   } catch (error) {
     console.error('[batch-manager] sync apply billing dates after batch start', batchId, error);
+  }
+  try {
+    refreshBatchLinkedAccessEnds(batchId);
+  } catch (error) {
+    console.error('[batch-manager] refresh batch-linked access ends after sessions generated', batchId, error);
   }
   return db.prepare('SELECT * FROM batch_sessions WHERE batch_id = ? ORDER BY session_day').all(batchId);
 }
@@ -1227,6 +1233,12 @@ router.post('/:id/sessions/:sessionId/cancel', auth, requireRole('Admin', 'Train
     remapLessonsForBatch(batchId, batch?.course_id || null);
   });
   tx();
+
+  try {
+    refreshBatchLinkedAccessEnds(batchId);
+  } catch (e) {
+    console.error('[batch-manager] refresh batch-linked access ends after session cancel', batchId, e);
+  }
 
   liveRecording.forceStopForBatchSessionLink(sessionId);
 
