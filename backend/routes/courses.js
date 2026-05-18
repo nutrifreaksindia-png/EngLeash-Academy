@@ -111,6 +111,27 @@ router.get('/catalog', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), 
     enrolledRows = db.prepare("SELECT course_id, 'approved' AS status FROM enrollments WHERE user_id = ?").all(uid);
   }
   const enrollmentByCourse = new Map(enrolledRows.map((r) => [r.course_id, r.status]));
+  const joinedCourseRows = db
+    .prepare(
+      `
+    SELECT DISTINCT x.course_id AS course_id FROM (
+      SELECT bc.course_id AS course_id
+      FROM batch_members bm
+      INNER JOIN batches b ON b.id = bm.batch_id
+      INNER JOIN batch_courses bc ON bc.batch_id = b.id
+      WHERE bm.student_id = ?
+      UNION
+      SELECT b.course_id AS course_id
+      FROM batch_members bm
+      INNER JOIN batches b ON b.id = bm.batch_id
+      WHERE bm.student_id = ?
+        AND b.course_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM batch_courses bx WHERE bx.batch_id = b.id)
+    ) x
+  `,
+    )
+    .all(uid, uid);
+  const joinedCourseIds = new Set(joinedCourseRows.map((r) => Number(r.course_id)).filter((id) => Number.isFinite(id)));
   const batchCourseRows = db
     .prepare(
       `
@@ -153,6 +174,7 @@ router.get('/catalog', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), 
     courses.map((c) => ({
       ...c,
       enrollmentStatus: enrollmentByCourse.get(c.id) || null,
+      joined: joinedCourseIds.has(Number(c.id)),
       enrolled: learnerHasCourseAccess(uid, c.id, now),
     })),
   );

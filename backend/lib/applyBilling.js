@@ -1,4 +1,5 @@
 const db = require('../db');
+const { syncBatchMemberCourseAccess } = require('./courseAccess');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_REGISTRATION_FEE_INR = 999;
@@ -446,15 +447,27 @@ function ensurePendingApplyEnrollment({ userId, courseId, batchId }) {
   if (!existing) {
     const result = db.prepare(
       `INSERT INTO course_enrollments (user_id, course_id, enrollment_type, status, requested_at, approved_at, approved_by, notes, batch_id)
-       VALUES (?, ?, 'apply', 'pending', ?, NULL, NULL, NULL, ?)`,
-    ).run(userId, courseId, nowIso, batchId);
+       VALUES (?, ?, 'apply', 'approved', ?, ?, NULL, NULL, ?)`,
+    ).run(userId, courseId, nowIso, nowIso, batchId);
+    db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(batchId, userId);
+    try {
+      syncBatchMemberCourseAccess(batchId, userId);
+    } catch (error) {
+      console.error('[apply-billing] sync batch access after initial payment', batchId, userId, error);
+    }
     return Number(result.lastInsertRowid);
   }
   db.prepare(
     `UPDATE course_enrollments
-     SET enrollment_type = 'apply', status = 'pending', requested_at = ?, approved_at = NULL, approved_by = NULL, notes = NULL, batch_id = ?
+     SET enrollment_type = 'apply', status = 'approved', requested_at = ?, approved_at = ?, approved_by = NULL, notes = NULL, batch_id = ?
      WHERE id = ?`,
-  ).run(nowIso, batchId, existing.id);
+  ).run(nowIso, nowIso, batchId, existing.id);
+  db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(batchId, userId);
+  try {
+    syncBatchMemberCourseAccess(batchId, userId);
+  } catch (error) {
+    console.error('[apply-billing] sync batch access after initial payment', batchId, userId, error);
+  }
   return Number(existing.id);
 }
 

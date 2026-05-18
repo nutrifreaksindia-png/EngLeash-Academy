@@ -37,6 +37,24 @@ function formatSubsDate(iso?: string | null) {
   });
 }
 
+function formatBatchDate(value?: string | null) {
+  if (!value) return '—';
+  const d = new Date(`${String(value).slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function batchScheduleText(raw?: string | null) {
+  try {
+    const schedule = raw ? JSON.parse(raw) : {};
+    const days = Array.isArray(schedule.daysOfWeek) ? schedule.daysOfWeek.join(', ') : '';
+    const time = schedule.startTime && schedule.endTime ? `${schedule.startTime}-${schedule.endTime}` : '';
+    return [days, time].filter(Boolean).join(' · ') || 'Schedule not set';
+  } catch {
+    return 'Schedule not set';
+  }
+}
+
 export default function AccountScreen({ navigation }: any) {
   const { user, logout, refreshUser } = useAuth();
   const insets = useSafeAreaInsets();
@@ -48,6 +66,8 @@ export default function AccountScreen({ navigation }: any) {
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
   const [subscriptions, setSubscriptions] = useState<any[]>([]);
   const [subsLoading, setSubsLoading] = useState(false);
+  const [batches, setBatches] = useState<any[]>([]);
+  const [batchesLoading, setBatchesLoading] = useState(false);
 
   const [form, setForm] = useState({
     name: '',
@@ -127,16 +147,18 @@ export default function AccountScreen({ navigation }: any) {
       if (!user) return undefined;
       let cancelled = false;
       setSubsLoading(true);
-      api
-        .get('/subscriptions/my')
-        .then((rows) => {
-          if (!cancelled) setSubscriptions(Array.isArray(rows) ? rows : []);
-        })
-        .catch(() => {
-          if (!cancelled) setSubscriptions([]);
+      setBatchesLoading(true);
+      Promise.allSettled([api.get('/subscriptions/my'), api.get('/batch-manager')])
+        .then(([subsResult, batchesResult]) => {
+          if (cancelled) return;
+          setSubscriptions(subsResult.status === 'fulfilled' && Array.isArray(subsResult.value) ? subsResult.value : []);
+          setBatches(batchesResult.status === 'fulfilled' && Array.isArray(batchesResult.value) ? batchesResult.value : []);
         })
         .finally(() => {
-          if (!cancelled) setSubsLoading(false);
+          if (!cancelled) {
+            setSubsLoading(false);
+            setBatchesLoading(false);
+          }
         });
       return () => {
         cancelled = true;
@@ -315,6 +337,33 @@ export default function AccountScreen({ navigation }: any) {
             <TouchableOpacity style={styles.primaryActionBtn} onPress={() => navigation.navigate('PaymentsInvoices')}>
               <Text style={styles.primaryActionBtnText}>Open Payments & Invoices</Text>
             </TouchableOpacity>
+          </View>
+
+          <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>Batches</Text>
+            {batchesLoading ? (
+              <ActivityIndicator style={styles.spaceTop} color={BRAND_RED} />
+            ) : batches.length === 0 ? (
+              <Text style={styles.value}>You are not added to any batch yet.</Text>
+            ) : (
+              batches.map((batch, idx) => (
+                <View key={batch.id} style={[styles.subCard, idx > 0 ? styles.subCardSpaced : null]}>
+                  <Text style={styles.subCourse}>
+                    {batch.title || batch.name || `Batch #${batch.batch_number || batch.id}`}
+                  </Text>
+                  <Text style={styles.subMeta}>{batch.course_name || 'Course'}</Text>
+                  <Text style={styles.subDetail}>
+                    Batch {batch.batch_number || batch.id} · {batch.session_type === 'one_to_one' ? '1:1' : 'Group'}
+                  </Text>
+                  <Text style={styles.subDetail}>{batchScheduleText(batch.training_schedule_json)}</Text>
+                  <Text style={styles.subDates}>
+                    {String(batch.batch_status || '').toLowerCase() === 'started'
+                      ? `Started ${formatBatchDate(batch.actual_start_date || batch.planned_start_date)}`
+                      : `Starts ${formatBatchDate(batch.planned_start_date)}`}
+                  </Text>
+                </View>
+              ))
+            )}
           </View>
 
           <View style={styles.sectionCard}>

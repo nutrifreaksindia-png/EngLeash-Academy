@@ -39,6 +39,7 @@ export type PublicCourse = {
   apply_installment_gap_days?: number;
   apply_grace_days?: number;
   apply_enquiry_enabled?: boolean | number;
+  joined?: boolean;
   enrolled?: boolean;
 };
 
@@ -278,7 +279,8 @@ export default function LandingHomeScreen({ navigation, route }: any) {
           const eff = Math.max(0, fee - disc);
           const type = (item.enrollment_type || 'free').toLowerCase();
           const isActive = !!item.enrolled;
-          const primaryLabel = isActive ? 'Go to Course' : primaryCta(item.enrollment_type).label;
+          const isJoined = !!item.joined && !isActive;
+          const primaryLabel = isActive ? 'Go to Course' : isJoined ? 'Joined' : primaryCta(item.enrollment_type).label;
           return (
             <View style={styles.card}>
               {resolveAssetUrl(item.image_url) ? (
@@ -308,15 +310,18 @@ export default function LandingHomeScreen({ navigation, route }: any) {
                 <Text style={styles.price}>Free</Text>
               )}
               <View style={styles.btnRow}>
-                {isActive ? (
+                {isActive || isJoined ? (
                   <View style={styles.activeTag}>
-                    <Text style={styles.activeTagText}>Active</Text>
+                    <Text style={styles.activeTagText}>{isActive ? 'Active' : 'Joined'}</Text>
                   </View>
                 ) : null}
                 <TouchableOpacity
-                  style={[styles.btnPrimary, type !== 'free' && primaryCta(item.enrollment_type).kind === 'free' && styles.btnMuted]}
+                  style={[
+                    styles.btnPrimary,
+                    (isJoined || (type !== 'free' && primaryCta(item.enrollment_type).kind === 'free')) && styles.btnMuted,
+                  ]}
                   onPress={() => onPrimaryAction(item)}
-                  disabled={!isActive && enrollingId !== null}
+                  disabled={isJoined || (!isActive && enrollingId !== null)}
                 >
                   <Text style={styles.btnPrimaryText}>
                     {!isActive && enrollingId === item.id ? '…' : primaryLabel}

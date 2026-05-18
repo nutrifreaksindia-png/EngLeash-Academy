@@ -231,8 +231,14 @@ async function main() {
   const regEnrollment = tempDb.prepare(
     'SELECT * FROM course_enrollments WHERE user_id = ? AND course_id = ?',
   ).get(studentRegistrationId, applyCourseId);
-  if (!regEnrollment || regEnrollment.status !== 'pending') {
-    throw new Error('Initial apply payment did not create a pending course application');
+  if (!regEnrollment || regEnrollment.status !== 'approved') {
+    throw new Error('Initial apply payment did not auto-approve the course application');
+  }
+  const regMembershipBeforeStart = tempDb.prepare(
+    'SELECT 1 FROM batch_members WHERE batch_id = ? AND student_id = ?',
+  ).get(batchFarId, studentRegistrationId);
+  if (!regMembershipBeforeStart) {
+    throw new Error('Initial apply payment did not add the learner to the batch');
   }
 
   tempDb.prepare(
