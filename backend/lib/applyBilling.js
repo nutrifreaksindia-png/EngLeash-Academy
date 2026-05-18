@@ -118,6 +118,16 @@ function batchStartDateForBilling(batch) {
   return null;
 }
 
+function startedBatchStartDateForBilling(batch) {
+  const actual = String(batch?.actual_start_date || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(actual)) return actual;
+  if (String(batch?.batch_status || '').toLowerCase() === 'started') {
+    const planned = String(batch?.planned_start_date || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(planned)) return planned;
+  }
+  return batchStartDateForBilling(batch);
+}
+
 function batchHasStarted(batch, nowMs = Date.now()) {
   const actual = String(batch?.actual_start_date || '').trim();
   if (actual) return true;
@@ -147,7 +157,7 @@ function selectedPlanLabel(plan) {
   const raw = String(plan || '').toLowerCase();
   if (raw === 'registration') return 'Registration fee';
   if (raw === 'single_payment') return 'Single payment';
-  if (raw === 'first_installment') return 'First installment';
+  if (raw === 'first_installment') return 'First part';
   return raw || 'Apply payment';
 }
 
@@ -156,8 +166,14 @@ function dueKindLabel(kind) {
   if (raw === 'registration') return 'Registration fee';
   if (raw === 'registration_balance') return 'Remaining balance';
   if (raw === 'single_payment') return 'Single payment';
-  if (raw === 'installment') return 'Installment';
+  if (raw === 'installment') return 'Part payment';
   return raw || 'Due';
+}
+
+function partDueDate({ batchStartDate, todayYmd, installmentGapDays, index }) {
+  if (index === 0) return todayYmd;
+  const base = batchStartDate || todayYmd;
+  return addDaysYmd(base, installmentGapDays * index) || base || todayYmd;
 }
 
 function computeInitialBillingPlan({ course, batch, selectedPlan, nowMs = Date.now() }) {
@@ -169,7 +185,7 @@ function computeInitialBillingPlan({ course, batch, selectedPlan, nowMs = Date.n
   const installmentCount = Math.max(1, Number(course.apply_installment_count || 1));
   const installmentGapDays = Math.max(0, Number(course.apply_installment_gap_days || 0));
   const graceDays = Math.max(0, Number(course.apply_grace_days || 0));
-  const batchStartDate = batchStartDateForBilling(batch);
+  const batchStartDate = startedBatchStartDateForBilling(batch);
   const todayYmd = formatYmd(nowMs);
 
   const plan = String(selectedPlan || '').toLowerCase();
@@ -225,11 +241,11 @@ function computeInitialBillingPlan({ course, batch, selectedPlan, nowMs = Date.n
       parseInstallmentAmountsPaise(course.apply_installment_amounts_json, installmentCount, totalCourseFeePaise) ||
       splitEvenlyPaise(totalCourseFeePaise, installmentCount);
     for (let index = 0; index < pieces.length; index += 1) {
-      const dueDate = addDaysYmd(todayYmd, installmentGapDays * index) || todayYmd;
+      const dueDate = partDueDate({ batchStartDate, todayYmd, installmentGapDays, index });
       dues.push({
         sequenceNo: index + 1,
         dueKind: 'installment',
-        labelText: `Installment ${index + 1}`,
+        labelText: `Part ${index + 1}`,
         dueDate,
         graceEndDate: addDaysYmd(dueDate, graceDays),
         amountPaise: pieces[index],
@@ -273,16 +289,18 @@ function dueAmountToCollectNow(dueRow, paidAtIso = new Date().toISOString()) {
   if (String(dueRow.due_status || '').toLowerCase() === 'paid') return 0;
   const baseAmount = Math.max(0, Number(dueRow.amount_paise || dueRow.amountPaise || 0));
   const discountPaise = Math.max(0, Number(dueRow.discount_paise || dueRow.discountPaise || 0));
+  const paidAmount = Math.max(0, Number(dueRow.paid_amount_paise || dueRow.paidAmountPaise || 0));
   const dueKind = String(dueRow.due_kind || dueRow.dueKind || '').toLowerCase();
   const dueDate = String(dueRow.due_date || dueRow.dueDate || '').trim();
+  let collectiblePaise = baseAmount;
   if (dueKind === 'registration_balance' && discountPaise > 0 && dueDate) {
     const dueEnd = ymdEndMs(dueDate);
     const paidAtMs = new Date(paidAtIso).getTime();
     if (Number.isFinite(dueEnd) && Number.isFinite(paidAtMs) && paidAtMs <= dueEnd) {
-      return Math.max(0, baseAmount - discountPaise);
+      collectiblePaise = Math.max(0, baseAmount - discountPaise);
     }
   }
-  return baseAmount;
+  return Math.max(0, collectiblePaise - paidAmount);
 }
 
 function dueCollectionState(row, nowMs = Date.now()) {
@@ -396,7 +414,7 @@ function recomputeProfileStatus(profileId) {
   const initialPaid = dues.some((due) => Number(due.is_initial_due || 0) === 1 && String(due.due_status || '').toLowerCase() === 'paid');
   const remainingBalancePaise = dues
     .filter((due) => String(due.due_status || '').toLowerCase() !== 'paid' && String(due.due_status || '').toLowerCase() !== 'cancelled')
-    .reduce((sum, due) => sum + Number(due.amount_paise || 0), 0);
+    .reduce((sum, due) => sum + dueAmountToCollectNow(due), 0);
   const initialPaidAmountPaise = dues
     .filter((due) => Number(due.is_initial_due || 0) === 1 && String(due.due_status || '').toLowerCase() === 'paid')
     .reduce((sum, due) => sum + Number(due.paid_amount_paise || 0), 0);
@@ -540,24 +558,30 @@ function settleDueItem({ dueItemId, amountPaise, paidAtIso = new Date().toISOStr
     };
   }
 
-  const expectedPaise = dueAmountToCollectNow(due, paidAtIso);
-  if (Number(amountPaise) !== Number(expectedPaise)) {
-    throw new Error(`Expected Rs. ${(expectedPaise / 100).toFixed(2)} for this due item.`);
+  const outstandingPaise = dueAmountToCollectNow(due, paidAtIso);
+  const collectedPaise = Math.max(0, Number(amountPaise || 0));
+  if (collectedPaise < 1 || collectedPaise > outstandingPaise) {
+    throw new Error(`Expected up to Rs. ${(outstandingPaise / 100).toFixed(2)} for this due item.`);
   }
 
   const tx = db.transaction(() => {
     const meta = parseJson(due.meta_json, {});
+    const nextPaidAmountPaise = Math.min(
+      Number(due.amount_paise || 0),
+      Number(due.paid_amount_paise || 0) + collectedPaise,
+    );
+    const fullyPaid = collectedPaise >= outstandingPaise;
     const nextMeta = {
       ...meta,
       settledAt: paidAtIso,
-      collectedAmountPaise: Number(amountPaise),
+      collectedAmountPaise: collectedPaise,
       sourceMeta,
     };
     db.prepare(
       `UPDATE apply_course_due_items
-       SET amount_paise = ?, paid_amount_paise = ?, due_status = 'paid', satisfied_at = ?, meta_json = ?, updated_at = datetime('now')
+       SET paid_amount_paise = ?, due_status = ?, satisfied_at = ?, meta_json = ?, updated_at = datetime('now')
        WHERE id = ?`,
-    ).run(Number(expectedPaise), Number(amountPaise), paidAtIso, stringifyJson(nextMeta), dueItemId);
+    ).run(nextPaidAmountPaise, fullyPaid ? 'paid' : 'scheduled', fullyPaid ? paidAtIso : null, stringifyJson(nextMeta), dueItemId);
 
     let enrollmentId = due.enrollment_id ? Number(due.enrollment_id) : null;
     if (Number(due.is_initial_due || 0) === 1 && !enrollmentId) {
@@ -735,6 +759,236 @@ function listApplyBillingProfilesForAdmin({ search = '', status = '' } = {}) {
   }));
 }
 
+function paidAmountForProfile(profileId) {
+  const row = db.prepare(
+    `SELECT COALESCE(SUM(paid_amount_paise), 0) AS paid
+     FROM apply_course_due_items
+     WHERE billing_profile_id = ? AND due_status != 'cancelled'`,
+  ).get(profileId);
+  return Number(row?.paid || 0);
+}
+
+function firstPartHasPayment(profileId) {
+  const row = db.prepare(
+    `SELECT 1
+     FROM apply_course_due_items
+     WHERE billing_profile_id = ?
+       AND due_kind = 'installment'
+       AND sequence_no = 1
+       AND paid_amount_paise > 0
+     LIMIT 1`,
+  ).get(profileId);
+  return !!row;
+}
+
+function outstandingGrossForProfile(profileId) {
+  const dues = dueRowsForProfile(profileId).filter(
+    (due) => String(due.due_status || '').toLowerCase() !== 'paid' && String(due.due_status || '').toLowerCase() !== 'cancelled',
+  );
+  return dues.reduce(
+    (sum, due) => sum + Math.max(0, Number(due.amount_paise || 0) - Number(due.paid_amount_paise || 0)),
+    0,
+  );
+}
+
+function cancelUnpaidBalanceDues(profileId) {
+  db.prepare(
+    `UPDATE apply_course_due_items
+     SET due_status = 'cancelled', updated_at = datetime('now')
+     WHERE billing_profile_id = ?
+       AND is_initial_due = 0
+       AND due_status != 'paid'`,
+  ).run(profileId);
+}
+
+function nextSequenceNo(profileId) {
+  const row = db.prepare(
+    'SELECT COALESCE(MAX(sequence_no), 0) AS max_sequence FROM apply_course_due_items WHERE billing_profile_id = ?',
+  ).get(profileId);
+  return Number(row?.max_sequence || 0) + 1;
+}
+
+function insertDueItem(profileId, due) {
+  const result = db.prepare(
+    `INSERT INTO apply_course_due_items (
+      billing_profile_id, sequence_no, due_kind, label_text, due_date, grace_end_date,
+      amount_paise, discount_paise, paid_amount_paise, due_status, satisfied_at,
+      is_initial_due, meta_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'scheduled', NULL, ?, ?, datetime('now'), datetime('now'))`,
+  ).run(
+    profileId,
+    due.sequenceNo,
+    due.dueKind,
+    due.labelText,
+    due.dueDate,
+    due.graceEndDate,
+    due.amountPaise,
+    due.discountPaise || 0,
+    due.isInitialDue ? 1 : 0,
+    due.metaJson || stringifyJson({}),
+  );
+  return Number(result.lastInsertRowid);
+}
+
+function fullPartPiecesForProfile(profile, course) {
+  const count = Math.max(1, Number(profile.installment_count || course.apply_installment_count || 1));
+  return (
+    parseInstallmentAmountsPaise(course.apply_installment_amounts_json, count, Number(profile.total_course_fee_paise || 0)) ||
+    splitEvenlyPaise(Number(profile.total_course_fee_paise || 0), count)
+  );
+}
+
+function remainingPartPiecesAfterCredit(pieces, creditPaise) {
+  let credit = Math.max(0, Number(creditPaise || 0));
+  const remaining = [];
+  for (let index = 0; index < pieces.length; index += 1) {
+    const amount = pieces[index];
+    const partAmount = Math.max(0, Number(amount || 0));
+    const applied = Math.min(partAmount, credit);
+    credit -= applied;
+    const left = partAmount - applied;
+    if (left > 0) remaining.push({ amountPaise: left, originalIndex: index });
+  }
+  return remaining;
+}
+
+function normalizeManualPartSchedule(rawParts, outstandingPaise, graceDays) {
+  const parts = Array.isArray(rawParts) ? rawParts : [];
+  if (parts.length < 1) throw new Error('At least one part is required');
+  const normalized = parts.map((part, index) => {
+    const amountPaise =
+      part?.amountPaise != null
+        ? Math.round(Number(part.amountPaise))
+        : part?.amountInr != null
+          ? toPaise(part.amountInr)
+          : NaN;
+    const dueDate = String(part?.dueDate || '').trim();
+    if (!Number.isFinite(amountPaise) || amountPaise < 1) {
+      throw new Error(`Part ${index + 1} amount is invalid`);
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+      throw new Error(`Part ${index + 1} due date is invalid`);
+    }
+    return {
+      sequenceNo: index + 1,
+      dueKind: 'installment',
+      labelText: `Part ${index + 1}`,
+      dueDate,
+      graceEndDate: addDaysYmd(dueDate, graceDays),
+      amountPaise,
+      discountPaise: 0,
+      isInitialDue: 0,
+      metaJson: stringifyJson({ manualSchedule: true, partIndex: index + 1, partCount: parts.length }),
+    };
+  });
+  const total = normalized.reduce((sum, part) => sum + part.amountPaise, 0);
+  if (total !== Number(outstandingPaise)) {
+    throw new Error(`Parts must total Rs. ${(Number(outstandingPaise) / 100).toFixed(2)}`);
+  }
+  return normalized;
+}
+
+function ensureDueDatesNotBeforeStart(parts, batchStartDate) {
+  if (!batchStartDate) return;
+  for (const part of parts) {
+    if (part.dueDate && ymdStartMs(part.dueDate) < ymdStartMs(batchStartDate)) {
+      throw new Error('Part due dates cannot be before the batch start date');
+    }
+  }
+}
+
+function prepareFullRemainingDue(profileId) {
+  const profile = loadProfileById(profileId);
+  if (!profile) throw new Error('Apply billing profile not found');
+  const outstandingPaise = outstandingGrossForProfile(profileId);
+  if (outstandingPaise < 1) throw new Error('No remaining balance to pay');
+  const batchStartDate = startedBatchStartDateForBilling(profile);
+  const dueDate = batchStartDate || formatYmd(Date.now());
+  const canUseSingleDiscount = !firstPartHasPayment(profileId);
+  const discountPaise = canUseSingleDiscount
+    ? Math.min(outstandingPaise, Number(profile.single_payment_discount_paise || 0))
+    : 0;
+  const tx = db.transaction(() => {
+    cancelUnpaidBalanceDues(profileId);
+    const dueId = insertDueItem(profileId, {
+      sequenceNo: nextSequenceNo(profileId),
+      dueKind: 'registration_balance',
+      labelText: 'Remaining balance',
+      dueDate,
+      graceEndDate: addDaysYmd(dueDate, Number(profile.grace_days || 0)),
+      amountPaise: outstandingPaise,
+      discountPaise,
+      isInitialDue: 0,
+      metaJson: stringifyJson({
+        convertedToFullBalance: true,
+        singlePaymentDiscountApplied: discountPaise > 0,
+      }),
+    });
+    recomputeProfileStatus(profileId);
+    return {
+      profile: loadProfileById(profileId),
+      due: db.prepare('SELECT * FROM apply_course_due_items WHERE id = ?').get(dueId),
+    };
+  });
+  return tx();
+}
+
+function preparePartSchedule(profileId, { parts = null, requireStartedBatch = false } = {}) {
+  const profile = loadProfileById(profileId);
+  if (!profile) throw new Error('Apply billing profile not found');
+  if (requireStartedBatch && !batchHasStarted(profile)) {
+    throw new Error('Part schedules can be edited after the batch has started');
+  }
+  const outstandingPaise = outstandingGrossForProfile(profileId);
+  if (outstandingPaise < 1) throw new Error('No remaining balance to schedule');
+  const batchStartDate = startedBatchStartDateForBilling(profile);
+  const course = loadApplyCourse(profile.course_id);
+  if (!course) throw new Error('Course not found');
+  const graceDays = Number(profile.grace_days || course.apply_grace_days || 0);
+  let nextParts;
+  if (parts) {
+    nextParts = normalizeManualPartSchedule(parts, outstandingPaise, graceDays);
+    ensureDueDatesNotBeforeStart(nextParts, batchStartDate);
+  } else {
+    const paidCredit = paidAmountForProfile(profileId);
+    const pieces = remainingPartPiecesAfterCredit(fullPartPiecesForProfile(profile, course), paidCredit);
+    const fallbackPieces = pieces.length ? pieces : [{ amountPaise: outstandingPaise, originalIndex: 0 }];
+    const startSequence = nextSequenceNo(profileId);
+    nextParts = fallbackPieces.map((piece, index) => {
+      const dueIndex = Number(piece.originalIndex || 0) + 1;
+      const dueDate = addDaysYmd(batchStartDate || formatYmd(Date.now()), Number(profile.installment_gap_days || 0) * Number(piece.originalIndex || 0));
+      return {
+        sequenceNo: startSequence + index,
+        dueKind: 'installment',
+        labelText: `Part ${dueIndex}`,
+        dueDate,
+        graceEndDate: addDaysYmd(dueDate, graceDays),
+        amountPaise: Number(piece.amountPaise || 0),
+        discountPaise: 0,
+        isInitialDue: 0,
+        metaJson: stringifyJson({ convertedToParts: true, partIndex: dueIndex, partCount: fallbackPieces.length }),
+      };
+    });
+  }
+
+  const tx = db.transaction(() => {
+    cancelUnpaidBalanceDues(profileId);
+    const manualStartSequence = nextSequenceNo(profileId);
+    const insertedIds = nextParts.map((part, index) =>
+      insertDueItem(profileId, {
+        ...part,
+        sequenceNo: parts ? manualStartSequence + index : part.sequenceNo,
+      }),
+    );
+    recomputeProfileStatus(profileId);
+    return {
+      profile: loadProfileById(profileId),
+      dueItems: insertedIds.map((id) => db.prepare('SELECT * FROM apply_course_due_items WHERE id = ?').get(id)),
+    };
+  });
+  return tx();
+}
+
 function createApplyEnquiry({
   userId,
   courseId,
@@ -842,6 +1096,8 @@ module.exports = {
   markBillingApprovedForEnrollment,
   markBillingRejectedForEnrollment,
   markBillingRemovedOverdue,
+  prepareFullRemainingDue,
+  preparePartSchedule,
   recomputeProfileStatus,
   selectedPlanLabel,
   serializeDueItem,

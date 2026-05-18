@@ -35,6 +35,8 @@ const {
   listApplyBillingProfilesForAdmin,
   listApplyBillingProfilesForUser,
   listApplyEnquiriesForAdmin,
+  prepareFullRemainingDue,
+  preparePartSchedule,
   settleDueItem,
   updateApplyEnquiryStatus,
 } = require('../lib/applyBilling');
@@ -630,6 +632,57 @@ router.post('/razorpay/create-apply-order', auth, requireRole('Student', 'Lab'),
   }
 });
 
+router.post('/apply/:profileId(\\d+)/pay-remaining-full', auth, requireRole('Student', 'Lab'), (req, res) => {
+  const profileId = Number(req.params.profileId);
+  const profile = db.prepare('SELECT user_id FROM apply_course_billing_profiles WHERE id = ?').get(profileId);
+  if (!profile) return res.status(404).json({ error: 'Apply billing profile not found' });
+  if (Number(profile.user_id) !== Number(req.user.id)) {
+    return res.status(403).json({ error: 'This billing profile does not belong to your account' });
+  }
+  try {
+    const prepared = prepareFullRemainingDue(profileId);
+    const amountPaise = dueAmountToCollectNow(prepared.due);
+    const refreshed = listApplyBillingProfilesForUser(req.user.id).find((row) => Number(row.id) === profileId);
+    res.json({
+      ok: true,
+      profile: refreshed || null,
+      dueItemId: Number(prepared.due.id),
+      amountPaise,
+      amountInr: amountPaise / 100,
+    });
+  } catch (error) {
+    res.status(400).json({ error: error?.message || 'Could not prepare remaining balance payment' });
+  }
+});
+
+router.post('/apply/:profileId(\\d+)/parts', auth, requireRole('Student', 'Lab'), (req, res) => {
+  const profileId = Number(req.params.profileId);
+  const profile = db.prepare('SELECT user_id FROM apply_course_billing_profiles WHERE id = ?').get(profileId);
+  if (!profile) return res.status(404).json({ error: 'Apply billing profile not found' });
+  if (Number(profile.user_id) !== Number(req.user.id)) {
+    return res.status(403).json({ error: 'This billing profile does not belong to your account' });
+  }
+  try {
+    preparePartSchedule(profileId);
+    const refreshed = listApplyBillingProfilesForUser(req.user.id).find((row) => Number(row.id) === profileId);
+    res.json({ ok: true, profile: refreshed || null });
+  } catch (error) {
+    res.status(400).json({ error: error?.message || 'Could not prepare part payments' });
+  }
+});
+
+router.patch('/admin/apply-billing/:profileId(\\d+)/parts', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
+  const profileId = Number(req.params.profileId);
+  try {
+    preparePartSchedule(profileId, { parts: req.body?.parts, requireStartedBatch: true });
+    const refreshed = listApplyBillingProfilesForAdmin({}).find((row) => Number(row.id) === profileId);
+    res.json({ ok: true, profile: refreshed || null });
+  } catch (error) {
+    const message = error?.message || 'Could not update part schedule';
+    res.status(message.includes('not found') ? 404 : 400).json({ error: message });
+  }
+});
+
 router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
   const dueItemId = Number(req.params.dueItemId);
   const dueRow = loadDueItemWithProfile(dueItemId);
@@ -646,8 +699,8 @@ router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin
       : req.body?.amountInr != null
         ? Math.round(Number(req.body.amountInr) * 100)
         : expectedAmountPaise;
-  if (Number(bodyAmountPaise) !== Number(expectedAmountPaise)) {
-    return res.status(400).json({ error: `This due requires Rs. ${(expectedAmountPaise / 100).toFixed(2)}` });
+  if (!Number.isFinite(bodyAmountPaise) || bodyAmountPaise < 1 || Number(bodyAmountPaise) > Number(expectedAmountPaise)) {
+    return res.status(400).json({ error: `Enter an amount up to Rs. ${(expectedAmountPaise / 100).toFixed(2)}` });
   }
 
   const tx = db.transaction(() => {
@@ -659,7 +712,7 @@ router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin
       dueItemId,
       Number(dueRow.billing_profile_id),
       Number(dueRow.user_id),
-      expectedAmountPaise,
+      bodyAmountPaise,
       req.body?.referenceText || null,
       req.body?.noteText || null,
       req.user.id,
@@ -668,7 +721,7 @@ router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin
 
     settleDueItem({
       dueItemId,
-      amountPaise: expectedAmountPaise,
+      amountPaise: bodyAmountPaise,
       paidAtIso,
       sourceMeta: {
         gateway: 'manual',
@@ -680,7 +733,7 @@ router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin
 
     return ensureApplyDuePaymentRecord({
       dueRow: loadDueItemWithProfile(dueItemId),
-      amountPaise: expectedAmountPaise,
+      amountPaise: bodyAmountPaise,
       paymentSource: 'cash_manual',
       gateway: 'manual',
       gatewayOrderId: `manual_order_${entry.lastInsertRowid}`,

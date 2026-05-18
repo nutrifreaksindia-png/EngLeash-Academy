@@ -63,7 +63,7 @@ function allowedApplyPlansForBatch(batch: OpenBatch) {
 function applyPlanLabel(plan: 'registration' | 'single_payment' | 'first_installment') {
   if (plan === 'registration') return 'Registration fee';
   if (plan === 'single_payment') return 'Single payment';
-  return 'First installment';
+  return 'First part';
 }
 
 function applyPlanAmount(course: PublicCourse, plan: 'registration' | 'single_payment' | 'first_installment') {
@@ -83,6 +83,71 @@ function applyPlanAmount(course: PublicCourse, plan: 'registration' | 'single_pa
   return Math.ceil((total * 100) / installmentCount) / 100;
 }
 
+function netCourseFee(course: PublicCourse) {
+  return Math.max(0, Number(course.fee_inr || 0) - Number(course.discount_inr || 0));
+}
+
+function addDaysYmd(ymd: string | null | undefined, days: number) {
+  if (!ymd) return null;
+  const d = new Date(`${ymd}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return null;
+  d.setDate(d.getDate() + Number(days || 0));
+  return d.toISOString().slice(0, 10);
+}
+
+function partAmounts(course: PublicCourse) {
+  const total = netCourseFee(course);
+  const count = Math.max(1, Number(course.apply_installment_count || 2));
+  try {
+    const parsed = JSON.parse(String(course.apply_installment_amounts_json || '[]'));
+    if (Array.isArray(parsed)) {
+      const manual = parsed.slice(0, Math.max(0, count - 1)).map((x) => Math.max(0, Number(x || 0)));
+      const last = Math.max(0, total - manual.reduce((sum, x) => sum + x, 0));
+      if (manual.length === count - 1) return [...manual, last];
+    }
+  } catch {
+    /* fall back to even parts */
+  }
+  const basePaise = Math.floor((total * 100) / count);
+  let remainder = Math.round(total * 100) - basePaise * count;
+  return Array.from({ length: count }, () => {
+    const extra = remainder > 0 ? 1 : 0;
+    if (remainder > 0) remainder -= 1;
+    return (basePaise + extra) / 100;
+  });
+}
+
+function nextPartPreview(course: PublicCourse, batch: OpenBatch) {
+  const amounts = partAmounts(course);
+  const gapDays = Math.max(0, Number(course.apply_installment_gap_days || 0));
+  const startYmd = startDateForBatch(batch);
+  return amounts.slice(1).map((amount, index) => {
+    const dueDate = addDaysYmd(startYmd, gapDays * (index + 1));
+    return { amount, dueDate, offsetDays: gapDays * (index + 1) };
+  });
+}
+
+function paymentDescription(course: PublicCourse, batch: OpenBatch, plan: 'registration' | 'single_payment' | 'first_installment') {
+  const total = netCourseFee(course);
+  const registration = Math.min(total, Number(course.apply_registration_fee_inr ?? 999));
+  const singleDiscount = Math.max(0, Number(course.apply_single_payment_discount_inr || 0));
+  if (plan === 'registration') {
+    return `Reserve your seat in this batch by paying ${formatInr(registration)} now. The remaining course fee can be paid fully or in parts from the course start date.`;
+  }
+  if (plan === 'single_payment') {
+    return singleDiscount > 0
+      ? `Pay the full course fee now and receive an extra discount of ${formatInr(singleDiscount)}.`
+      : 'Pay the full course fee now and complete your enrollment payment in one step.';
+  }
+  const previews = nextPartPreview(course, batch);
+  if (!previews.length) return 'Pay your first part now and continue with the course payment schedule.';
+  const started = String(batch.batch_status || '').toLowerCase() === 'started';
+  const previewText = previews
+    .map((p) => `${formatInr(p.amount)} ${started && p.dueDate ? `on ${formatDateFriendly(p.dueDate)}` : `after ${p.offsetDays} days from the course start date`}`)
+    .join(', ');
+  return `Pay your first part now. The next due${previews.length > 1 ? 's are' : ' is'}: ${previewText}.`;
+}
+
 function formatDateFriendly(value: string | null | undefined) {
   if (!value) return '—';
   const d = new Date(value);
@@ -98,6 +163,7 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
   const [openBatches, setOpenBatches] = useState<OpenBatch[]>([]);
   const [openBatchesLoading, setOpenBatchesLoading] = useState(true);
   const [applyBusyKey, setApplyBusyKey] = useState<string | null>(null);
+  const [expandedBatchId, setExpandedBatchId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!initial?.id) {
@@ -145,7 +211,7 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
 
   useFocusEffect(
     useCallback(() => {
-      void loadBatches();
+      loadBatches();
     }, [loadBatches]),
   );
 
@@ -185,8 +251,8 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
   return (
     <View style={[styles.root, { paddingBottom: 12 + insets.bottom }]}>
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <Text style={styles.lead}>Choose a batch and payment option, or request a callback.</Text>
-        {openBatchesLoading ? <ActivityIndicator color={BRAND_RED} style={{ marginVertical: 16 }} /> : null}
+        <Text style={styles.lead}>Review the open batches, then enroll with a payment option or send an enquiry.</Text>
+        {openBatchesLoading ? <ActivityIndicator color={BRAND_RED} style={styles.loading} /> : null}
         {!openBatchesLoading && openBatches.length === 0 ? (
           course.apply_enquiry_enabled === false || course.apply_enquiry_enabled === 0 ? (
             <Text style={styles.muted}>No open batches right now. Enquiries are disabled for this course.</Text>
@@ -234,38 +300,52 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
                 ) : (
                   <Text style={styles.batchMeta}>Expected start: {formatDateFriendly(b.planned_start_date)}</Text>
                 )}
-                <Text style={styles.planHint}>Choose a payment option to apply:</Text>
-                <View style={styles.planRow}>
-                  {allowedPlans.map((plan) => {
-                    const busy = applyBusyKey === `${b.id}:${plan}`;
-                    return (
-                      <TouchableOpacity
-                        key={plan}
-                        style={[styles.planBtn, busy && styles.planBtnDisabled]}
-                        disabled={!!applyBusyKey}
-                        onPress={() => void applyToBatch(b, plan)}
-                      >
-                        <Text style={styles.planBtnText}>
-                          {busy ? 'Opening…' : `${applyPlanLabel(plan)} · ${formatInr(applyPlanAmount(course, plan))}`}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-                {course.apply_enquiry_enabled === false || course.apply_enquiry_enabled === 0 ? null : (
+                <Text style={styles.batchMeta}>Course fee: {formatInr(netCourseFee(course))}</Text>
+                <View style={styles.actionRow}>
                   <TouchableOpacity
-                    style={styles.enquiryBtn}
-                    onPress={() =>
-                      navigation.navigate('ApplyCallback', {
-                        courseId: course.id,
-                        courseName: course.name,
-                        batchId: b.id,
-                      })
-                    }
+                    style={styles.enrollBtn}
+                    onPress={() => setExpandedBatchId((current) => (current === b.id ? null : b.id))}
                   >
-                    <Text style={styles.enquiryText}>Enquiry</Text>
+                    <Text style={styles.enrollText}>{expandedBatchId === b.id ? 'Hide options' : 'Enroll'}</Text>
                   </TouchableOpacity>
-                )}
+                  {course.apply_enquiry_enabled === false || course.apply_enquiry_enabled === 0 ? null : (
+                    <TouchableOpacity
+                      style={styles.enquiryBtn}
+                      onPress={() =>
+                        navigation.navigate('ApplyCallback', {
+                          courseId: course.id,
+                          courseName: course.name,
+                          batchId: b.id,
+                        })
+                      }
+                    >
+                      <Text style={styles.enquiryText}>Enquire</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+                {expandedBatchId === b.id ? (
+                  <View style={styles.paymentOptions}>
+                    <Text style={styles.planHint}>Choose how you want to start:</Text>
+                    {allowedPlans.map((plan) => {
+                      const busy = applyBusyKey === `${b.id}:${plan}`;
+                      return (
+                        <TouchableOpacity
+                          key={plan}
+                          style={[styles.planCard, busy && styles.planBtnDisabled]}
+                          disabled={!!applyBusyKey}
+                          onPress={() => {
+                            applyToBatch(b, plan);
+                          }}
+                        >
+                          <Text style={styles.planCardTitle}>
+                            {busy ? 'Opening…' : `${applyPlanLabel(plan)} ${formatInr(applyPlanAmount(course, plan))}`}
+                          </Text>
+                          <Text style={styles.planCardCopy}>{paymentDescription(course, b, plan)}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                ) : null}
               </View>
             );
           })
@@ -281,6 +361,7 @@ const styles = StyleSheet.create({
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f5f5f5' },
   lead: { fontSize: 15, color: '#334155', marginBottom: 12, lineHeight: 22 },
   muted: { fontSize: 14, color: '#64748b', marginTop: 8 },
+  loading: { marginVertical: 16 },
   batchCard: {
     backgroundColor: '#fff',
     borderRadius: 12,
@@ -292,22 +373,29 @@ const styles = StyleSheet.create({
   batchCardTitle: { fontSize: 15, fontWeight: '800', color: BRAND_BLUE, marginBottom: 8 },
   batchMeta: { fontSize: 13, color: '#475569', marginBottom: 4 },
   planHint: { fontSize: 13, fontWeight: '700', color: '#0f172a', marginTop: 10 },
-  planRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
-  planBtn: {
+  actionRow: { flexDirection: 'row', gap: 10, marginTop: 12 },
+  enrollBtn: {
     backgroundColor: BRAND_RED,
     borderRadius: 8,
     paddingVertical: 10,
     paddingHorizontal: 12,
+    flex: 1,
+    alignItems: 'center',
   },
+  enrollText: { color: '#fff', fontWeight: '800', fontSize: 13 },
+  paymentOptions: { marginTop: 12, gap: 10 },
+  planCard: { borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10, padding: 12, backgroundColor: '#f8fafc' },
   planBtnDisabled: { opacity: 0.55 },
-  planBtnText: { color: '#fff', fontWeight: '700', fontSize: 12 },
+  planCardTitle: { color: BRAND_BLUE, fontWeight: '800', fontSize: 14 },
+  planCardCopy: { color: '#475569', fontSize: 12, lineHeight: 18, marginTop: 6 },
   enquiryBtn: {
-    marginTop: 12,
     borderWidth: 1.5,
     borderColor: BRAND_BLUE,
     borderRadius: 8,
     paddingVertical: 10,
     alignItems: 'center',
+    paddingHorizontal: 12,
+    flex: 1,
   },
   enquiryText: { color: BRAND_BLUE, fontWeight: '700', fontSize: 13 },
 });

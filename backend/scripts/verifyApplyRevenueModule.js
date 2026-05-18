@@ -124,6 +124,13 @@ async function main() {
     return crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET).update(`${orderId}|${paymentId}`).digest('hex');
   }
 
+  function addDaysYmd(ymd, days) {
+    const [y, m, d] = String(ymd).split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    dt.setDate(dt.getDate() + Number(days || 0));
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+  }
+
   async function jsonRequest(url, token, method = 'GET', body, expectedStatus) {
     const res = await fetch(url, {
       method,
@@ -185,6 +192,19 @@ async function main() {
   if (JSON.stringify(installmentAmounts) !== JSON.stringify([300000, 700000])) {
     throw new Error(`Installment schedule did not use configured amounts: ${JSON.stringify(installmentAmounts)}`);
   }
+  const installmentDueDates = tempDb.prepare(
+    'SELECT due_date FROM apply_course_due_items WHERE billing_profile_id = ? ORDER BY sequence_no',
+  ).all(installmentPrepared.billingProfileId).map((r) => r.due_date);
+  const expectedSecondPartDue = addDaysYmd(farYmd, 10);
+  if (installmentDueDates[1] !== expectedSecondPartDue) {
+    throw new Error(`Second part due date was not based on batch start date: ${JSON.stringify(installmentDueDates)}`);
+  }
+  const registrationBalanceStartDue = tempDb.prepare(
+    `SELECT due_date FROM apply_course_due_items WHERE billing_profile_id = ? AND due_kind = 'registration_balance'`,
+  ).get(regPrepared.billingProfileId);
+  if (registrationBalanceStartDue?.due_date !== farYmd) {
+    throw new Error(`Registration balance due date was not the batch start date: ${registrationBalanceStartDue?.due_date}`);
+  }
   const singleDue = tempDb.prepare(
     'SELECT amount_paise FROM apply_course_due_items WHERE billing_profile_id = ? AND due_kind = ?',
   ).get(
@@ -215,6 +235,29 @@ async function main() {
     throw new Error('Initial apply payment did not create a pending course application');
   }
 
+  tempDb.prepare(
+    `INSERT INTO razorpay_apply_due_orders (
+      id, razorpay_order_id, user_id, billing_profile_id, due_item_id, amount_paise, currency, status, payment_id, created_at, updated_at
+    ) VALUES (3, 'apply_first_part_order', ?, ?, ?, 300000, 'INR', 'created', NULL, datetime('now'), datetime('now'))`,
+  ).run(studentInstallmentId, installmentPrepared.billingProfileId, installmentPrepared.dueItemId);
+  const firstPartPaymentId = 'apply_first_part_payment';
+  await jsonRequest(`${base}/api/payments/razorpay/verify`, installmentToken, 'POST', {
+    razorpay_order_id: 'apply_first_part_order',
+    razorpay_payment_id: firstPartPaymentId,
+    razorpay_signature: sign('apply_first_part_order', firstPartPaymentId),
+  });
+  await jsonRequest(`${base}/api/payments/apply/${installmentPrepared.billingProfileId}/pay-remaining-full`, installmentToken, 'POST', {});
+  const postFirstPartFullDue = tempDb.prepare(
+    `SELECT discount_paise
+     FROM apply_course_due_items
+     WHERE billing_profile_id = ? AND due_kind = 'registration_balance' AND due_status != 'cancelled'
+     ORDER BY id DESC
+     LIMIT 1`,
+  ).get(installmentPrepared.billingProfileId);
+  if (Number(postFirstPartFullDue?.discount_paise || 0) !== 0) {
+    throw new Error('Single-payment discount was applied after the first part had been paid');
+  }
+
   await jsonRequest(
     `${base}/api/enrollments/applications/${regEnrollment.id}/approve`,
     adminToken,
@@ -226,11 +269,30 @@ async function main() {
     throw new Error('Approved learner did not receive access when the batch started');
   }
 
+  await jsonRequest(`${base}/api/payments/apply/${regPrepared.billingProfileId}/pay-remaining-full`, regToken, 'POST', {});
   const registrationBalanceDue = tempDb.prepare(
-    `SELECT id
+    `SELECT id, discount_paise
      FROM apply_course_due_items
-     WHERE billing_profile_id = ? AND due_kind = 'registration_balance'`,
+     WHERE billing_profile_id = ? AND due_kind = 'registration_balance' AND due_status != 'cancelled'
+     ORDER BY id DESC
+     LIMIT 1`,
   ).get(regPrepared.billingProfileId);
+  if (Number(registrationBalanceDue?.discount_paise || 0) !== 100000) {
+    throw new Error('Full remaining payment did not preserve the single-payment discount after registration');
+  }
+  const partialManualPayment = await jsonRequest(
+    `${base}/api/payments/admin/apply-due/${registrationBalanceDue.id}/manual`,
+    adminToken,
+    'POST',
+    { amountInr: 1000, referenceText: 'CASH-PARTIAL-001' },
+  );
+  if (!partialManualPayment?.payment?.id) {
+    throw new Error('Partial manual apply payment did not create a payment record');
+  }
+  const partiallyPaidDue = tempDb.prepare('SELECT due_status, paid_amount_paise FROM apply_course_due_items WHERE id = ?').get(registrationBalanceDue.id);
+  if (partiallyPaidDue.due_status === 'paid' || Number(partiallyPaidDue.paid_amount_paise || 0) !== 100000) {
+    throw new Error('Partial manual payment did not leave the due open with a reduced balance');
+  }
   const manualPayment = await jsonRequest(
     `${base}/api/payments/admin/apply-due/${registrationBalanceDue.id}/manual`,
     adminToken,

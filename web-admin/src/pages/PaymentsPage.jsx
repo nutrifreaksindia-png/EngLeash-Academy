@@ -27,6 +27,7 @@ export default function PaymentsPage({
   loadApplyBilling,
   openInvoice,
   recordManualApplyPayment,
+  updateApplyPartSchedule,
   pushToast = () => {},
 }) {
   const [rows, setRows] = React.useState([]);
@@ -39,6 +40,9 @@ export default function PaymentsPage({
   const [applySearch, setApplySearch] = React.useState('');
   const [applyStatus, setApplyStatus] = React.useState('');
   const [manualBusyDueId, setManualBusyDueId] = React.useState(null);
+  const [expandedProfileId, setExpandedProfileId] = React.useState(null);
+  const [manualForm, setManualForm] = React.useState(null);
+  const [scheduleForm, setScheduleForm] = React.useState(null);
 
   const refreshRows = React.useCallback(async () => {
     try {
@@ -87,14 +91,32 @@ export default function PaymentsPage({
     }
   }
 
-  async function handleManualApplyPayment(profile) {
-    const due = profile?.nextUnpaidDue;
-    if (!due?.id || !recordManualApplyPayment) return;
-    const ref = window.prompt('Optional cash reference / receipt number', '') || '';
+  function openManualForm(profile, due) {
+    if (!due?.id) return;
+    setManualForm({
+      profileId: profile.id,
+      dueId: due.id,
+      amountInr: Number(due.amountDueNowInr || 0).toFixed(2),
+      paidAt: new Date().toISOString().slice(0, 10),
+      referenceText: '',
+      noteText: '',
+    });
+  }
+
+  async function handleManualApplyPayment(event) {
+    event.preventDefault();
+    const due = manualForm;
+    if (!due?.dueId || !recordManualApplyPayment) return;
     try {
-      setManualBusyDueId(due.id);
-      const payment = await recordManualApplyPayment(due.id, { referenceText: ref });
+      setManualBusyDueId(due.dueId);
+      const payment = await recordManualApplyPayment(due.dueId, {
+        amountInr: Number(due.amountInr || 0),
+        paidAt: due.paidAt,
+        referenceText: due.referenceText,
+        noteText: due.noteText,
+      });
       pushToast('Manual payment recorded', 'success');
+      setManualForm(null);
       await Promise.all([refreshRows(), refreshApplyRows()]);
       if (payment?.id) {
         await openInvoice(payment.id);
@@ -103,6 +125,57 @@ export default function PaymentsPage({
       pushToast(error?.message || 'Could not record manual payment', 'error');
     } finally {
       setManualBusyDueId(null);
+    }
+  }
+
+  function openScheduleForm(profile) {
+    const unpaid = (profile.dueItems || []).filter((due) => due.dueStatus !== 'paid' && due.dueStatus !== 'cancelled');
+    setScheduleForm({
+      profileId: profile.id,
+      parts: unpaid.length
+        ? unpaid.map((due) => ({
+            amountInr: Number(due.amountDueNowInr || due.amountInr || 0).toFixed(2),
+            dueDate: String(due.dueDate || '').slice(0, 10),
+          }))
+        : [{ amountInr: Number(profile.remainingBalanceInr || 0).toFixed(2), dueDate: '' }],
+    });
+  }
+
+  function updateSchedulePart(index, key, value) {
+    setScheduleForm((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        parts: current.parts.map((part, i) => (i === index ? { ...part, [key]: value } : part)),
+      };
+    });
+  }
+
+  function setScheduleCount(count) {
+    const nextCount = Math.max(1, Number(count || 1));
+    setScheduleForm((current) => {
+      if (!current) return current;
+      const parts = [...current.parts];
+      while (parts.length < nextCount) parts.push({ amountInr: '0.00', dueDate: '' });
+      return { ...current, parts: parts.slice(0, nextCount) };
+    });
+  }
+
+  async function submitScheduleForm(event) {
+    event.preventDefault();
+    if (!scheduleForm || !updateApplyPartSchedule) return;
+    try {
+      await updateApplyPartSchedule(scheduleForm.profileId, {
+        parts: scheduleForm.parts.map((part) => ({
+          amountInr: Number(part.amountInr || 0),
+          dueDate: part.dueDate,
+        })),
+      });
+      pushToast('Part schedule updated', 'success');
+      setScheduleForm(null);
+      await refreshApplyRows();
+    } catch (error) {
+      pushToast(error?.message || 'Could not update part schedule', 'error');
     }
   }
 
@@ -128,7 +201,7 @@ export default function PaymentsPage({
               <option value="combo">Combo</option>
               <option value="apply_registration">Apply registration</option>
               <option value="apply_single_payment">Apply single payment</option>
-              <option value="apply_installment">Apply installment</option>
+              <option value="apply_installment">Apply part payment</option>
             </select>
             <button type="button" className="secondaryBtn" onClick={() => refreshRows()}>
               Refresh
@@ -253,8 +326,10 @@ export default function PaymentsPage({
               <tbody>
                 {applyRows.map((row) => {
                   const due = row.nextUnpaidDue;
+                  const expanded = expandedProfileId === row.id;
                   return (
-                    <tr key={row.id}>
+                    <React.Fragment key={row.id}>
+                    <tr>
                       <td>
                         <div>{row.userName || '—'}</div>
                         <div className="muted" style={{ fontSize: '0.82rem' }}>
@@ -289,13 +364,71 @@ export default function PaymentsPage({
                         <button
                           type="button"
                           className="secondaryBtn"
-                          disabled={!due || due.dueStatus === 'paid' || manualBusyDueId === due.id}
-                          onClick={() => handleManualApplyPayment(row)}
+                          onClick={() => setExpandedProfileId(expanded ? null : row.id)}
                         >
-                          {due && manualBusyDueId === due.id ? 'Recording…' : 'Record cash'}
+                          {expanded ? 'Hide dues' : 'View dues'}
                         </button>
                       </td>
                     </tr>
+                    {expanded ? (
+                      <tr>
+                        <td colSpan={7}>
+                          <div className="stack" style={{ gap: 12 }}>
+                            <div className="tableWrap">
+                              <table>
+                                <thead>
+                                  <tr>
+                                    <th>Due</th>
+                                    <th>Amount</th>
+                                    <th>Paid</th>
+                                    <th>Due date</th>
+                                    <th>Status</th>
+                                    <th />
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {(row.dueItems || []).map((item) => (
+                                    <tr key={item.id}>
+                                      <td>{item.dueLabel || item.dueKind || '—'}</td>
+                                      <td>{fmtAmount(item.amountDueNowInr ?? item.amountInr, 'INR')}</td>
+                                      <td>{fmtAmount(item.paidAmountInr, 'INR')}</td>
+                                      <td>{item.dueDate || '—'}</td>
+                                      <td>{item.dueStatus || 'scheduled'}</td>
+                                      <td>
+                                        <button
+                                          type="button"
+                                          className="secondaryBtn"
+                                          disabled={item.dueStatus === 'paid' || item.dueStatus === 'cancelled'}
+                                          onClick={() => openManualForm(row, item)}
+                                        >
+                                          Record partial
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                            <div>
+                              <button
+                                type="button"
+                                className="secondaryBtn"
+                                disabled={!updateApplyPartSchedule || row.status !== 'active'}
+                                onClick={() => openScheduleForm(row)}
+                              >
+                                Edit parts
+                              </button>
+                              {row.status !== 'active' ? (
+                                <span className="muted" style={{ marginLeft: 8 }}>
+                                  Available after the batch has started.
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    ) : null}
+                    </React.Fragment>
                   );
                 })}
                 {applyRows.length === 0 ? (
@@ -310,6 +443,99 @@ export default function PaymentsPage({
           </div>
         )}
       </SectionCard>
+      {manualForm ? (
+        <div className="modalOverlay">
+          <form className="modalCard stack" onSubmit={handleManualApplyPayment}>
+            <h2>Record partial payment</h2>
+            <label>
+              Amount paid (INR)
+              <input
+                type="number"
+                min="1"
+                step="0.01"
+                value={manualForm.amountInr}
+                onChange={(e) => setManualForm((f) => ({ ...f, amountInr: e.target.value }))}
+              />
+            </label>
+            <label>
+              Payment date
+              <input
+                type="date"
+                value={manualForm.paidAt}
+                onChange={(e) => setManualForm((f) => ({ ...f, paidAt: e.target.value }))}
+              />
+            </label>
+            <label>
+              Reference number
+              <input
+                value={manualForm.referenceText}
+                onChange={(e) => setManualForm((f) => ({ ...f, referenceText: e.target.value }))}
+              />
+            </label>
+            <label>
+              Notes
+              <textarea
+                value={manualForm.noteText}
+                onChange={(e) => setManualForm((f) => ({ ...f, noteText: e.target.value }))}
+              />
+            </label>
+            <div>
+              <button type="submit" className="primaryBtn" disabled={manualBusyDueId === manualForm.dueId}>
+                {manualBusyDueId === manualForm.dueId ? 'Recording…' : 'Record payment'}
+              </button>{' '}
+              <button type="button" className="secondaryBtn" onClick={() => setManualForm(null)}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+      {scheduleForm ? (
+        <div className="modalOverlay">
+          <form className="modalCard stack" onSubmit={submitScheduleForm}>
+            <h2>Edit part schedule</h2>
+            <label>
+              Number of parts
+              <input
+                type="number"
+                min="1"
+                value={scheduleForm.parts.length}
+                onChange={(e) => setScheduleCount(e.target.value)}
+              />
+            </label>
+            {scheduleForm.parts.map((part, index) => (
+              <div key={index} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <label>
+                  Part {index + 1} amount (INR)
+                  <input
+                    type="number"
+                    min="1"
+                    step="0.01"
+                    value={part.amountInr}
+                    onChange={(e) => updateSchedulePart(index, 'amountInr', e.target.value)}
+                  />
+                </label>
+                <label>
+                  Due date
+                  <input
+                    type="date"
+                    value={part.dueDate}
+                    onChange={(e) => updateSchedulePart(index, 'dueDate', e.target.value)}
+                  />
+                </label>
+              </div>
+            ))}
+            <div>
+              <button type="submit" className="primaryBtn">
+                Save parts
+              </button>{' '}
+              <button type="button" className="secondaryBtn" onClick={() => setScheduleForm(null)}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </>
   );
 }

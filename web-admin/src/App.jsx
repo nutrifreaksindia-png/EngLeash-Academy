@@ -739,6 +739,14 @@ export default function App() {
     return data?.payment || null;
   }
 
+  async function updateAdminApplyPartSchedule(profileId, payload = {}) {
+    const data = await apiFetch(`/payments/admin/apply-billing/${profileId}/parts`, token, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+    return data?.profile || null;
+  }
+
   async function deleteSubscriptionGrant(grantId) {
     try {
       await apiFetch(`/subscriptions/admin/grants/${grantId}`, token, { method: 'DELETE' });
@@ -1489,6 +1497,7 @@ export default function App() {
         loadApplyBilling={fetchAdminApplyBilling}
         openInvoice={openAdminInvoice}
         recordManualApplyPayment={recordAdminApplyManualPayment}
+        updateApplyPartSchedule={updateAdminApplyPartSchedule}
         pushToast={pushToast}
       />
     );

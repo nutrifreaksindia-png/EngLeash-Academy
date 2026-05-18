@@ -58,10 +58,13 @@ type PaymentRow = {
 
 type ApplyDueRow = {
   id: number;
+  dueKind?: string;
   dueLabel: string;
   dueDate?: string | null;
   graceEndDate?: string | null;
+  amountInr?: number;
   amountDueNowInr?: number;
+  paidAmountInr?: number;
   dueStatus?: string;
   isInitialDue?: boolean;
 };
@@ -76,6 +79,16 @@ type ApplyBillingRow = {
   remainingBalanceInr?: number;
   dueItems?: ApplyDueRow[];
 };
+
+function hasPaidInitialDue(profile: ApplyBillingRow) {
+  return (profile.dueItems || []).some((due) => due.isInitialDue && due.dueStatus === 'paid');
+}
+
+function hasUnpaidPart(profile: ApplyBillingRow) {
+  return (profile.dueItems || []).some(
+    (due) => String(due.dueKind || '').toLowerCase() === 'installment' && due.dueStatus !== 'paid' && due.dueStatus !== 'cancelled',
+  );
+}
 
 export default function PaymentsInvoicesScreen() {
   const { user, refreshUser } = useAuth();
@@ -145,6 +158,45 @@ export default function PaymentsInvoicesScreen() {
     }
   }
 
+  async function payRemainingFully(profile: ApplyBillingRow) {
+    if (!user || !profile?.id) return;
+    setPayingDueId(-profile.id);
+    try {
+      const prepared = await api.post(`/payments/apply/${profile.id}/pay-remaining-full`, {});
+      const dueItemId = Number(prepared?.dueItemId);
+      if (!Number.isFinite(dueItemId)) throw new Error('Remaining balance could not be prepared');
+      const result = await payApplyDueWithRazorpay({
+        dueItemId,
+        userEmail: user.email,
+        userName: user.name,
+        userMobileDigits: user.mobile_number ?? undefined,
+        checkoutTitle: `${profile.courseName || 'Course'} — Remaining balance`,
+      });
+      if (!result?.ok) return;
+      Alert.alert('Payment successful', 'Your remaining balance has been recorded.');
+      refreshUser();
+      load();
+    } catch (error) {
+      alertApplyPaymentError(error);
+    } finally {
+      setPayingDueId(null);
+    }
+  }
+
+  async function preparePartPayments(profile: ApplyBillingRow) {
+    if (!profile?.id) return;
+    setPayingDueId(-profile.id);
+    try {
+      await api.post(`/payments/apply/${profile.id}/parts`, {});
+      Alert.alert('Part payments ready', 'Your remaining balance is now available as part payments.');
+      load();
+    } catch (error) {
+      alertApplyPaymentError(error);
+    } finally {
+      setPayingDueId(null);
+    }
+  }
+
   return (
     <View style={styles.root}>
       <ScreenPageTitle title="Payments & Invoices" />
@@ -174,12 +226,40 @@ export default function PaymentsInvoicesScreen() {
                 {profile.batchTitle ? ` · ${profile.batchTitle}${profile.batchNumber ? ` (#${profile.batchNumber})` : ''}` : ''}
               </Text>
               <Text style={styles.detail}>Remaining balance: {formatAmount(profile.remainingBalanceInr, 'INR')}</Text>
+              {hasPaidInitialDue(profile) && Number(profile.remainingBalanceInr || 0) > 0 ? (
+                <View style={styles.balanceActions}>
+                  <TouchableOpacity
+                    style={[styles.downloadBtn, payingDueId === -profile.id && styles.downloadBtnDisabled]}
+                    disabled={payingDueId === -profile.id}
+                    onPress={() => payRemainingFully(profile)}
+                  >
+                    <Text style={styles.downloadText}>
+                      {payingDueId === -profile.id ? 'Opening payment...' : 'Pay remaining fully'}
+                    </Text>
+                  </TouchableOpacity>
+                  {!hasUnpaidPart(profile) ? (
+                    <TouchableOpacity
+                      style={[styles.outlineBtn, payingDueId === -profile.id && styles.downloadBtnDisabled]}
+                      disabled={payingDueId === -profile.id}
+                      onPress={() => preparePartPayments(profile)}
+                    >
+                      <Text style={styles.outlineText}>Pay in parts</Text>
+                    </TouchableOpacity>
+                  ) : null}
+                  <Text style={styles.detail}>
+                    Full remaining payment keeps the extra single-payment discount unless you have already paid the first part.
+                  </Text>
+                </View>
+              ) : null}
               {(profile.dueItems || []).map((due) => (
                 <View key={due.id} style={styles.dueCard}>
                   <Text style={styles.dueTitle}>{due.dueLabel}</Text>
                   <Text style={styles.detail}>Status: {due.dueStatus || 'scheduled'}</Text>
                   {due.dueDate ? <Text style={styles.detail}>Due on: {formatDate(due.dueDate)}</Text> : null}
                   {due.graceEndDate ? <Text style={styles.detail}>Grace until: {formatDate(due.graceEndDate)}</Text> : null}
+                  {Number(due.paidAmountInr || 0) > 0 ? (
+                    <Text style={styles.detail}>Paid so far: {formatAmount(due.paidAmountInr, 'INR')}</Text>
+                  ) : null}
                   <Text style={styles.detail}>Amount now: {formatAmount(due.amountDueNowInr, 'INR')}</Text>
                   {due.dueStatus === 'paid' ? null : (
                     <TouchableOpacity
@@ -188,7 +268,11 @@ export default function PaymentsInvoicesScreen() {
                       onPress={() => payDue(profile, due)}
                     >
                       <Text style={styles.downloadText}>
-                        {payingDueId === due.id ? 'Opening payment...' : 'Pay this due'}
+                        {payingDueId === due.id
+                          ? 'Opening payment...'
+                          : String(due.dueKind || '').toLowerCase() === 'installment'
+                            ? 'Pay this part'
+                            : 'Pay this due'}
                       </Text>
                     </TouchableOpacity>
                   )}
@@ -268,6 +352,7 @@ const styles = StyleSheet.create({
   meta: { marginTop: 6, fontSize: 13, color: '#475569', fontWeight: '600' },
   amount: { marginTop: 12, fontSize: 21, fontWeight: '800', color: BRAND_RED },
   detail: { marginTop: 6, fontSize: 13, color: '#475569', lineHeight: 18 },
+  balanceActions: { marginTop: 10 },
   dueCard: {
     marginTop: 12,
     paddingTop: 12,
@@ -284,6 +369,15 @@ const styles = StyleSheet.create({
   },
   downloadBtnDisabled: { opacity: 0.55 },
   downloadText: { color: '#fff', fontSize: 13, fontWeight: '800' },
+  outlineBtn: {
+    marginTop: 10,
+    borderWidth: 1.5,
+    borderColor: BRAND_BLUE,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  outlineText: { color: BRAND_BLUE, fontSize: 13, fontWeight: '800' },
   emptyCard: {
     backgroundColor: '#fff',
     borderRadius: 16,
