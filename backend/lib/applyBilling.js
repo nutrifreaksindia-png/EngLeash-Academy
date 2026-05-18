@@ -171,8 +171,10 @@ function dueKindLabel(kind) {
   return raw || 'Due';
 }
 
-function partDueDate({ batchStartDate, todayYmd, installmentGapDays, index }) {
-  if (index === 0) return todayYmd;
+function partDueDate({ batchStartDate, todayYmd, installmentGapDays, index, batchStarted }) {
+  if (!batchStarted) {
+    return index === 0 ? batchStartDate || todayYmd : null;
+  }
   const base = batchStartDate || todayYmd;
   return addDaysYmd(base, installmentGapDays * index) || base || todayYmd;
 }
@@ -187,6 +189,7 @@ function computeInitialBillingPlan({ course, batch, selectedPlan, nowMs = Date.n
   const installmentGapDays = Math.max(0, Number(course.apply_installment_gap_days || 0));
   const graceDays = Math.max(0, Number(course.apply_grace_days || 0));
   const batchStartDate = startedBatchStartDateForBilling(batch);
+  const batchStarted = batchHasStarted(batch, nowMs);
   const todayYmd = formatYmd(nowMs);
 
   const plan = String(selectedPlan || '').toLowerCase();
@@ -242,13 +245,14 @@ function computeInitialBillingPlan({ course, batch, selectedPlan, nowMs = Date.n
       parseInstallmentAmountsPaise(course.apply_installment_amounts_json, installmentCount, totalCourseFeePaise) ||
       splitEvenlyPaise(totalCourseFeePaise, installmentCount);
     for (let index = 0; index < pieces.length; index += 1) {
-      const dueDate = partDueDate({ batchStartDate, todayYmd, installmentGapDays, index });
+      const dueDate = partDueDate({ batchStartDate, todayYmd, installmentGapDays, index, batchStarted });
+      const dueOffsetDays = installmentGapDays * index;
       dues.push({
         sequenceNo: index + 1,
         dueKind: 'installment',
         labelText: `Part ${index + 1}`,
         dueDate,
-        graceEndDate: addDaysYmd(dueDate, graceDays),
+        graceEndDate: dueDate ? addDaysYmd(dueDate, graceDays) : null,
         amountPaise: pieces[index],
         discountPaise: 0,
         isInitialDue: index === 0 ? 1 : 0,
@@ -259,6 +263,9 @@ function computeInitialBillingPlan({ course, batch, selectedPlan, nowMs = Date.n
           grossCourseFeePaise,
           courseDiscountPaise,
           netCourseFeePaise: totalCourseFeePaise,
+          batchStarted,
+          batchStartDate,
+          dueOffsetDays,
         }),
       });
     }
@@ -969,17 +976,29 @@ function preparePartSchedule(profileId, { parts = null, requireStartedBatch = fa
     const startSequence = nextSequenceNo(profileId);
     nextParts = fallbackPieces.map((piece, index) => {
       const dueIndex = Number(piece.originalIndex || 0) + 1;
-      const dueDate = addDaysYmd(batchStartDate || formatYmd(Date.now()), Number(profile.installment_gap_days || 0) * Number(piece.originalIndex || 0));
+      const offsetDays = Number(profile.installment_gap_days || 0) * Number(piece.originalIndex || 0);
+      const dueDate = batchHasStarted(profile)
+        ? addDaysYmd(batchStartDate || formatYmd(Date.now()), offsetDays)
+        : dueIndex === 1
+          ? batchStartDate || formatYmd(Date.now())
+          : null;
       return {
         sequenceNo: startSequence + index,
         dueKind: 'installment',
         labelText: `Part ${dueIndex}`,
         dueDate,
-        graceEndDate: addDaysYmd(dueDate, graceDays),
+        graceEndDate: dueDate ? addDaysYmd(dueDate, graceDays) : null,
         amountPaise: Number(piece.amountPaise || 0),
         discountPaise: 0,
         isInitialDue: 0,
-        metaJson: stringifyJson({ convertedToParts: true, partIndex: dueIndex, partCount: fallbackPieces.length }),
+        metaJson: stringifyJson({
+          convertedToParts: true,
+          partIndex: dueIndex,
+          partCount: fallbackPieces.length,
+          batchStarted: batchHasStarted(profile),
+          batchStartDate,
+          dueOffsetDays: offsetDays,
+        }),
       };
     });
   }

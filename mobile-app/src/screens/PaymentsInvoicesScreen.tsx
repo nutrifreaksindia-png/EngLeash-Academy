@@ -29,14 +29,13 @@ function formatAmount(amountInr?: number, currency = 'INR') {
 
 function formatDate(value?: string | null) {
   if (!value) return '—';
-  const dt = new Date(value);
+  const text = String(value);
+  const dt = new Date(text.length === 10 ? `${text}T00:00:00` : text);
   if (Number.isNaN(dt.getTime())) return String(value);
-  return dt.toLocaleString('en-IN', {
+  return dt.toLocaleDateString('en-IN', {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
   });
 }
 
@@ -67,6 +66,10 @@ type ApplyDueRow = {
   paidAmountInr?: number;
   dueStatus?: string;
   isInitialDue?: boolean;
+  meta?: {
+    dueOffsetDays?: number;
+    batchStarted?: boolean;
+  };
 };
 
 type ApplyBillingRow = {
@@ -88,6 +91,20 @@ function hasUnpaidPart(profile: ApplyBillingRow) {
   return (profile.dueItems || []).some(
     (due) => String(due.dueKind || '').toLowerCase() === 'installment' && due.dueStatus !== 'paid' && due.dueStatus !== 'cancelled',
   );
+}
+
+function shouldShowDue(due: ApplyDueRow) {
+  return due.dueStatus !== 'cancelled';
+}
+
+function dueTimingText(due: ApplyDueRow) {
+  if (due.dueDate) return `Due on ${formatDate(due.dueDate)}`;
+  const offset = Number(due.meta?.dueOffsetDays);
+  if (String(due.dueKind || '').toLowerCase() === 'installment' && Number.isFinite(offset)) {
+    if (offset <= 0) return 'Due from the course start date';
+    return `Due ${offset} day${offset === 1 ? '' : 's'} after the course start date`;
+  }
+  return null;
 }
 
 export default function PaymentsInvoicesScreen() {
@@ -215,17 +232,11 @@ export default function PaymentsInvoicesScreen() {
           </Text>
           {applyProfiles.map((profile) => (
             <View key={`apply-${profile.id}`} style={styles.card}>
-              <View style={styles.rowBetween}>
-                <Text style={styles.title}>{profile.courseName || 'Apply course'}</Text>
-                <View style={styles.statusBadge}>
-                  <Text style={styles.statusText}>{String(profile.status || 'pending').toUpperCase()}</Text>
-                </View>
-              </View>
+              <Text style={styles.title}>{profile.courseName || 'Apply course'}</Text>
               <Text style={styles.meta}>
                 {profile.selectedPlanLabel || 'Apply plan'}
                 {profile.batchTitle ? ` · ${profile.batchTitle}${profile.batchNumber ? ` (#${profile.batchNumber})` : ''}` : ''}
               </Text>
-              <Text style={styles.detail}>Remaining balance: {formatAmount(profile.remainingBalanceInr, 'INR')}</Text>
               {hasPaidInitialDue(profile) && Number(profile.remainingBalanceInr || 0) > 0 ? (
                 <View style={styles.balanceActions}>
                   <TouchableOpacity
@@ -251,16 +262,14 @@ export default function PaymentsInvoicesScreen() {
                   </Text>
                 </View>
               ) : null}
-              {(profile.dueItems || []).map((due) => (
+              {(profile.dueItems || []).filter(shouldShowDue).map((due) => (
                 <View key={due.id} style={styles.dueCard}>
                   <Text style={styles.dueTitle}>{due.dueLabel}</Text>
-                  <Text style={styles.detail}>Status: {due.dueStatus || 'scheduled'}</Text>
-                  {due.dueDate ? <Text style={styles.detail}>Due on: {formatDate(due.dueDate)}</Text> : null}
-                  {due.graceEndDate ? <Text style={styles.detail}>Grace until: {formatDate(due.graceEndDate)}</Text> : null}
+                  {dueTimingText(due) ? <Text style={styles.detail}>{dueTimingText(due)}</Text> : null}
                   {Number(due.paidAmountInr || 0) > 0 ? (
                     <Text style={styles.detail}>Paid so far: {formatAmount(due.paidAmountInr, 'INR')}</Text>
                   ) : null}
-                  <Text style={styles.detail}>Amount now: {formatAmount(due.amountDueNowInr, 'INR')}</Text>
+                  <Text style={styles.dueAmount}>{formatAmount(due.amountDueNowInr, 'INR')}</Text>
                   {due.dueStatus === 'paid' ? null : (
                     <TouchableOpacity
                       style={[styles.downloadBtn, payingDueId === due.id && styles.downloadBtnDisabled]}
@@ -360,6 +369,7 @@ const styles = StyleSheet.create({
     borderTopColor: '#e2e8f0',
   },
   dueTitle: { fontSize: 14, fontWeight: '800', color: BRAND_BLUE },
+  dueAmount: { marginTop: 8, fontSize: 20, fontWeight: '900', color: BRAND_RED },
   downloadBtn: {
     marginTop: 16,
     backgroundColor: BRAND_BLUE,

@@ -195,9 +195,8 @@ async function main() {
   const installmentDueDates = tempDb.prepare(
     'SELECT due_date FROM apply_course_due_items WHERE billing_profile_id = ? ORDER BY sequence_no',
   ).all(installmentPrepared.billingProfileId).map((r) => r.due_date);
-  const expectedSecondPartDue = addDaysYmd(farYmd, 10);
-  if (installmentDueDates[1] !== expectedSecondPartDue) {
-    throw new Error(`Second part due date was not based on batch start date: ${JSON.stringify(installmentDueDates)}`);
+  if (installmentDueDates[0] !== farYmd || installmentDueDates[1] != null) {
+    throw new Error(`Future-batch part due dates should only set the first part date: ${JSON.stringify(installmentDueDates)}`);
   }
   const registrationBalanceStartDue = tempDb.prepare(
     `SELECT due_date FROM apply_course_due_items WHERE billing_profile_id = ? AND due_kind = 'registration_balance'`,
