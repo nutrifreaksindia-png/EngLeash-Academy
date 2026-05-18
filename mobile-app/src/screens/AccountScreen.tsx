@@ -632,7 +632,17 @@ export default function AccountScreen({ navigation }: any) {
                     <Text style={styles.subCourse}>
                       {batch.title || batch.name || `Batch #${batch.batch_number || batch.id}`}
                     </Text>
-                    <Text style={styles.subMeta}>{batch.course_name || billingProfile?.courseName || 'Course'}</Text>
+                    <View style={styles.batchInfoBlock}>
+                      <Text style={[styles.subDetail, styles.batchInfoLineFirst]}>
+                        Batch {batch.batch_number || batch.id} · {batch.session_type === 'one_to_one' ? '1:1' : 'Group'}
+                      </Text>
+                      <Text style={styles.subDetail}>{batchScheduleText(batch.training_schedule_json)}</Text>
+                      <Text style={styles.subDates}>
+                        {String(batch.batch_status || '').toLowerCase() === 'started'
+                          ? `Started ${formatBatchDate(batch.actual_start_date || batch.planned_start_date)}`
+                          : `Starts ${formatBatchDate(batch.planned_start_date)}`}
+                      </Text>
+                    </View>
                     {payableAmount > 0 && (shouldPayFully || due) ? (
                       <>
                         <TouchableOpacity
@@ -683,15 +693,6 @@ export default function AccountScreen({ navigation }: any) {
                     </TouchableOpacity>
                     {expanded ? (
                       <View style={styles.expandedBox}>
-                        <Text style={styles.subDetail}>
-                          Batch {batch.batch_number || batch.id} · {batch.session_type === 'one_to_one' ? '1:1' : 'Group'}
-                        </Text>
-                        <Text style={styles.subDetail}>{batchScheduleText(batch.training_schedule_json)}</Text>
-                        <Text style={styles.subDates}>
-                          {String(batch.batch_status || '').toLowerCase() === 'started'
-                            ? `Started ${formatBatchDate(batch.actual_start_date || batch.planned_start_date)}`
-                            : `Starts ${formatBatchDate(batch.planned_start_date)}`}
-                        </Text>
                         {billingProfile ? (
                           <>
                             {remainingBal > 0 && partSelected ? (
@@ -1080,6 +1081,8 @@ const styles = StyleSheet.create({
   subCardSpaced: { marginTop: 12 },
   subCourse: { fontSize: 16, fontWeight: '700', color: BRAND_BLUE },
   subMeta: { fontSize: 13, fontWeight: '600', color: '#475569', marginTop: 4 },
+  batchInfoBlock: { marginTop: 8, alignSelf: 'stretch' },
+  batchInfoLineFirst: { marginTop: 0 },
   subDetail: { fontSize: 13, color: '#64748b', marginTop: 4, lineHeight: 18 },
   subDates: { fontSize: 12, color: '#334155', marginTop: 6, lineHeight: 18 },
   subfine: { fontSize: 11, color: '#94a3b8', marginTop: 4 },
