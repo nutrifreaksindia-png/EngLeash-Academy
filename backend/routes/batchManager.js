@@ -13,6 +13,7 @@ const {
   removeBatchStudentAccess,
   purgeAllMembersAccessForDeletingBatch,
 } = require('../lib/courseAccess');
+const { syncApplyBillingDatesForBatch } = require('../lib/applyBilling');
 
 function normalizeBatchCoursesInput(body) {
   const rows = [];
@@ -284,6 +285,11 @@ function generateSessionsForBatch(batchId, startDate, actorId) {
   }
 
   db.prepare("UPDATE batches SET actual_start_date = ?, batch_status = 'started' WHERE id = ?").run(startDate, batchId);
+  try {
+    syncApplyBillingDatesForBatch(batchId);
+  } catch (error) {
+    console.error('[batch-manager] sync apply billing dates after batch start', batchId, error);
+  }
   return db.prepare('SELECT * FROM batch_sessions WHERE batch_id = ? ORDER BY session_day').all(batchId);
 }
 

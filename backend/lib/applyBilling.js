@@ -444,6 +444,86 @@ function loadProfileById(profileId) {
   ).get(profileId);
 }
 
+function installmentOffsetDaysForDue(due, profile, zeroBasedIndexAmongInstallments) {
+  const meta = parseJson(due.meta_json, {});
+  if (Number.isFinite(Number(meta.dueOffsetDays))) return Math.max(0, Number(meta.dueOffsetDays));
+  const idx = Number(meta.installmentIndex ?? meta.partIndex);
+  const gap = Math.max(0, Number(profile.installment_gap_days || 0));
+  if (Number.isFinite(idx) && idx >= 1) return gap * (idx - 1);
+  return gap * Math.max(0, Number(zeroBasedIndexAmongInstallments || 0));
+}
+
+/** Keep unpaid apply dues aligned with batch actual/planned start; concrete dates for parts after batch starts. */
+function syncApplyProfileDueDatesWithBatch(profileId) {
+  const profile = loadProfileById(profileId);
+  if (!profile) return;
+  if (String(profile.status || '').toLowerCase() === 'cancelled') return;
+
+  const effectiveStart = startedBatchStartDateForBilling(profile);
+  if (!effectiveStart || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveStart)) return;
+
+  const graceDays = Math.max(0, Number(profile.grace_days || 0));
+  const started = batchHasStarted(profile);
+
+  db.prepare(
+    `UPDATE apply_course_billing_profiles SET batch_start_date = ?, updated_at = datetime('now') WHERE id = ?`,
+  ).run(effectiveStart, profileId);
+
+  const dues = dueRowsForProfile(profileId);
+  const installmentDues = dues
+    .filter((d) => String(d.due_kind || '').toLowerCase() === 'installment')
+    .sort((a, b) => Number(a.sequence_no || 0) - Number(b.sequence_no || 0) || Number(a.id) - Number(b.id));
+  const instIndexById = new Map(installmentDues.map((d, i) => [d.id, i]));
+
+  for (const due of dues) {
+    const st = String(due.due_status || '').toLowerCase();
+    if (st === 'paid' || st === 'cancelled') continue;
+    const meta = parseJson(due.meta_json, {});
+    if (meta.manualSchedule) continue;
+
+    const kind = String(due.due_kind || '').toLowerCase();
+
+    if (kind === 'registration_balance') {
+      const newDue = effectiveStart;
+      const newGrace = addDaysYmd(newDue, graceDays);
+      db.prepare(
+        `UPDATE apply_course_due_items SET due_date = ?, grace_end_date = ?, updated_at = datetime('now') WHERE id = ?`,
+      ).run(newDue, newGrace, due.id);
+      continue;
+    }
+
+    if (kind === 'installment') {
+      const ord = Number(instIndexById.get(due.id) ?? 0);
+      const offset = installmentOffsetDaysForDue(due, profile, ord);
+      let newDue = null;
+      if (started) {
+        newDue = addDaysYmd(effectiveStart, offset) || effectiveStart;
+      } else if (offset === 0) {
+        newDue = effectiveStart;
+      }
+      if (newDue) {
+        const newGrace = addDaysYmd(newDue, graceDays);
+        db.prepare(
+          `UPDATE apply_course_due_items SET due_date = ?, grace_end_date = ?, updated_at = datetime('now') WHERE id = ?`,
+        ).run(newDue, newGrace, due.id);
+      } else {
+        db.prepare(
+          `UPDATE apply_course_due_items SET due_date = NULL, grace_end_date = NULL, updated_at = datetime('now') WHERE id = ?`,
+        ).run(due.id);
+      }
+    }
+  }
+}
+
+function syncApplyBillingDatesForBatch(batchId) {
+  const rows = db
+    .prepare(`SELECT id FROM apply_course_billing_profiles WHERE batch_id = ? AND status != 'cancelled'`)
+    .all(batchId);
+  for (const r of rows) {
+    syncApplyProfileDueDatesWithBatch(Number(r.id));
+  }
+}
+
 function recomputeProfileStatus(profileId) {
   const profile = loadProfileById(profileId);
   if (!profile) return null;
@@ -475,6 +555,7 @@ function recomputeProfileStatus(profileId) {
      SET status = ?, upfront_paid_paise = ?, remaining_balance_paise = ?, updated_at = datetime('now')
      WHERE id = ?`,
   ).run(nextStatus, initialPaidAmountPaise, remainingBalancePaise, profileId);
+  syncApplyProfileDueDatesWithBatch(profileId);
   return loadProfileById(profileId);
 }
 
@@ -745,7 +826,7 @@ function serializeProfileRow(row, nowMs = Date.now()) {
     installmentCount: Number(row.installment_count || 1),
     installmentGapDays: Number(row.installment_gap_days || 0),
     graceDays: Number(row.grace_days || 0),
-    batchStartDate: row.batch_start_date || null,
+    batchStartDate: startedBatchStartDateForBilling(row) || row.batch_start_date || null,
     createdAt: row.created_at || null,
     updatedAt: row.updated_at || null,
     dueItems: dues,
@@ -1167,6 +1248,7 @@ module.exports = {
   selectedPlanLabel,
   serializeDueItem,
   settleDueItem,
+  syncApplyBillingDatesForBatch,
   toPaise,
   updateApplyEnquiryStatus,
 };
