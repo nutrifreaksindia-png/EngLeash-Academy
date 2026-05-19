@@ -28,10 +28,10 @@ export default function LoginScreen({ navigation, route }: any) {
         ? { redirectAfterSignup: resume.redirectAfterSignup, courseId: resume.courseId, courseName: resume.courseName }
         : undefined;
 
-  function handleLoggedIn() {
+  async function handleLoggedIn() {
     const tabNav = navigation.getParent?.()?.getParent?.() ?? navigation.getParent?.();
     if (navigatePurchaseSummaryAfterAuth(tabNav, purchaseP)) return;
-    if (navigateLandingResumeCourseAfterAuth(tabNav, resume)) return;
+    if (await navigateLandingResumeCourseAfterAuth(tabNav, resume)) return;
     if (navigation.canGoBack?.()) {
       navigation.goBack();
       return;

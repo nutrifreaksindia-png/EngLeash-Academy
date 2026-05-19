@@ -64,7 +64,7 @@ function HomeStackNavigator() {
           title: route.params?.course?.name ? `Apply — ${route.params.course.name}` : 'Apply',
         })}
       />
-      <HomeStack.Screen name="ApplyCallback" component={ApplyCallbackScreen} options={{ title: 'Book a callback' }} />
+      <HomeStack.Screen name="ApplyCallback" component={ApplyCallbackScreen} options={{ title: 'Book a call' }} />
       <HomeStack.Screen name="CoursePurchaseSummary" component={CoursePurchaseSummaryScreen} options={{ title: 'Purchase' }} />
       <HomeStack.Screen
         name="CourseSubscribePackages"
@@ -73,6 +73,14 @@ function HomeStackNavigator() {
           title: route.params?.courseName || 'Plans',
         })}
       />
+      <HomeStack.Screen
+        name="Signup"
+        component={SignupScreen}
+        options={({ route }: { route: { params?: { redirectAfterSignup?: string } } }) => ({
+          title: route.params?.redirectAfterSignup === 'apply' ? 'Sign up to apply' : 'Sign up',
+        })}
+      />
+      <HomeStack.Screen name="Login" component={LoginScreen} options={{ title: 'Sign in' }} />
     </HomeStack.Navigator>
   );
 }

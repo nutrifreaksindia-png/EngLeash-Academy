@@ -14,6 +14,7 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { alertApplyPaymentError, payApplyDueWithRazorpay } from '../payments/razorpayApplyBilling';
 import type { PublicCourse } from './LandingHomeScreen';
+import { callbackParamsForCourse, isApplyEnquiryEnabled } from '../lib/applyNavigation';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -215,6 +216,16 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
     }, [loadBatches]),
   );
 
+  useEffect(() => {
+    if (openBatchesLoading || !course?.id) return;
+    if (openBatches.length > 0) return;
+    if (!isApplyEnquiryEnabled(course)) return;
+    navigation.replace(
+      'ApplyCallback',
+      callbackParamsForCourse(course, { noOpenBatches: true }),
+    );
+  }, [openBatchesLoading, openBatches.length, course, navigation]);
+
   async function applyToBatch(batch: OpenBatch, selectedPlan: 'registration' | 'single_payment' | 'first_installment') {
     if (!course || !user) return;
     const busyKey = `${batch.id}:${selectedPlan}`;
@@ -248,29 +259,24 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
     );
   }
 
+  if (!openBatchesLoading && openBatches.length === 0 && isApplyEnquiryEnabled(course)) {
+    return (
+      <View style={styles.centered}>
+        <ActivityIndicator color={BRAND_RED} />
+        <Text style={styles.muted}>Opening call booking…</Text>
+      </View>
+    );
+  }
+
   return (
     <View style={[styles.root, { paddingBottom: 12 + insets.bottom }]}>
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <Text style={styles.lead}>Review the open batches, then enroll with a payment option or send an enquiry.</Text>
         {openBatchesLoading ? <ActivityIndicator color={BRAND_RED} style={styles.loading} /> : null}
-        {!openBatchesLoading && openBatches.length === 0 ? (
-          course.apply_enquiry_enabled === false || course.apply_enquiry_enabled === 0 ? (
-            <Text style={styles.muted}>No open batches right now. Enquiries are disabled for this course.</Text>
-          ) : (
-            <TouchableOpacity
-              style={styles.enquiryBtn}
-              onPress={() =>
-                navigation.navigate('ApplyCallback', {
-                  courseId: course.id,
-                  courseName: course.name,
-                  batchId: null,
-                })
-              }
-            >
-              <Text style={styles.enquiryText}>Enquiry</Text>
-            </TouchableOpacity>
-          )
-        ) : (
+        {!openBatchesLoading && openBatches.length === 0 && !isApplyEnquiryEnabled(course) ? (
+          <Text style={styles.muted}>No open batches right now. Enquiries are disabled for this course.</Text>
+        ) : null}
+        {!openBatchesLoading && openBatches.length > 0 ? (
           openBatches.map((b) => {
             const allowedPlans = allowedApplyPlansForBatch(b);
             let sched: Record<string, unknown> = {};
@@ -312,14 +318,13 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
                     <TouchableOpacity
                       style={styles.enquiryBtn}
                       onPress={() =>
-                        navigation.navigate('ApplyCallback', {
-                          courseId: course.id,
-                          courseName: course.name,
-                          batchId: b.id,
-                        })
+                        navigation.navigate(
+                          'ApplyCallback',
+                          callbackParamsForCourse(course, { batch: b, noOpenBatches: false }),
+                        )
                       }
                     >
-                      <Text style={styles.enquiryText}>Enquire</Text>
+                      <Text style={styles.enquiryText}>Book a call</Text>
                     </TouchableOpacity>
                   )}
                 </View>

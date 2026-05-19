@@ -1,4 +1,6 @@
-/** Apply: after auth, open Apply batches screen. Subscribe: LandingHome params. Purchase: CoursePurchaseSummary (navigatePurchaseSummaryAfterAuth). */
+/** Apply: after auth, open batches or callback when none open. Subscribe: LandingHome params. Purchase: CoursePurchaseSummary. */
+
+import { navigateApplyAfterAuth } from '../lib/applyNavigation';
 
 export type ResumeCourseAuthNavParams = {
   redirectAfterSignup: 'apply' | 'subscribe';
@@ -20,26 +22,16 @@ export function normalizeResumeCourseAuthParams(routeParams: unknown): ResumeCou
   };
 }
 
-export function navigateLandingResumeCourseAfterAuth(
+export async function navigateLandingResumeCourseAfterAuth(
   tabNav: { navigate?: (name: string, params?: unknown) => void } | undefined,
   normalized: ResumeCourseAuthNavParams | null
-): boolean {
+): Promise<boolean> {
   if (!normalized) return false;
   const courseIdNum = Number(normalized.courseId);
   if (!Number.isFinite(courseIdNum)) return false;
   const courseNameStr = normalized.courseName ?? '';
   if (normalized.redirectAfterSignup === 'apply') {
-    tabNav?.navigate?.('Home', {
-      screen: 'ApplyCourseBatches',
-      params: {
-        course: {
-          id: courseIdNum,
-          name: courseNameStr,
-          enrollment_type: 'apply',
-        },
-      },
-    });
-    return true;
+    return navigateApplyAfterAuth(tabNav, courseIdNum, courseNameStr);
   }
   tabNav?.navigate?.('Home', {
     screen: 'LandingHome',

@@ -1,11 +1,13 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { HtmlContent, htmlHasVisibleContent } from '../components/HtmlContent';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import type { PublicCourse } from './LandingHomeScreen';
 import { API_BASE } from '../config';
+import { navigateApplyForCourse } from '../lib/applyNavigation';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -72,6 +74,13 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
   const [course, setCourse] = useState<PublicCourse | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [coverAspect, setCoverAspect] = useState<number | null>(null);
+
+  const coverUri = resolveAssetUrl(course?.image_url);
+
+  useEffect(() => {
+    setCoverAspect(null);
+  }, [coverUri]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -138,7 +147,7 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
   const modes = useMemo(() => parseJsonList(course?.modes_json), [course?.modes_json]);
   const languages = useMemo(() => parseJsonList(course?.languages_json), [course?.languages_json]);
   const highlights = useMemo(() => parseHighlights(course?.highlights), [course?.highlights]);
-  const specsText = useMemo(() => plainTextFromHtml(course?.specifications_html), [course?.specifications_html]);
+  const hasSpecs = htmlHasVisibleContent(course?.specifications_html);
 
   if (loading) {
     return (
@@ -176,30 +185,29 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
     }
     if (cta.kind === 'apply') {
       if (!user) {
-        navigation.getParent()?.navigate?.('Account', {
-          screen: 'Signup',
-          params: {
-            redirectAfterSignup: 'apply',
-            courseId: course.id,
-            courseName: course.name,
-          },
+        navigation.navigate('Signup', {
+          redirectAfterSignup: 'apply',
+          courseId: course.id,
+          courseName: course.name,
         });
         return;
       }
-      navigation.navigate('ApplyCourseBatches', { course });
+      setBusy(true);
+      try {
+        await navigateApplyForCourse(navigation, course);
+      } finally {
+        setBusy(false);
+      }
       return;
     }
     if (cta.kind === 'purchase') {
       if (!user) {
-        navigation.getParent()?.navigate?.('Account', {
-          screen: 'Signup',
-          params: {
-            redirectAfterSignup: 'purchase',
-            courseId: course.id,
-            courseName: course.name,
-            courseFeeInr: course.fee_inr ?? 0,
-            courseDiscountInr: course.discount_inr ?? 0,
-          },
+        navigation.navigate('Signup', {
+          redirectAfterSignup: 'purchase',
+          courseId: course.id,
+          courseName: course.name,
+          courseFeeInr: course.fee_inr ?? 0,
+          courseDiscountInr: course.discount_inr ?? 0,
         });
         return;
       }
@@ -213,13 +221,10 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
     }
     if (cta.kind === 'subscribe') {
       if (!user) {
-        navigation.getParent()?.navigate?.('Account', {
-          screen: 'Signup',
-          params: {
-            redirectAfterSignup: 'subscribe',
-            courseId: course.id,
-            courseName: course.name,
-          },
+        navigation.navigate('Signup', {
+          redirectAfterSignup: 'subscribe',
+          courseId: course.id,
+          courseName: course.name,
         });
         return;
       }
@@ -236,8 +241,16 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
     <View style={styles.pageRoot}>
       <ScreenPageTitle title={pageHeading} />
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-        {resolveAssetUrl(course.image_url) ? (
-          <Image source={{ uri: resolveAssetUrl(course.image_url) || '' }} style={styles.coverImg} resizeMode="cover" />
+        {coverUri ? (
+          <Image
+            source={{ uri: coverUri }}
+            style={[styles.coverImg, coverAspect ? { aspectRatio: coverAspect } : styles.coverImgLoading]}
+            resizeMode="contain"
+            onLoad={(e) => {
+              const { width, height } = e.nativeEvent.source;
+              if (width > 0 && height > 0) setCoverAspect(width / height);
+            }}
+          />
         ) : null}
         {course.description ? <Text style={styles.desc}>{course.description}</Text> : null}
         {!showCoursePrice ? (
@@ -278,10 +291,10 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
           </View>
         ) : null}
 
-        {specsText ? (
+        {hasSpecs && course.specifications_html ? (
           <View style={styles.block}>
             <Text style={styles.blockTitle}>Full Specifications</Text>
-            <Text style={styles.specText}>{specsText}</Text>
+            <HtmlContent html={course.specifications_html} />
           </View>
         ) : null}
 
@@ -316,7 +329,8 @@ const styles = StyleSheet.create({
   pageRoot: { flex: 1, backgroundColor: '#f5f5f5' },
   container: { flex: 1, backgroundColor: '#f5f5f5' },
   content: { padding: 20, paddingBottom: 40 },
-  coverImg: { width: '100%', height: 200, borderRadius: 14, marginBottom: 14, backgroundColor: '#dfe3f4' },
+  coverImg: { width: '100%', borderRadius: 14, marginBottom: 14, backgroundColor: '#dfe3f4' },
+  coverImgLoading: { height: 200 },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
   err: { color: '#666', textAlign: 'center' },
   desc: { fontSize: 15, color: '#444', lineHeight: 22 },
@@ -327,7 +341,6 @@ const styles = StyleSheet.create({
   block: { marginTop: 16, padding: 14, borderRadius: 12, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e5e7eb' },
   blockTitle: { fontWeight: '700', color: '#1f2937', marginBottom: 8, fontSize: 15 },
   bullet: { fontSize: 14, color: '#374151', marginBottom: 6, lineHeight: 20 },
-  specText: { fontSize: 14, color: '#374151', lineHeight: 21 },
   btnRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 24 },
   btnOutline: {
     borderWidth: 1.5,

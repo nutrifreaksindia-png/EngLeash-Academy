@@ -16,6 +16,7 @@ import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { API_BASE } from '../config';
+import { navigateApplyForCourse } from '../lib/applyNavigation';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -42,13 +43,6 @@ export type PublicCourse = {
   joined?: boolean;
   enrolled?: boolean;
 };
-
-const SERVICES = [
-  'Spoken English & communication skills',
-  'IELTS / exam-oriented coaching',
-  'One-to-one and small-group live sessions',
-  'Assignments with trainer feedback',
-];
 
 function formatInr(n?: number) {
   if (n == null || Number.isNaN(Number(n))) return '';
@@ -77,6 +71,8 @@ export default function LandingHomeScreen({ navigation, route }: any) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [enrollingId, setEnrollingId] = useState<number | null>(null);
+  const [authNavId, setAuthNavId] = useState<number | null>(null);
+  const [applyNavId, setApplyNavId] = useState<number | null>(null);
   const subscribeResumeKeyRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
@@ -95,6 +91,13 @@ export default function LandingHomeScreen({ navigation, route }: any) {
     useCallback(() => {
       load();
     }, [load])
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      setAuthNavId(null);
+      setApplyNavId(null);
+    }, []),
   );
 
   const goAccount = () => navigation.getParent()?.navigate?.('Account');
@@ -161,32 +164,36 @@ export default function LandingHomeScreen({ navigation, route }: any) {
     enroll(course, 'free');
   };
 
-  const onApply = (course: PublicCourse) => {
+  const openSignup = (course: PublicCourse, params: Record<string, unknown>) => {
+    setAuthNavId(course.id);
+    navigation.navigate('Signup', params);
+  };
+
+  const onApply = async (course: PublicCourse) => {
     if (!user) {
-      navigation.getParent()?.navigate?.('Account', {
-        screen: 'Signup',
-        params: {
-          redirectAfterSignup: 'apply',
-          courseId: course.id,
-          courseName: course.name,
-        },
+      openSignup(course, {
+        redirectAfterSignup: 'apply',
+        courseId: course.id,
+        courseName: course.name,
       });
       return;
     }
-    navigation.navigate('ApplyCourseBatches', { course });
+    setApplyNavId(course.id);
+    try {
+      await navigateApplyForCourse(navigation, course);
+    } finally {
+      setApplyNavId(null);
+    }
   };
 
   const onPurchase = (course: PublicCourse) => {
     if (!user) {
-      navigation.getParent()?.navigate?.('Account', {
-        screen: 'Signup',
-        params: {
-          redirectAfterSignup: 'purchase',
-          courseId: course.id,
-          courseName: course.name,
-          courseFeeInr: course.fee_inr ?? 0,
-          courseDiscountInr: course.discount_inr ?? 0,
-        },
+      openSignup(course, {
+        redirectAfterSignup: 'purchase',
+        courseId: course.id,
+        courseName: course.name,
+        courseFeeInr: course.fee_inr ?? 0,
+        courseDiscountInr: course.discount_inr ?? 0,
       });
       return;
     }
@@ -200,13 +207,10 @@ export default function LandingHomeScreen({ navigation, route }: any) {
 
   const onSubscribe = (course: PublicCourse) => {
     if (!user) {
-      navigation.getParent()?.navigate?.('Account', {
-        screen: 'Signup',
-        params: {
-          redirectAfterSignup: 'subscribe',
-          courseId: course.id,
-          courseName: course.name,
-        },
+      openSignup(course, {
+        redirectAfterSignup: 'subscribe',
+        courseId: course.id,
+        courseName: course.name,
       });
       return;
     }
@@ -216,7 +220,7 @@ export default function LandingHomeScreen({ navigation, route }: any) {
     });
   };
 
-  const onPrimaryAction = (course: PublicCourse) => {
+  const onPrimaryAction = async (course: PublicCourse) => {
     if (course.enrolled) {
       goToCourse(course);
       return;
@@ -255,22 +259,6 @@ export default function LandingHomeScreen({ navigation, route }: any) {
         data={courses}
         keyExtractor={(item) => String(item.id)}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
-        ListHeaderComponent={
-          <View style={styles.headerBlock}>
-            <Text style={styles.heroTitle}>EngLeash Academy</Text>
-            <Text style={styles.heroSub}>Learn English with live sessions, structured courses, and real feedback.</Text>
-            <Text style={styles.sectionLabel}>What we offer</Text>
-            {SERVICES.map((line) => (
-              <Text key={line} style={styles.bullet}>
-                • {line}
-              </Text>
-            ))}
-            <Text style={[styles.sectionLabel, { marginTop: 20 }]}>Courses</Text>
-            <Text style={styles.hint}>
-              Browse offerings below. Apply opens sign-up if needed. Subscribe and Purchase use a summary screen before secure payment.
-            </Text>
-          </View>
-        }
         contentContainerStyle={styles.listContent}
         ListEmptyComponent={<Text style={styles.empty}>No published courses yet.</Text>}
         renderItem={({ item }) => {
@@ -284,7 +272,7 @@ export default function LandingHomeScreen({ navigation, route }: any) {
           return (
             <View style={styles.card}>
               {resolveAssetUrl(item.image_url) ? (
-                <Image source={{ uri: resolveAssetUrl(item.image_url) || '' }} style={styles.coverImg} resizeMode="cover" />
+                <Image source={{ uri: resolveAssetUrl(item.image_url) || '' }} style={styles.coverImg} resizeMode="contain" />
               ) : (
                 <View style={styles.coverFallback}>
                   <Text style={styles.coverFallbackText}>{item.name}</Text>
@@ -320,12 +308,16 @@ export default function LandingHomeScreen({ navigation, route }: any) {
                     styles.btnPrimary,
                     (isJoined || (type !== 'free' && primaryCta(item.enrollment_type).kind === 'free')) && styles.btnMuted,
                   ]}
-                  onPress={() => onPrimaryAction(item)}
-                  disabled={isJoined || (!isActive && enrollingId !== null)}
+                  onPress={() => void onPrimaryAction(item)}
+                  disabled={isJoined || (!isActive && (enrollingId !== null || authNavId !== null || applyNavId !== null))}
                 >
-                  <Text style={styles.btnPrimaryText}>
-                    {!isActive && enrollingId === item.id ? '…' : primaryLabel}
-                  </Text>
+                  {!isActive && (authNavId === item.id || applyNavId === item.id) ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Text style={styles.btnPrimaryText}>
+                      {!isActive && enrollingId === item.id ? '…' : primaryLabel}
+                    </Text>
+                  )}
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.btnOutline}
@@ -351,13 +343,7 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#f5f5f5' },
   listFlex: { flex: 1 },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  listContent: { paddingHorizontal: 16, paddingBottom: 72 },
-  headerBlock: { paddingTop: 12, paddingBottom: 8 },
-  heroTitle: { fontSize: 26, fontWeight: '800', color: BRAND_BLUE },
-  heroSub: { fontSize: 15, color: '#444', marginTop: 8, lineHeight: 22 },
-  sectionLabel: { fontSize: 17, fontWeight: '700', color: '#222', marginTop: 16 },
-  bullet: { fontSize: 15, color: '#333', marginTop: 8, lineHeight: 22 },
-  hint: { fontSize: 13, color: '#666', marginTop: 6 },
+  listContent: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 72 },
   empty: { color: '#666', paddingVertical: 24, textAlign: 'center' },
   card: {
     backgroundColor: '#fff',
@@ -372,10 +358,10 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 3 },
     elevation: 2,
   },
-  coverImg: { width: '100%', height: 170, borderRadius: 12, backgroundColor: '#dfe3f4' },
+  coverImg: { width: '100%', aspectRatio: 16 / 9, borderRadius: 12, backgroundColor: '#dfe3f4' },
   coverFallback: {
     width: '100%',
-    height: 170,
+    aspectRatio: 16 / 9,
     borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',

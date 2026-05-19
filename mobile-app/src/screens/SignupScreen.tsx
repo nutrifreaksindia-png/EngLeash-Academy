@@ -1,9 +1,10 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Linking, Modal, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { City, Country, State } from 'country-state-city';
+import AuthIntentBanner, { authIntentFromRoute } from '../components/AuthIntentBanner';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { useAuth } from '../context/AuthContext';
+import { defaultCountryIso, getAllCountriesSorted, loadGeoModule } from '../lib/geoData';
 import {
   navigateLandingResumeCourseAfterAuth,
   navigatePurchaseSummaryAfterAuth,
@@ -15,11 +16,16 @@ const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
 const POLICY_URL = 'https://engleashacademy.com/policies/';
 
-const ALL_COUNTRIES = Country.getAllCountries().sort((a, b) => a.name.localeCompare(b.name));
-const DEFAULT_COUNTRY_ISO = ALL_COUNTRIES.find((c) => c.isoCode === 'IN')?.isoCode || ALL_COUNTRIES[0]?.isoCode || '';
+type GeoModule = Awaited<ReturnType<typeof loadGeoModule>>;
+type CountryRow = Awaited<ReturnType<typeof getAllCountriesSorted>>[number];
 
 export default function SignupScreen({ navigation, route }: any) {
   const { signup } = useAuth();
+  const authIntent = authIntentFromRoute(route?.params);
+  const resumeCourseName = route?.params?.courseName != null ? String(route.params.courseName) : undefined;
+  const [geoMod, setGeoMod] = useState<GeoModule | null>(null);
+  const [allCountries, setAllCountries] = useState<CountryRow[]>([]);
+  const [geoReady, setGeoReady] = useState(false);
   const [loading, setLoading] = useState(false);
   const [showBirthDatePicker, setShowBirthDatePicker] = useState(false);
   const [showCodeModal, setShowCodeModal] = useState(false);
@@ -45,25 +51,26 @@ export default function SignupScreen({ navigation, route }: any) {
     stateProvince: '',
     country: '',
     countryCode: '',
-    countryIso: DEFAULT_COUNTRY_ISO,
+    countryIso: 'IN',
     stateIso: '',
     occupation: 'Student',
     policiesAgreed: false,
   });
 
-  const states = useMemo(
-    () => State.getStatesOfCountry(form.countryIso).sort((a, b) => a.name.localeCompare(b.name)),
-    [form.countryIso]
-  );
+  const states = useMemo(() => {
+    if (!geoMod || !form.countryIso) return [];
+    return geoMod.State.getStatesOfCountry(form.countryIso).sort((a, b) => a.name.localeCompare(b.name));
+  }, [geoMod, form.countryIso]);
   const cities = useMemo(() => {
+    if (!geoMod || !form.countryIso) return [];
     if (form.stateIso) {
-      return City.getCitiesOfState(form.countryIso, form.stateIso).sort((a, b) => a.name.localeCompare(b.name));
+      return geoMod.City.getCitiesOfState(form.countryIso, form.stateIso).sort((a, b) => a.name.localeCompare(b.name));
     }
-    return City.getCitiesOfCountry(form.countryIso).sort((a, b) => a.name.localeCompare(b.name));
-  }, [form.countryIso, form.stateIso]);
+    return geoMod.City.getCitiesOfCountry(form.countryIso).sort((a, b) => a.name.localeCompare(b.name));
+  }, [geoMod, form.countryIso, form.stateIso]);
 
   const submit = async () => {
-    const selectedCountry = ALL_COUNTRIES.find((c) => c.isoCode === form.countryIso);
+    const selectedCountry = allCountries.find((c) => c.isoCode === form.countryIso);
     const selectedState = states.find((s) => s.isoCode === form.stateIso);
     const payload = {
       ...form,
@@ -107,12 +114,12 @@ export default function SignupScreen({ navigation, route }: any) {
       Alert.alert('Welcome', 'Your account was created successfully.', [
         {
           text: 'OK',
-          onPress: () => {
+          onPress: async () => {
             const tabNav = navigation.getParent?.()?.getParent?.() ?? navigation.getParent?.();
             const purchaseP = purchaseSummaryParamsFromRoute(route?.params);
             if (navigatePurchaseSummaryAfterAuth(tabNav, purchaseP)) return;
             const landingResume = normalizeResumeCourseAuthParams(route?.params);
-            if (navigateLandingResumeCourseAfterAuth(tabNav, landingResume)) return;
+            if (await navigateLandingResumeCourseAfterAuth(tabNav, landingResume)) return;
             if (navigation?.canGoBack?.()) {
               navigation.goBack();
             } else {
@@ -149,28 +156,35 @@ export default function SignupScreen({ navigation, route }: any) {
     [form.password, form.confirmPassword]
   );
 
-  const setCountry = (countryIso: string) => {
-    const selectedCountry = ALL_COUNTRIES.find((c) => c.isoCode === countryIso);
-    const nextStates = State.getStatesOfCountry(countryIso);
-    const defaultState = nextStates.find((s) => s.name === 'Tamil Nadu') || nextStates[0] || null;
-    const nextCities = defaultState
-      ? City.getCitiesOfState(countryIso, defaultState.isoCode)
-      : City.getCitiesOfCountry(countryIso);
-    const defaultCity = nextCities.find((c) => c.name === 'Madurai') || nextCities[0] || null;
-    setForm((prev) => ({
-      ...prev,
-      countryIso,
-      country: selectedCountry?.name || '',
-      countryCode: `+${selectedCountry?.phonecode || ''}`,
-      stateIso: defaultState?.isoCode || '',
-      stateProvince: defaultState?.name || '',
-      cityDistrict: defaultCity?.name || '',
-    }));
-  };
+  const setCountry = useCallback(
+    (countryIso: string) => {
+      if (!geoMod) return;
+      const selectedCountry = allCountries.find((c) => c.isoCode === countryIso);
+      const nextStates = geoMod.State.getStatesOfCountry(countryIso);
+      const defaultState = nextStates.find((s) => s.name === 'Tamil Nadu') || nextStates[0] || null;
+      const nextCities = defaultState
+        ? geoMod.City.getCitiesOfState(countryIso, defaultState.isoCode)
+        : geoMod.City.getCitiesOfCountry(countryIso);
+      const defaultCity = nextCities.find((c) => c.name === 'Madurai') || nextCities[0] || null;
+      setForm((prev) => ({
+        ...prev,
+        countryIso,
+        country: selectedCountry?.name || '',
+        countryCode: `+${selectedCountry?.phonecode || ''}`,
+        stateIso: defaultState?.isoCode || '',
+        stateProvince: defaultState?.name || '',
+        cityDistrict: defaultCity?.name || '',
+      }));
+    },
+    [allCountries, geoMod],
+  );
 
   const setState = (stateIso: string) => {
+    if (!geoMod) return;
     const selectedState = states.find((s) => s.isoCode === stateIso);
-    const nextCities = stateIso ? City.getCitiesOfState(form.countryIso, stateIso) : City.getCitiesOfCountry(form.countryIso);
+    const nextCities = stateIso
+      ? geoMod.City.getCitiesOfState(form.countryIso, stateIso)
+      : geoMod.City.getCitiesOfCountry(form.countryIso);
     const defaultCity = nextCities[0] || null;
     setForm((prev) => ({
       ...prev,
@@ -191,12 +205,66 @@ export default function SignupScreen({ navigation, route }: any) {
     setShowSelectModal(true);
   }
 
-  React.useEffect(() => {
-    if (!form.countryIso && DEFAULT_COUNTRY_ISO) {
-      setCountry(DEFAULT_COUNTRY_ISO);
-    } else if (form.countryIso && !form.countryCode) {
-      setCountry(form.countryIso);
+  const goToLogin = useCallback(() => {
+    const p = route?.params || {};
+    const purch = purchaseSummaryParamsFromRoute(p);
+    if (purch != null) {
+      navigation.navigate('Login', {
+        redirectAfterSignup: 'purchase',
+        courseId: p.courseId,
+        courseName: p.courseName,
+        courseFeeInr: (p as { courseFeeInr?: number }).courseFeeInr,
+        courseDiscountInr: (p as { courseDiscountInr?: number }).courseDiscountInr,
+      });
+      return;
     }
+    const resume = normalizeResumeCourseAuthParams(p);
+    navigation.navigate(
+      'Login',
+      resume != null
+        ? {
+            redirectAfterSignup: resume.redirectAfterSignup,
+            courseId: resume.courseId,
+            courseName: resume.courseName,
+          }
+        : {},
+    );
+  }, [navigation, route?.params]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [mod, countries, defaultIso] = await Promise.all([
+        loadGeoModule(),
+        getAllCountriesSorted(),
+        defaultCountryIso(),
+      ]);
+      if (cancelled) return;
+      setGeoMod(mod);
+      setAllCountries(countries);
+      setGeoReady(true);
+      const iso = form.countryIso || defaultIso;
+      if (!iso) return;
+      const selectedCountry = countries.find((c) => c.isoCode === iso);
+      const nextStates = mod.State.getStatesOfCountry(iso);
+      const defaultState = nextStates.find((s) => s.name === 'Tamil Nadu') || nextStates[0] || null;
+      const nextCities = defaultState
+        ? mod.City.getCitiesOfState(iso, defaultState.isoCode)
+        : mod.City.getCitiesOfCountry(iso);
+      const defaultCity = nextCities.find((c) => c.name === 'Madurai') || nextCities[0] || null;
+      setForm((prev) => ({
+        ...prev,
+        countryIso: iso,
+        country: selectedCountry?.name || prev.country,
+        countryCode: prev.countryCode || `+${selectedCountry?.phonecode || ''}`,
+        stateIso: prev.stateIso || defaultState?.isoCode || '',
+        stateProvince: prev.stateProvince || defaultState?.name || '',
+        cityDistrict: prev.cityDistrict || defaultCity?.name || '',
+      }));
+    })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -204,7 +272,16 @@ export default function SignupScreen({ navigation, route }: any) {
     <View style={styles.pageRoot}>
       <ScreenPageTitle title="Sign up" />
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.subhead}>Create your student account</Text>
+      {authIntent ? (
+        <View style={styles.authIntro}>
+          <AuthIntentBanner intent={authIntent} courseName={resumeCourseName} />
+          <TouchableOpacity style={styles.loginLinkTop} onPress={goToLogin} accessibilityRole="link">
+            <Text style={styles.loginLinkBelowText}>Already have an account? Sign in</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <Text style={styles.subhead}>Create your student account</Text>
+      )}
 
       <Text style={styles.label}>Name <Text style={styles.required}>*</Text></Text>
       <TextInput style={styles.input} placeholder="Enter full name" value={form.name} onChangeText={(v) => set('name', v)} />
@@ -321,51 +398,66 @@ export default function SignupScreen({ navigation, route }: any) {
       <Text style={styles.label}>Address Line 2</Text>
       <TextInput style={styles.input} placeholder="Area/Landmark (optional)" value={form.addressLine2} onChangeText={(v) => set('addressLine2', v)} />
 
-      <Text style={styles.label}>Country <Text style={styles.required}>*</Text></Text>
-      <View style={styles.pickerContainer}>
-        <TouchableOpacity
-          style={styles.selectField}
-          onPress={() => openSelect(
-            'Select Country',
-            ALL_COUNTRIES.map((country) => ({ label: country.name, value: country.isoCode })),
-            (v) => setCountry(v)
-          )}
-        >
-          <Text style={styles.selectFieldText}>{form.country || 'Select country'}</Text>
-        </TouchableOpacity>
-      </View>
+      {!geoReady ? (
+        <View style={styles.geoLoading}>
+          <ActivityIndicator color={BRAND_BLUE} />
+          <Text style={styles.geoLoadingText}>Loading location fields…</Text>
+        </View>
+      ) : (
+        <>
+          <Text style={styles.label}>Country <Text style={styles.required}>*</Text></Text>
+          <View style={styles.pickerContainer}>
+            <TouchableOpacity
+              style={styles.selectField}
+              onPress={() =>
+                openSelect(
+                  'Select Country',
+                  allCountries.map((country) => ({ label: country.name, value: country.isoCode })),
+                  (v) => setCountry(v),
+                )
+              }
+            >
+              <Text style={styles.selectFieldText}>{form.country || 'Select country'}</Text>
+            </TouchableOpacity>
+          </View>
 
-      <Text style={styles.label}>State / Province <Text style={styles.required}>*</Text></Text>
-      <View style={styles.pickerContainer}>
-        <TouchableOpacity
-          style={styles.selectField}
-          onPress={() => openSelect(
-            'Select State / Province',
-            states.length
-              ? states.map((state) => ({ label: state.name, value: state.isoCode }))
-              : [{ label: 'No states available', value: '' }],
-            (v) => setState(v)
-          )}
-        >
-          <Text style={styles.selectFieldText}>{form.stateProvince || 'Select state / province'}</Text>
-        </TouchableOpacity>
-      </View>
+          <Text style={styles.label}>State / Province <Text style={styles.required}>*</Text></Text>
+          <View style={styles.pickerContainer}>
+            <TouchableOpacity
+              style={styles.selectField}
+              onPress={() =>
+                openSelect(
+                  'Select State / Province',
+                  states.length
+                    ? states.map((state) => ({ label: state.name, value: state.isoCode }))
+                    : [{ label: 'No states available', value: '' }],
+                  (v) => setState(v),
+                )
+              }
+            >
+              <Text style={styles.selectFieldText}>{form.stateProvince || 'Select state / province'}</Text>
+            </TouchableOpacity>
+          </View>
 
-      <Text style={styles.label}>City / District <Text style={styles.required}>*</Text></Text>
-      <View style={styles.pickerContainer}>
-        <TouchableOpacity
-          style={styles.selectField}
-          onPress={() => openSelect(
-            'Select City / District',
-            cities.length
-              ? cities.map((city) => ({ label: city.name, value: city.name }))
-              : [{ label: 'No city data', value: '' }],
-            (v) => set('cityDistrict', v)
-          )}
-        >
-          <Text style={styles.selectFieldText}>{form.cityDistrict || 'Select city / district'}</Text>
-        </TouchableOpacity>
-      </View>
+          <Text style={styles.label}>City / District <Text style={styles.required}>*</Text></Text>
+          <View style={styles.pickerContainer}>
+            <TouchableOpacity
+              style={styles.selectField}
+              onPress={() =>
+                openSelect(
+                  'Select City / District',
+                  cities.length
+                    ? cities.map((city) => ({ label: city.name, value: city.name }))
+                    : [{ label: 'No city data', value: '' }],
+                  (v) => set('cityDistrict', v),
+                )
+              }
+            >
+              <Text style={styles.selectFieldText}>{form.cityDistrict || 'Select city / district'}</Text>
+            </TouchableOpacity>
+          </View>
+        </>
+      )}
 
       <Text style={styles.label}>Occupation <Text style={styles.required}>*</Text></Text>
       <View style={styles.pickerContainer}>
@@ -396,34 +488,7 @@ export default function SignupScreen({ navigation, route }: any) {
         {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitText}>Create account</Text>}
       </TouchableOpacity>
 
-      <TouchableOpacity
-        style={styles.loginLinkBelow}
-        onPress={() => {
-          const p = route?.params || {};
-          const purch = purchaseSummaryParamsFromRoute(p);
-          if (purch != null) {
-            navigation.navigate('Login', {
-              redirectAfterSignup: 'purchase',
-              courseId: p.courseId,
-              courseName: p.courseName,
-              courseFeeInr: (p as any).courseFeeInr,
-              courseDiscountInr: (p as any).courseDiscountInr,
-            });
-            return;
-          }
-          const resume = normalizeResumeCourseAuthParams(p);
-          navigation.navigate(
-            'Login',
-            resume != null
-              ? {
-                  redirectAfterSignup: resume.redirectAfterSignup,
-                  courseId: resume.courseId,
-                  courseName: resume.courseName,
-                }
-              : {}
-          );
-        }}
-      >
+      <TouchableOpacity style={styles.loginLinkBelow} onPress={goToLogin} accessibilityRole="link">
         <Text style={styles.loginLinkBelowText}>Already have an account? Sign in</Text>
       </TouchableOpacity>
 
@@ -432,7 +497,7 @@ export default function SignupScreen({ navigation, route }: any) {
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Select Country Code</Text>
             <ScrollView style={{ maxHeight: 420 }}>
-              {ALL_COUNTRIES.map((country) => (
+              {allCountries.map((country) => (
                 <TouchableOpacity
                   key={`code-${country.isoCode}`}
                   style={styles.modalRow}
@@ -485,6 +550,10 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f5f5f5' },
   content: { padding: 16, paddingBottom: 30 },
   subhead: { fontSize: 15, fontWeight: '600', color: '#444', marginBottom: 16 },
+  authIntro: { marginBottom: 16 },
+  loginLinkTop: { alignItems: 'center', paddingTop: 4 },
+  geoLoading: { flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 12 },
+  geoLoadingText: { fontSize: 14, color: '#64748b' },
   row: { flexDirection: 'row', gap: 10, alignItems: 'flex-start' },
   codeWrap: { width: 96 },
   mobileWrap: { flex: 1 },
