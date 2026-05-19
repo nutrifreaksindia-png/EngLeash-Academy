@@ -1,15 +1,13 @@
 const express = require('express');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
-const { learnerHasCourseAccess, syncBatchMemberCourseAccess, upsertLifetimeGrant } = require('../lib/courseAccess');
+const { learnerHasCourseAccess, upsertLifetimeGrant } = require('../lib/courseAccess');
 const {
   allowedInitialApplyPlans,
   createOrReuseInitialProfile,
   dueAmountToCollectNow,
   loadApplyBatch,
   loadApplyCourse,
-  markBillingApprovedForEnrollment,
-  markBillingRejectedForEnrollment,
 } = require('../lib/applyBilling');
 
 const router = express.Router();
@@ -202,111 +200,6 @@ router.post('/apply-batch', auth, requireRole('Student', 'Lab'), (req, res) => {
   } catch (error) {
     res.status(409).json({ error: error.message || 'Could not prepare apply billing' });
   }
-});
-
-router.get('/pending-applications', auth, requireRole('Admin'), (req, res) => {
-  const rows = db.prepare(`
-    SELECT
-      ce.id,
-      ce.user_id,
-      ce.course_id,
-      ce.batch_id,
-      ce.enrollment_type,
-      ce.status,
-      ce.requested_at,
-      ce.approved_at,
-      u.name AS user_name,
-      u.email AS user_email,
-      c.name AS course_name,
-      ap.selected_plan AS billing_selected_plan,
-      ap.status AS billing_status,
-      ap.remaining_balance_paise AS billing_remaining_balance_paise,
-      ap.total_course_fee_paise AS billing_total_course_fee_paise,
-      COALESCE(b.title, b.name) AS requested_batch_title,
-      b.batch_number AS requested_batch_number
-    FROM course_enrollments ce
-    JOIN users u ON u.id = ce.user_id
-    JOIN courses c ON c.id = ce.course_id
-    LEFT JOIN batches b ON b.id = ce.batch_id
-    LEFT JOIN apply_course_billing_profiles ap ON ap.enrollment_id = ce.id
-    WHERE ce.enrollment_type = 'apply'
-    ORDER BY
-      CASE ce.status
-        WHEN 'pending' THEN 0
-        WHEN 'approved' THEN 1
-        WHEN 'rejected' THEN 2
-        ELSE 3
-      END,
-      COALESCE(ce.approved_at, ce.requested_at) DESC,
-      ce.id DESC
-  `).all();
-  res.json(rows);
-});
-
-router.post('/applications/:id/approve', auth, requireRole('Admin'), (req, res) => {
-  const id = Number(req.params.id);
-  const selectedBatchId = req.body?.batchId == null || req.body.batchId === '' ? null : Number(req.body.batchId);
-  const row = db.prepare('SELECT * FROM course_enrollments WHERE id = ?').get(id);
-  if (!row) return res.status(404).json({ error: 'Application not found' });
-  if (row.enrollment_type !== 'apply') return res.status(409).json({ error: 'Only apply applications can be approved here' });
-  const billing = db.prepare(
-    `SELECT ap.id,
-            SUM(CASE WHEN di.is_initial_due = 1 AND di.due_status = 'paid' THEN 1 ELSE 0 END) AS initial_paid
-     FROM apply_course_billing_profiles ap
-     LEFT JOIN apply_course_due_items di ON di.billing_profile_id = ap.id
-     WHERE ap.enrollment_id = ?
-     GROUP BY ap.id
-     ORDER BY ap.id DESC
-     LIMIT 1`,
-  ).get(id);
-  if (!billing?.id || Number(billing.initial_paid || 0) < 1) {
-    return res.status(409).json({ error: 'This application has no confirmed initial payment yet' });
-  }
-  const targetBatchId = Number.isFinite(selectedBatchId) ? selectedBatchId : row.batch_id;
-  if (!Number.isFinite(targetBatchId)) return res.status(400).json({ error: 'Batch is required for approval' });
-  const targetBatch = db.prepare('SELECT id, course_id FROM batches WHERE id = ?').get(targetBatchId);
-  const batchMatchesCourse =
-    targetBatch &&
-    (Number(targetBatch.course_id) === Number(row.course_id)
-      || db
-        .prepare('SELECT 1 FROM batch_courses WHERE batch_id = ? AND course_id = ?')
-        .get(targetBatchId, row.course_id));
-  if (!batchMatchesCourse) {
-    return res.status(400).json({ error: 'Selected batch does not belong to this course' });
-  }
-  db.prepare(`
-    UPDATE course_enrollments
-    SET status = 'approved', batch_id = ?, approved_at = ?, approved_by = ?
-    WHERE id = ?
-  `).run(targetBatchId, new Date().toISOString(), req.user.id, id);
-  db.prepare(
-    `UPDATE apply_course_billing_profiles
-     SET batch_id = ?, updated_at = datetime('now')
-     WHERE enrollment_id = ?`,
-  ).run(targetBatchId, id);
-  db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(targetBatchId, row.user_id);
-  try {
-    syncBatchMemberCourseAccess(targetBatchId, row.user_id);
-  } catch (e) {
-    console.error('syncBatchMemberCourseAccess on application approve', targetBatchId, row.user_id, e);
-  }
-  markBillingApprovedForEnrollment(id);
-  const latest = db.prepare('SELECT * FROM course_enrollments WHERE id = ?').get(id);
-  res.json(latest);
-});
-
-router.post('/applications/:id/disapprove', auth, requireRole('Admin'), (req, res) => {
-  const id = Number(req.params.id);
-  const row = db.prepare('SELECT * FROM course_enrollments WHERE id = ?').get(id);
-  if (!row) return res.status(404).json({ error: 'Application not found' });
-  db.prepare(`
-    UPDATE course_enrollments
-    SET status = 'rejected', approved_at = ?, approved_by = ?, notes = ?
-    WHERE id = ?
-  `).run(new Date().toISOString(), req.user.id, req.body?.notes || null, id);
-  markBillingRejectedForEnrollment(id);
-  const latest = db.prepare('SELECT * FROM course_enrollments WHERE id = ?').get(id);
-  res.json(latest);
 });
 
 router.post('/:id/approve', auth, requireRole('Admin'), (req, res) => {

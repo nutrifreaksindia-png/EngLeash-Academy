@@ -1,10 +1,11 @@
 import React from 'react';
 import SectionCard from '../components/SectionCard';
 
-export default function DashboardPage({ users, pendingUsers, courses, batches, holidays, pendingApplications = [] }) {
+export default function DashboardPage({ users, pendingUsers, courses, batches, holidays, applyLeads = [] }) {
+  const studentCount = users.filter((u) => String(u.role || '').toLowerCase() === 'student').length;
   const stats = [
-    { label: 'Users', value: users.length },
-    { label: 'Course Applications', value: pendingApplications.length },
+    { label: 'Students', value: studentCount },
+    { label: 'Apply leads', value: applyLeads.length },
     { label: 'Courses', value: courses.length },
     { label: 'Batches', value: batches.length },
     { label: 'Holidays', value: holidays.length },
@@ -24,7 +25,7 @@ export default function DashboardPage({ users, pendingUsers, courses, batches, h
       </SectionCard>
       <SectionCard title="What next?" subtitle="Recommended first setup steps">
         <ol className="todoList">
-          <li>Add trainers and staff under <strong>Other Users → Directory</strong>, add students under <strong>Students</strong>, and process course applications.</li>
+          <li>Add trainers and staff under <strong>Other Users → Directory</strong>, add students under <strong>Students</strong>, and follow up apply-course leads.</li>
           <li>Create courses with duration and enrollment type.</li>
           <li>Create lesson library templates and map to courses.</li>
           <li>Create batches and start with planned date.</li>

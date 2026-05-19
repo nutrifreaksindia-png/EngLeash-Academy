@@ -263,12 +263,6 @@ async function main() {
     throw new Error('Single-payment discount was applied after the first part had been paid');
   }
 
-  await jsonRequest(
-    `${base}/api/enrollments/applications/${regEnrollment.id}/approve`,
-    adminToken,
-    'POST',
-    { batchId: batchFarId },
-  );
   await jsonRequest(`${base}/api/batch-manager/${batchFarId}/start`, adminToken, 'POST', { startDate: todayYmd });
   if (!learnerHasCourseAccess(studentRegistrationId, applyCourseId)) {
     throw new Error('Approved learner did not receive access when the batch started');
@@ -323,12 +317,6 @@ async function main() {
   const lateEnrollment = tempDb.prepare(
     'SELECT * FROM course_enrollments WHERE user_id = ? AND course_id = ?',
   ).get(studentLateId, applyCourseId);
-  await jsonRequest(
-    `${base}/api/enrollments/applications/${lateEnrollment.id}/approve`,
-    adminToken,
-    'POST',
-    { batchId: batchNearId },
-  );
   await jsonRequest(`${base}/api/batch-manager/${batchNearId}/start`, adminToken, 'POST', { startDate: todayYmd });
   if (!learnerHasCourseAccess(studentLateId, applyCourseId)) {
     throw new Error('Late learner did not receive access before overdue enforcement');

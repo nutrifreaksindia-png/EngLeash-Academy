@@ -295,7 +295,6 @@ export default function PaymentsPage({
             <select value={applyStatus} onChange={(e) => setApplyStatus(e.target.value)}>
               <option value="">All statuses</option>
               <option value="awaiting_initial_payment">Awaiting initial payment</option>
-              <option value="pending_approval">Pending approval</option>
               <option value="approved_pending_access">Approved, waiting for batch start</option>
               <option value="active">Active</option>
               <option value="removed_overdue">Removed overdue</option>

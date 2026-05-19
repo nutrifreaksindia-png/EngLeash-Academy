@@ -544,10 +544,8 @@ function recomputeProfileStatus(profileId) {
     nextStatus = 'awaiting_initial_payment';
   } else if (String(profile.enrollment_status || '').toLowerCase() === 'rejected') {
     nextStatus = 'rejected';
-  } else if (String(profile.enrollment_status || '').toLowerCase() === 'approved') {
-    nextStatus = batchHasStarted(profile) ? 'active' : 'approved_pending_access';
   } else {
-    nextStatus = 'pending_approval';
+    nextStatus = batchHasStarted(profile) ? 'active' : 'approved_pending_access';
   }
 
   db.prepare(
@@ -737,35 +735,6 @@ function settleDueItem({ dueItemId, amountPaise, paidAtIso = new Date().toISOStr
     };
   });
   return tx();
-}
-
-function markBillingApprovedForEnrollment(enrollmentId) {
-  db.prepare(
-    `UPDATE apply_course_billing_profiles
-     SET enrollment_id = COALESCE(enrollment_id, ?), updated_at = datetime('now')
-     WHERE enrollment_id = ? OR (
-       enrollment_id IS NULL AND EXISTS (
-         SELECT 1
-         FROM course_enrollments ce
-         WHERE ce.id = ?
-           AND ce.user_id = apply_course_billing_profiles.user_id
-           AND ce.course_id = apply_course_billing_profiles.course_id
-           AND ce.batch_id = apply_course_billing_profiles.batch_id
-       )
-     )`,
-  ).run(enrollmentId, enrollmentId, enrollmentId);
-  const profile = db.prepare(
-    'SELECT id FROM apply_course_billing_profiles WHERE enrollment_id = ? ORDER BY id DESC LIMIT 1',
-  ).get(enrollmentId);
-  if (profile?.id) recomputeProfileStatus(profile.id);
-}
-
-function markBillingRejectedForEnrollment(enrollmentId) {
-  db.prepare(
-    `UPDATE apply_course_billing_profiles
-     SET status = 'rejected', updated_at = datetime('now')
-     WHERE enrollment_id = ?`,
-  ).run(enrollmentId);
 }
 
 function markBillingRemovedOverdue(profileId) {
@@ -1239,8 +1208,6 @@ module.exports = {
   loadApplyBatch,
   loadApplyCourse,
   loadDueItemWithProfile,
-  markBillingApprovedForEnrollment,
-  markBillingRejectedForEnrollment,
   markBillingRemovedOverdue,
   prepareFullRemainingDue,
   preparePartSchedule,

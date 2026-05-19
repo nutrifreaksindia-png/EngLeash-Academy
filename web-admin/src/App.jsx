@@ -6,7 +6,6 @@ import StatusBanner from './components/StatusBanner';
 import AdminShell from './components/AdminShell';
 import DashboardPage from './pages/DashboardPage';
 import UsersPage from './pages/UsersPage';
-import ApprovalsPage from './pages/ApprovalsPage';
 import LeadsPage from './pages/LeadsPage';
 import CoursesPage from './pages/CoursesPage';
 import LessonsPage from './pages/LessonsPage';
@@ -176,7 +175,6 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [users, setUsers] = useState([]);
   const [pendingUsers, setPendingUsers] = useState([]);
-  const [pendingApplications, setPendingApplications] = useState([]);
   const [applyLeads, setApplyLeads] = useState([]);
   const [courses, setCourses] = useState([]);
   const [library, setLibrary] = useState([]);
@@ -336,10 +334,9 @@ export default function App() {
         return;
       }
 
-      const [u, pu, pa, ae, c, l, b, h, q, v, vc, sm, ws, asg] = await Promise.all([
+      const [u, pu, ae, c, l, b, h, q, v, vc, sm, ws, asg] = await Promise.all([
         apiFetchSafe('/users', nextToken),
         apiFetchSafe('/users/pending', nextToken),
-        apiFetchSafe('/enrollments/pending-applications', nextToken),
         apiFetchSafe('/payments/admin/apply-enquiries', nextToken),
         apiFetchSafe('/courses', nextToken),
         apiFetchSafe('/lessons/admin/all', nextToken),
@@ -355,7 +352,6 @@ export default function App() {
 
       if (u.ok) setUsers(Array.isArray(u.data) ? u.data : []);
       if (pu.ok) setPendingUsers(Array.isArray(pu.data) ? pu.data : []);
-      if (pa.ok) setPendingApplications(Array.isArray(pa.data) ? pa.data : []);
       if (ae.ok) setApplyLeads(Array.isArray(ae.data) ? ae.data : []);
       else setApplyLeads([]);
       if (c.ok) setCourses(Array.isArray(c.data) ? c.data : []);
@@ -372,7 +368,6 @@ export default function App() {
       const errs = [
         !u.ok ? `/users: ${u.error}` : null,
         !pu.ok ? `/users/pending: ${pu.error}` : null,
-        !pa.ok ? `/enrollments/pending-applications: ${pa.error}` : null,
         !ae.ok ? `/payments/admin/apply-enquiries: ${ae.error}` : null,
         !c.ok ? `/courses: ${c.error}` : null,
         !l.ok ? `/lessons/admin/all: ${l.error}` : null,
@@ -895,11 +890,6 @@ export default function App() {
     }
   }
 
-  async function fetchOpenBatchesForCourse(courseId) {
-    const data = await apiFetch(`/enrollments/courses/${courseId}/open-batches`, token);
-    return Array.isArray(data?.batches) ? data.batches : [];
-  }
-
   async function fetchSubscribePackagesForCourse(courseId) {
     return apiFetch(`/batch-manager/course/${courseId}/subscribe-packages`, token);
   }
@@ -962,24 +952,6 @@ export default function App() {
     await apiFetch(`/billing/admin/packages/${packageId}`, token, {
       method: 'DELETE',
     });
-  }
-
-  async function approveApplication(applicationId, batchId) {
-    await apiFetch(`/enrollments/applications/${applicationId}/approve`, token, {
-      method: 'POST',
-      body: JSON.stringify({ batchId }),
-    });
-    await loadAll();
-    pushToast('Application approved', 'success');
-  }
-
-  async function disapproveApplication(applicationId) {
-    await apiFetch(`/enrollments/applications/${applicationId}/disapprove`, token, {
-      method: 'POST',
-      body: JSON.stringify({}),
-    });
-    await loadAll();
-    pushToast('Application disapproved', 'success');
   }
 
   async function updateApplyLeadStatus(id, status) {
@@ -1368,7 +1340,7 @@ export default function App() {
   const showCreatedBy = currentUser?.role === 'Admin';
 
   if (currentPage === 'dashboard') {
-    page = <DashboardPage users={users} pendingUsers={pendingUsers} pendingApplications={pendingApplications} courses={courses} batches={batches} holidays={holidays} />;
+    page = <DashboardPage users={users} courses={courses} batches={batches} holidays={holidays} applyLeads={applyLeads} />;
   } else if (currentPage === 'students') {
     page = (
       <UsersPage
@@ -1396,15 +1368,6 @@ export default function App() {
         onGetUserDetails={getUserDetails}
         canDangerDelete={currentUser?.role === 'Admin'}
         onDeleteUser={deleteUser}
-      />
-    );
-  } else if (currentPage === 'approvals') {
-    page = (
-      <ApprovalsPage
-        pendingApplications={pendingApplications}
-        fetchOpenBatchesForCourse={fetchOpenBatchesForCourse}
-        onApproveApplication={approveApplication}
-        onDisapproveApplication={disapproveApplication}
       />
     );
   } else if (currentPage === 'leads') {

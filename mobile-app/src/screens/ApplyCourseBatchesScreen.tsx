@@ -230,7 +230,7 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
         checkoutTitle: `${course.name} — ${applyPlanLabel(selectedPlan)}`,
       });
       if (!result?.ok) return;
-      Alert.alert('Application sent', 'Payment successful. Your application is now pending review.');
+      Alert.alert('Enrolled', 'Payment successful. You are enrolled in this batch. Course access begins when the batch starts.');
       refreshUser();
       navigation.goBack();
     } catch (e: any) {
