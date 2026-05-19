@@ -354,7 +354,7 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
               </View>
             );
           })
-        )}
+        ) : null}
       </ScrollView>
     </View>
   );
