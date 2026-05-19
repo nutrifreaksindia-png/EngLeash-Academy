@@ -1104,6 +1104,113 @@ function preparePartSchedule(profileId, { parts = null, requireStartedBatch = fa
   return tx();
 }
 
+function listActiveApplyEnquiriesForUser(userId) {
+  return db.prepare(
+    `SELECT
+       e.*,
+       b.batch_number,
+       b.title AS batch_title,
+       b.name AS batch_name,
+       b.session_type
+     FROM apply_course_enquiries e
+     LEFT JOIN batches b ON b.id = e.batch_id
+     WHERE e.user_id = ?
+       AND e.status IN ('open', 'contacted')
+       AND COALESCE(TRIM(e.callback_date), '') != ''
+       AND COALESCE(TRIM(e.callback_slot), '') != ''
+     ORDER BY e.course_id ASC, e.id DESC`,
+  ).all(userId);
+}
+
+function loadActiveApplyEnquiryForUserCourse(userId, courseId) {
+  return db.prepare(
+    `SELECT
+       e.*,
+       b.batch_number,
+       b.title AS batch_title,
+       b.name AS batch_name,
+       b.session_type
+     FROM apply_course_enquiries e
+     LEFT JOIN batches b ON b.id = e.batch_id
+     WHERE e.user_id = ?
+       AND e.course_id = ?
+       AND e.status IN ('open', 'contacted')
+       AND COALESCE(TRIM(e.callback_date), '') != ''
+       AND COALESCE(TRIM(e.callback_slot), '') != ''
+     ORDER BY e.id DESC
+     LIMIT 1`,
+  ).get(userId, courseId);
+}
+
+function serializeApplyEnquiryRow(row) {
+  if (!row) return null;
+  const batchNumber = row.batch_number;
+  const batchTitle = row.batch_title || row.batch_name || null;
+  const sessionType = row.session_type;
+  let batchLabel = null;
+  if (row.batch_id != null) {
+    const num = batchNumber ?? row.batch_id;
+    const type = sessionType === 'one_to_one' ? '1:1' : 'Group';
+    batchLabel = batchTitle ? `Batch ${num} · ${type} — ${batchTitle}` : `Batch ${num} · ${type}`;
+  }
+  return {
+    id: Number(row.id),
+    courseId: Number(row.course_id),
+    batchId: row.batch_id == null ? null : Number(row.batch_id),
+    status: row.status,
+    displayName: row.display_name || null,
+    phoneCountryCode: row.phone_country_code || null,
+    phoneLocal: row.phone_local || null,
+    callbackDate: row.callback_date || null,
+    callbackSlot: row.callback_slot || null,
+    noteText: row.note_text || null,
+    batchLabel,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function updateApplyEnquiryForUser({
+  enquiryId,
+  userId,
+  batchId,
+  noteText,
+  displayName,
+  phoneCountryCode,
+  phoneLocal,
+  callbackDate,
+  callbackSlot,
+}) {
+  const row = db.prepare('SELECT * FROM apply_course_enquiries WHERE id = ? AND user_id = ?').get(enquiryId, userId);
+  if (!row) return { ok: false, error: 'Not found' };
+  if (String(row.status || '').toLowerCase() === 'closed') {
+    return { ok: false, error: 'This request is closed and cannot be edited' };
+  }
+  db.prepare(
+    `UPDATE apply_course_enquiries
+     SET batch_id = ?,
+         note_text = ?,
+         display_name = ?,
+         phone_country_code = ?,
+         phone_local = ?,
+         callback_date = ?,
+         callback_slot = ?,
+         updated_at = datetime('now')
+     WHERE id = ? AND user_id = ?`,
+  ).run(
+    batchId == null ? null : batchId,
+    noteText || null,
+    displayName || null,
+    phoneCountryCode || null,
+    phoneLocal || null,
+    callbackDate || null,
+    callbackSlot || null,
+    enquiryId,
+    userId,
+  );
+  return { ok: true, enquiry: serializeApplyEnquiryRow(loadActiveApplyEnquiryForUserCourse(userId, row.course_id)) };
+}
+
 function createApplyEnquiry({
   userId,
   courseId,
@@ -1196,6 +1303,10 @@ module.exports = {
   blockingApplyProfile,
   computeInitialBillingPlan,
   createApplyEnquiry,
+  listActiveApplyEnquiriesForUser,
+  loadActiveApplyEnquiryForUserCourse,
+  serializeApplyEnquiryRow,
+  updateApplyEnquiryForUser,
   createOrReuseInitialProfile,
   dueAmountToCollectNow,
   dueCollectionState,

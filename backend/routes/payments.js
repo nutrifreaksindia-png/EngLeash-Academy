@@ -27,6 +27,10 @@ const {
 const {
   allowedInitialApplyPlans,
   createApplyEnquiry,
+  listActiveApplyEnquiriesForUser,
+  loadActiveApplyEnquiryForUserCourse,
+  serializeApplyEnquiryRow,
+  updateApplyEnquiryForUser,
   createOrReuseInitialProfile,
   dueAmountToCollectNow,
   loadApplyBatch,
@@ -461,6 +465,78 @@ router.get('/admin/apply-billing', auth, requireRole('Admin', 'Creator', 'Traine
   );
 });
 
+function validateApplyEnquiryPayload(body, { courseId, batchId, course }) {
+  if (batchId != null) {
+    const batch = batchContainsCourse(batchId, courseId);
+    if (!batch) return { ok: false, status: 404, error: 'Batch not found for course' };
+  }
+
+  const displayName = String(body?.display_name || '').trim();
+  const phoneCountryCode = normalizeCountryDialCode(body?.phone_country_code);
+  const phoneLocal = normalizePhoneLocal(body?.phone_local ?? body?.phone_number);
+  const callbackDate = String(body?.callback_date || '').trim();
+  const callbackSlot = String(body?.callback_slot || '').trim();
+
+  if (displayName.length < 2) {
+    return { ok: false, status: 400, error: 'Please enter your name' };
+  }
+  if (!phoneCountryCode || phoneCountryCode.length > 14) {
+    return { ok: false, status: 400, error: 'Please select a valid country code' };
+  }
+  if (phoneLocal.length < 6 || phoneLocal.length > 15) {
+    return { ok: false, status: 400, error: 'Please enter a valid phone number' };
+  }
+
+  const holidaySet = loadHolidayDateSet();
+  const dateCheck = validateCallbackDate(callbackDate, holidaySet);
+  if (!dateCheck.ok) {
+    return { ok: false, status: 400, error: dateCheck.reason || 'Invalid callback date' };
+  }
+  const slotCheck = validateCallbackSlotForDate(callbackSlot, callbackDate);
+  if (!slotCheck.ok) {
+    return { ok: false, status: 400, error: slotCheck.reason || 'Invalid time slot' };
+  }
+
+  return {
+    ok: true,
+    displayName,
+    phoneCountryCode,
+    phoneLocal,
+    callbackDate,
+    callbackSlot,
+    noteText: body?.note || null,
+  };
+}
+
+function loadApplyCourseForEnquiry(courseId) {
+  const course = loadApplyCourse(courseId);
+  if (!course || String(course.enrollment_type || '').toLowerCase() !== 'apply') {
+    return { ok: false, status: 400, error: 'This course does not use the apply revenue flow' };
+  }
+  if (!course.apply_enquiry_enabled) {
+    return { ok: false, status: 409, error: 'Enquiries are disabled for this course' };
+  }
+  if (!course.is_published || String(course.course_status || 'Active') !== 'Active') {
+    return { ok: false, status: 400, error: 'Course is not available' };
+  }
+  return { ok: true, course };
+}
+
+router.get('/apply/enquiries/my', auth, requireRole('Student', 'Lab'), (req, res) => {
+  const courseId = Number(req.query?.course_id);
+  if (Number.isFinite(courseId)) {
+    const row = loadActiveApplyEnquiryForUserCourse(req.user.id, courseId);
+    return res.json({ enquiry: serializeApplyEnquiryRow(row) });
+  }
+  const rows = listActiveApplyEnquiriesForUser(req.user.id);
+  const enquiries = rows.map(serializeApplyEnquiryRow).filter(Boolean);
+  const byCourse = new Map();
+  for (const e of enquiries) {
+    if (!byCourse.has(e.courseId)) byCourse.set(e.courseId, e);
+  }
+  res.json({ enquiries: [...byCourse.values()] });
+});
+
 router.post('/apply/enquiries', auth, requireRole('Student', 'Lab'), (req, res) => {
   const courseId = Number(req.body?.course_id);
   const rawBatch = req.body?.batch_id;
@@ -472,59 +548,87 @@ router.post('/apply/enquiries', auth, requireRole('Student', 'Lab'), (req, res) 
   if (batchId != null && !Number.isFinite(batchId)) {
     return res.status(400).json({ error: 'batch_id is invalid' });
   }
-  const course = loadApplyCourse(courseId);
-  if (!course || String(course.enrollment_type || '').toLowerCase() !== 'apply') {
-    return res.status(400).json({ error: 'This course does not use the apply revenue flow' });
-  }
-  if (!course.apply_enquiry_enabled) {
-    return res.status(409).json({ error: 'Enquiries are disabled for this course' });
-  }
-  if (!course.is_published || String(course.course_status || 'Active') !== 'Active') {
-    return res.status(400).json({ error: 'Course is not available' });
-  }
-  if (batchId != null) {
-    const batch = batchContainsCourse(batchId, courseId);
-    if (!batch) return res.status(404).json({ error: 'Batch not found for course' });
+
+  const courseCheck = loadApplyCourseForEnquiry(courseId);
+  if (!courseCheck.ok) return res.status(courseCheck.status).json({ error: courseCheck.error });
+
+  const existing = loadActiveApplyEnquiryForUserCourse(req.user.id, courseId);
+  if (existing) {
+    return res.status(409).json({
+      error: 'You already have a call booked for this course. Edit your existing request.',
+      enquiryId: existing.id,
+      enquiry: serializeApplyEnquiryRow(existing),
+    });
   }
 
-  const displayName = String(req.body?.display_name || '').trim();
-  const phoneCountryCode = normalizeCountryDialCode(req.body?.phone_country_code);
-  const phoneLocal = normalizePhoneLocal(req.body?.phone_local ?? req.body?.phone_number);
-  const callbackDate = String(req.body?.callback_date || '').trim();
-  const callbackSlot = String(req.body?.callback_slot || '').trim();
-
-  if (displayName.length < 2) {
-    return res.status(400).json({ error: 'Please enter your name' });
-  }
-  if (!phoneCountryCode || phoneCountryCode.length > 14) {
-    return res.status(400).json({ error: 'Please select a valid country code' });
-  }
-  if (phoneLocal.length < 6 || phoneLocal.length > 15) {
-    return res.status(400).json({ error: 'Please enter a valid phone number' });
-  }
-
-  const holidaySet = loadHolidayDateSet();
-  const dateCheck = validateCallbackDate(callbackDate, holidaySet);
-  if (!dateCheck.ok) {
-    return res.status(400).json({ error: dateCheck.reason || 'Invalid callback date' });
-  }
-  const slotCheck = validateCallbackSlotForDate(callbackSlot, callbackDate);
-  if (!slotCheck.ok) {
-    return res.status(400).json({ error: slotCheck.reason || 'Invalid time slot' });
-  }
+  const validated = validateApplyEnquiryPayload(req.body, {
+    courseId,
+    batchId,
+    course: courseCheck.course,
+  });
+  if (!validated.ok) return res.status(validated.status).json({ error: validated.error });
 
   const enquiryId = createApplyEnquiry({
     userId: req.user.id,
     courseId,
     batchId,
-    noteText: req.body?.note || null,
-    displayName,
-    phoneCountryCode,
-    phoneLocal,
-    callbackDate,
-    callbackSlot,
+    noteText: validated.noteText,
+    displayName: validated.displayName,
+    phoneCountryCode: validated.phoneCountryCode,
+    phoneLocal: validated.phoneLocal,
+    callbackDate: validated.callbackDate,
+    callbackSlot: validated.callbackSlot,
   });
   res.status(201).json({ ok: true, enquiryId });
+});
+
+router.patch('/apply/enquiries/:id', auth, requireRole('Student', 'Lab'), (req, res) => {
+  const enquiryId = Number(req.params.id);
+  if (!Number.isFinite(enquiryId)) return res.status(400).json({ error: 'Invalid id' });
+
+  const existing = db.prepare('SELECT * FROM apply_course_enquiries WHERE id = ? AND user_id = ?').get(
+    enquiryId,
+    req.user.id,
+  );
+  if (!existing) return res.status(404).json({ error: 'Not found' });
+
+  const courseId = Number(existing.course_id);
+  const rawBatch = req.body?.batch_id;
+  const batchId =
+    rawBatch === undefined
+      ? existing.batch_id == null
+        ? null
+        : Number(existing.batch_id)
+      : rawBatch === null || rawBatch === ''
+        ? null
+        : Number(rawBatch);
+  if (batchId != null && !Number.isFinite(batchId)) {
+    return res.status(400).json({ error: 'batch_id is invalid' });
+  }
+
+  const courseCheck = loadApplyCourseForEnquiry(courseId);
+  if (!courseCheck.ok) return res.status(courseCheck.status).json({ error: courseCheck.error });
+
+  const validated = validateApplyEnquiryPayload(req.body, {
+    courseId,
+    batchId,
+    course: courseCheck.course,
+  });
+  if (!validated.ok) return res.status(validated.status).json({ error: validated.error });
+
+  const result = updateApplyEnquiryForUser({
+    enquiryId,
+    userId: req.user.id,
+    batchId,
+    noteText: validated.noteText,
+    displayName: validated.displayName,
+    phoneCountryCode: validated.phoneCountryCode,
+    phoneLocal: validated.phoneLocal,
+    callbackDate: validated.callbackDate,
+    callbackSlot: validated.callbackSlot,
+  });
+  if (!result.ok) return res.status(result.error === 'Not found' ? 404 : 400).json({ error: result.error });
+  res.json({ ok: true, enquiry: result.enquiry });
 });
 
 router.get('/admin/apply-enquiries', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {

@@ -16,7 +16,12 @@ import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { API_BASE } from '../config';
-import { navigateApplyForCourse } from '../lib/applyNavigation';
+import {
+  applyPrimaryLabel,
+  fetchActiveApplyEnquiryMap,
+  navigateApplyForCourse,
+} from '../lib/applyNavigation';
+import type { ApplyEnquiry } from '../lib/applyNavigation';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -73,14 +78,21 @@ export default function LandingHomeScreen({ navigation, route }: any) {
   const [enrollingId, setEnrollingId] = useState<number | null>(null);
   const [authNavId, setAuthNavId] = useState<number | null>(null);
   const [applyNavId, setApplyNavId] = useState<number | null>(null);
+  const [applyEnquiries, setApplyEnquiries] = useState<Record<number, ApplyEnquiry>>({});
   const subscribeResumeKeyRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       const data = user?.id ? await api.get('/courses/catalog') : await api.publicGet('/courses/public');
       setCourses(Array.isArray(data) ? data : []);
+      if (user?.id) {
+        setApplyEnquiries(await fetchActiveApplyEnquiryMap());
+      } else {
+        setApplyEnquiries({});
+      }
     } catch {
       setCourses([]);
+      setApplyEnquiries({});
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -268,7 +280,11 @@ export default function LandingHomeScreen({ navigation, route }: any) {
           const type = (item.enrollment_type || 'free').toLowerCase();
           const isActive = !!item.enrolled;
           const isJoined = !!item.joined && !isActive;
-          const primaryLabel = isActive ? 'Go to Course' : isJoined ? 'Joined' : primaryCta(item.enrollment_type).label;
+          const primaryLabel = isActive
+            ? 'Go to Course'
+            : isJoined
+              ? 'Joined'
+              : applyPrimaryLabel(item.enrollment_type, !!applyEnquiries[item.id]);
           return (
             <View style={styles.card}>
               {resolveAssetUrl(item.image_url) ? (

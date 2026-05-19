@@ -10,12 +10,29 @@ export type OpenBatchRow = {
   session_type?: 'group' | 'one_to_one' | string;
 };
 
+export type ApplyEnquiry = {
+  id: number;
+  courseId: number;
+  batchId: number | null;
+  status: string;
+  displayName: string | null;
+  phoneCountryCode: string | null;
+  phoneLocal: string | null;
+  callbackDate: string | null;
+  callbackSlot: string | null;
+  noteText?: string | null;
+  batchLabel?: string | null;
+};
+
 export type ApplyCallbackNavParams = {
   courseId: number;
   courseName: string;
   batchId?: number | null;
   batchLabel?: string;
   noOpenBatches?: boolean;
+  enquiryId?: number;
+  editMode?: boolean;
+  initialEnquiry?: ApplyEnquiry;
 };
 
 export function isApplyEnquiryEnabled(course: Pick<PublicCourse, 'apply_enquiry_enabled'>): boolean {
@@ -35,6 +52,29 @@ export async function fetchOpenBatchesForCourse(courseId: number): Promise<OpenB
   return Array.isArray(data?.batches) ? data.batches : [];
 }
 
+export async function fetchActiveApplyEnquiry(courseId: number): Promise<ApplyEnquiry | null> {
+  try {
+    const data = await api.get(`/payments/apply/enquiries/my?course_id=${courseId}`);
+    return data?.enquiry ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchActiveApplyEnquiryMap(): Promise<Record<number, ApplyEnquiry>> {
+  try {
+    const data = await api.get('/payments/apply/enquiries/my');
+    const list: ApplyEnquiry[] = Array.isArray(data?.enquiries) ? data.enquiries : [];
+    const map: Record<number, ApplyEnquiry> = {};
+    for (const row of list) {
+      if (row?.courseId) map[Number(row.courseId)] = row;
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
+
 export function callbackParamsForCourse(
   course: Pick<PublicCourse, 'id' | 'name'>,
   opts?: { batch?: OpenBatchRow | null; noOpenBatches?: boolean },
@@ -49,18 +89,40 @@ export function callbackParamsForCourse(
   };
 }
 
+export function callbackParamsFromEnquiry(
+  enquiry: ApplyEnquiry,
+  courseName: string,
+): ApplyCallbackNavParams {
+  return {
+    courseId: enquiry.courseId,
+    courseName,
+    batchId: enquiry.batchId,
+    batchLabel: enquiry.batchLabel ?? undefined,
+    noOpenBatches: enquiry.batchId == null,
+    enquiryId: enquiry.id,
+    editMode: true,
+    initialEnquiry: enquiry,
+  };
+}
+
 type NavLike = {
   navigate: (name: string, params?: object) => void;
   replace?: (name: string, params?: object) => void;
 };
 
-/** Route to batch picker or callback wizard when no open batches. */
+/** Route to edit callback, batch picker, or new callback when no open batches. */
 export async function navigateApplyForCourse(
   navigation: NavLike,
   course: PublicCourse,
   options?: { replace?: boolean },
 ): Promise<void> {
   const go = options?.replace && navigation.replace ? navigation.replace.bind(navigation) : navigation.navigate.bind(navigation);
+
+  const existing = await fetchActiveApplyEnquiry(course.id);
+  if (existing) {
+    go('ApplyCallback', callbackParamsFromEnquiry(existing, course.name));
+    return;
+  }
 
   if (!isApplyEnquiryEnabled(course)) {
     try {
@@ -116,6 +178,15 @@ export async function navigateApplyAfterAuth(
     }
   }
 
+  const existing = await fetchActiveApplyEnquiry(courseId);
+  if (existing) {
+    tabNav.navigate('Home', {
+      screen: 'ApplyCallback',
+      params: callbackParamsFromEnquiry(existing, course.name),
+    });
+    return true;
+  }
+
   if (!isApplyEnquiryEnabled(course)) {
     tabNav.navigate('Home', {
       screen: 'ApplyCourseBatches',
@@ -142,4 +213,16 @@ export async function navigateApplyAfterAuth(
     params: { course },
   });
   return true;
+}
+
+export function applyPrimaryLabel(
+  enrollmentType: string | undefined,
+  hasBookedCall: boolean,
+): string {
+  const t = (enrollmentType || 'free').toLowerCase();
+  if (t === 'apply' && hasBookedCall) return 'Edit call';
+  if (t === 'apply') return 'Apply';
+  if (t === 'purchase') return 'Purchase';
+  if (t === 'subscribe') return 'Subscribe';
+  return 'Join Free';
 }

@@ -67,6 +67,8 @@ function buildFullMessage(
 
 export default function CallbackBookingWizard({ params, onDone, onCancel }: Props) {
   const insets = useSafeAreaInsets();
+  const editMode = !!params.editMode && !!params.enquiryId;
+  const enquiryId = params.enquiryId;
   const courseId = Number(params.courseId);
   const courseName = String(params.courseName || 'Course');
   const batchIdNorm =
@@ -76,6 +78,7 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
   const batchLabel =
     params.batchLabel || (batchIdNorm != null ? `Batch ${batchIdNorm}` : undefined);
   const noOpenBatches = params.noOpenBatches === true || !batchLabel;
+  const [prefillDone, setPrefillDone] = useState(!editMode);
 
   const [step, setStep] = useState(0);
   const slideX = useRef(new Animated.Value(0)).current;
@@ -151,6 +154,16 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
   ]);
 
   useEffect(() => {
+    if (!editMode || !params.initialEnquiry || prefillDone) return;
+    const e = params.initialEnquiry;
+    if (e.displayName) setDisplayName(e.displayName);
+    if (e.phoneLocal) setPhoneLocal(e.phoneLocal);
+    if (e.callbackDate) setCallbackDate(e.callbackDate);
+    if (e.callbackSlot) setCallbackSlot(e.callbackSlot);
+    setPrefillDone(true);
+  }, [editMode, params.initialEnquiry, prefillDone]);
+
+  useEffect(() => {
     if (!Number.isFinite(courseId)) return;
     let cancelled = false;
     setMetaLoading(true);
@@ -165,21 +178,36 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
         setHolidays(Array.isArray(meta?.holidays) ? meta.holidays : []);
         setTimeSlots(Array.isArray(meta?.time_slots) ? meta.time_slots : []);
         setAllCountries(countries);
-        const nm = String(me?.name || '').trim();
-        if (nm) setDisplayName(nm);
-        const sp = me?.studentProfile;
-        const cc = String(sp?.country_code || '').trim();
-        if (cc.startsWith('+')) {
-          const digits = cc.replace(/\D/g, '');
-          const match = countries.find((co) => String(co.phonecode).replace(/\D/g, '') === digits);
-          if (match) setCountryIso(match.isoCode);
+        const e = params.initialEnquiry;
+        if (editMode && e) {
+          if (e.displayName) setDisplayName(e.displayName);
+          if (e.phoneLocal) setPhoneLocal(e.phoneLocal);
+          if (e.callbackDate) setCallbackDate(e.callbackDate);
+          if (e.callbackSlot) setCallbackSlot(e.callbackSlot);
+          const cc = String(e.phoneCountryCode || '').trim();
+          if (cc.startsWith('+')) {
+            const digits = cc.replace(/\D/g, '');
+            const match = countries.find((co) => String(co.phonecode).replace(/\D/g, '') === digits);
+            if (match) setCountryIso(match.isoCode);
+          }
         } else {
-          defaultCountryIso().then((iso) => {
-            if (!cancelled && iso) setCountryIso(iso);
-          });
+          const nm = String(me?.name || '').trim();
+          if (nm) setDisplayName(nm);
+          const sp = me?.studentProfile;
+          const cc = String(sp?.country_code || '').trim();
+          if (cc.startsWith('+')) {
+            const digits = cc.replace(/\D/g, '');
+            const match = countries.find((co) => String(co.phonecode).replace(/\D/g, '') === digits);
+            if (match) setCountryIso(match.isoCode);
+          } else {
+            defaultCountryIso().then((iso) => {
+              if (!cancelled && iso) setCountryIso(iso);
+            });
+          }
+          const mob = String(me?.mobile_number || '').replace(/\D/g, '');
+          if (mob) setPhoneLocal(mob);
         }
-        const mob = String(me?.mobile_number || '').replace(/\D/g, '');
-        if (mob) setPhoneLocal(mob);
+        setPrefillDone(true);
       })
       .catch(() => {
         if (!cancelled) {
@@ -193,10 +221,11 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
     return () => {
       cancelled = true;
     };
-  }, [courseId]);
+  }, [courseId, editMode, params.initialEnquiry]);
 
   useEffect(() => {
     if (!dateOptions.length) return;
+    if (editMode && callbackDate && dateOptions.includes(callbackDate)) return;
     if (!callbackDate || !dateOptions.includes(callbackDate)) {
       setCallbackDate(dateOptions[0]);
     }
@@ -246,19 +275,31 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
         dialCode,
         digits,
       );
-      await api.post('/payments/apply/enquiries', {
-        course_id: courseId,
-        batch_id: batchIdNorm,
-        display_name: name,
-        phone_country_code: dialCode,
-        phone_local: digits,
-        callback_date: callbackDate,
-        callback_slot: callbackSlot,
-        note,
-      });
+      if (editMode && enquiryId) {
+        await api.patch(`/payments/apply/enquiries/${enquiryId}`, {
+          batch_id: batchIdNorm,
+          display_name: name,
+          phone_country_code: dialCode,
+          phone_local: digits,
+          callback_date: callbackDate,
+          callback_slot: callbackSlot,
+          note,
+        });
+      } else {
+        await api.post('/payments/apply/enquiries', {
+          course_id: courseId,
+          batch_id: batchIdNorm,
+          display_name: name,
+          phone_country_code: dialCode,
+          phone_local: digits,
+          callback_date: callbackDate,
+          callback_slot: callbackSlot,
+          note,
+        });
+      }
       setSuccess(true);
     } catch (e: any) {
-      Alert.alert('Could not book', e?.message || 'Please try again.');
+      Alert.alert(editMode ? 'Could not update' : 'Could not book', e?.message || 'Please try again.');
     } finally {
       setSubmitting(false);
     }
@@ -269,8 +310,9 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
     return (
       <View style={[styles.page, styles.successPage, { paddingBottom: 24 + insets.bottom }]}>
         <Text style={styles.successIcon}>✓</Text>
-        <Text style={styles.successTitle}>You&apos;re booked!</Text>
+        <Text style={styles.successTitle}>{editMode ? 'Call updated!' : "You're booked!"}</Text>
         <Text style={styles.successBody}>
+          {editMode ? 'Your callback details are saved. ' : ''}
           We&apos;ll call you on {formatCallbackDateLong(callbackDate)} between {slotLabel.local}.
           {slotLabel.ist ? `\n(${slotLabel.ist})` : ''}
         </Text>
@@ -323,7 +365,12 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
                 showsVerticalScrollIndicator={false}
               >
                 <View style={styles.card}>
-                  <Text style={styles.stepTitle}>Let&apos;s find a time that works for you</Text>
+                  <Text style={styles.stepTitle}>
+                    {editMode ? 'Update your booked call' : "Let's find a time that works for you"}
+                  </Text>
+                  {editMode ? (
+                    <Text style={styles.stepSub}>Change your preferred date below. You already have one call booked for this course.</Text>
+                  ) : null}
                   <View style={styles.bubble}>
                     <Text style={styles.bubbleText}>{interestPreview}</Text>
                     <Text style={styles.bubbleText}>Please call me on…</Text>
@@ -471,7 +518,7 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
                 {submitting ? (
                   <ActivityIndicator color="#fff" />
                 ) : (
-                  <Text style={styles.btnPrimaryText}>Request my call</Text>
+                  <Text style={styles.btnPrimaryText}>{editMode ? 'Save changes' : 'Request my call'}</Text>
                 )}
               </TouchableOpacity>
             )}

@@ -14,7 +14,13 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { alertApplyPaymentError, payApplyDueWithRazorpay } from '../payments/razorpayApplyBilling';
 import type { PublicCourse } from './LandingHomeScreen';
-import { callbackParamsForCourse, isApplyEnquiryEnabled } from '../lib/applyNavigation';
+import {
+  callbackParamsForCourse,
+  callbackParamsFromEnquiry,
+  fetchActiveApplyEnquiry,
+  isApplyEnquiryEnabled,
+} from '../lib/applyNavigation';
+import type { ApplyEnquiry } from '../lib/applyNavigation';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -165,6 +171,8 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
   const [openBatchesLoading, setOpenBatchesLoading] = useState(true);
   const [applyBusyKey, setApplyBusyKey] = useState<string | null>(null);
   const [expandedBatchId, setExpandedBatchId] = useState<number | null>(null);
+  const [courseEnquiry, setCourseEnquiry] = useState<ApplyEnquiry | null>(null);
+  const [enquiryChecked, setEnquiryChecked] = useState(false);
 
   useEffect(() => {
     if (!initial?.id) {
@@ -216,15 +224,34 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
     }, [loadBatches]),
   );
 
+  useFocusEffect(
+    useCallback(() => {
+      if (!course?.id) return;
+      let cancelled = false;
+      setEnquiryChecked(false);
+      fetchActiveApplyEnquiry(course.id).then((row) => {
+        if (!cancelled) {
+          setCourseEnquiry(row);
+          setEnquiryChecked(true);
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
+    }, [course?.id]),
+  );
+
   useEffect(() => {
-    if (openBatchesLoading || !course?.id) return;
+    if (openBatchesLoading || !enquiryChecked || !course?.id) return;
     if (openBatches.length > 0) return;
     if (!isApplyEnquiryEnabled(course)) return;
     navigation.replace(
       'ApplyCallback',
-      callbackParamsForCourse(course, { noOpenBatches: true }),
+      courseEnquiry
+        ? callbackParamsFromEnquiry(courseEnquiry, course.name)
+        : callbackParamsForCourse(course, { noOpenBatches: true }),
     );
-  }, [openBatchesLoading, openBatches.length, course, navigation]);
+  }, [openBatchesLoading, openBatches.length, enquiryChecked, course, courseEnquiry, navigation]);
 
   async function applyToBatch(batch: OpenBatch, selectedPlan: 'registration' | 'single_payment' | 'first_installment') {
     if (!course || !user) return;
@@ -263,7 +290,7 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator color={BRAND_RED} />
-        <Text style={styles.muted}>Opening call booking…</Text>
+        <Text style={styles.muted}>{courseEnquiry ? 'Opening your call…' : 'Opening call booking…'}</Text>
       </View>
     );
   }
@@ -320,11 +347,13 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
                       onPress={() =>
                         navigation.navigate(
                           'ApplyCallback',
-                          callbackParamsForCourse(course, { batch: b, noOpenBatches: false }),
+                          courseEnquiry
+                            ? callbackParamsFromEnquiry(courseEnquiry, course.name)
+                            : callbackParamsForCourse(course, { batch: b, noOpenBatches: false }),
                         )
                       }
                     >
-                      <Text style={styles.enquiryText}>Book a call</Text>
+                      <Text style={styles.enquiryText}>{courseEnquiry ? 'Edit call' : 'Book a call'}</Text>
                     </TouchableOpacity>
                   )}
                 </View>

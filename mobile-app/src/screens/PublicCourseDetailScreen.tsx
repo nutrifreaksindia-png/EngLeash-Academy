@@ -7,7 +7,8 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import type { PublicCourse } from './LandingHomeScreen';
 import { API_BASE } from '../config';
-import { navigateApplyForCourse } from '../lib/applyNavigation';
+import { applyPrimaryLabel, fetchActiveApplyEnquiry, navigateApplyForCourse } from '../lib/applyNavigation';
+import type { ApplyEnquiry } from '../lib/applyNavigation';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -75,6 +76,7 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [coverAspect, setCoverAspect] = useState<number | null>(null);
+  const [applyEnquiry, setApplyEnquiry] = useState<ApplyEnquiry | null>(null);
 
   const coverUri = resolveAssetUrl(course?.image_url);
 
@@ -98,9 +100,16 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
           enrolled = false;
         }
       }
-      setCourse(detail ? { ...detail, enrolled } : null);
+      const next = detail ? { ...detail, enrolled } : null;
+      setCourse(next);
+      if (user?.id && next && String(next.enrollment_type || '').toLowerCase() === 'apply') {
+        setApplyEnquiry(await fetchActiveApplyEnquiry(courseId));
+      } else {
+        setApplyEnquiry(null);
+      }
     } catch {
       setCourse(null);
+      setApplyEnquiry(null);
     } finally {
       setLoading(false);
     }
@@ -177,7 +186,11 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
   const cta = primaryCta(course.enrollment_type);
   const showCoursePrice = cta.kind !== 'subscribe';
   const isActive = !!course.enrolled;
-  const primaryLabel = isActive ? 'Go to Course' : cta.label;
+  const primaryLabel = isActive
+    ? 'Go to Course'
+    : cta.kind === 'apply'
+      ? applyPrimaryLabel(course.enrollment_type, !!applyEnquiry)
+      : cta.label;
   const onPrimaryAction = async () => {
     if (isActive) {
       goToCourse(course);
