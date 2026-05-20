@@ -30,19 +30,20 @@ export function sanitizeStudyMaterialHtml(html: string) {
 function buildTagStyles(baseFontSize: number, studyContent = false): MixedStyleRecord {
   const lineHeight = Math.round(baseFontSize * 1.55);
   const headingSize = Math.round(baseFontSize * 1.15);
-  const listPad = studyContent ? 0 : 20;
-  const blockGap = studyContent ? 4 : 8;
+  const listPad = studyContent ? 18 : 20;
+  const paraGap = studyContent ? 10 : 8;
+  const listItemGap = studyContent ? 2 : 4;
   return {
     body: { color: BODY_COLOR, fontSize: baseFontSize, lineHeight },
-    p: { marginTop: blockGap, marginBottom: blockGap, color: BODY_COLOR, fontSize: baseFontSize, lineHeight },
+    p: { marginTop: 8, marginBottom: paraGap, color: BODY_COLOR, fontSize: baseFontSize, lineHeight },
     div: { color: BODY_COLOR, fontSize: baseFontSize, lineHeight },
-    ul: { marginTop: blockGap, marginBottom: blockGap, paddingLeft: listPad, marginLeft: studyContent ? 0 : 0 },
-    ol: { marginTop: blockGap, marginBottom: blockGap, paddingLeft: listPad },
-    li: { marginTop: 0, marginBottom: studyContent ? 0 : 4, paddingLeft: 0, color: BODY_COLOR, fontSize: baseFontSize, lineHeight },
-    h1: { fontSize: headingSize + 4, fontWeight: '700', color: HEADING_COLOR, marginTop: 10, marginBottom: 4 },
-    h2: { fontSize: headingSize + 2, fontWeight: '700', color: HEADING_COLOR, marginTop: 10, marginBottom: 4 },
-    h3: { fontSize: headingSize, fontWeight: '600', color: HEADING_COLOR, marginTop: 8, marginBottom: 4 },
-    h4: { fontSize: headingSize, fontWeight: '600', color: HEADING_COLOR, marginTop: 8, marginBottom: 4 },
+    ul: { marginTop: 8, marginBottom: paraGap, paddingLeft: listPad },
+    ol: { marginTop: 8, marginBottom: paraGap, paddingLeft: listPad },
+    li: { marginTop: 0, marginBottom: listItemGap, paddingLeft: 0, color: BODY_COLOR, fontSize: baseFontSize, lineHeight },
+    h1: { fontSize: headingSize + 4, fontWeight: '700', color: HEADING_COLOR, marginTop: 12, marginBottom: 8 },
+    h2: { fontSize: headingSize + 2, fontWeight: '700', color: HEADING_COLOR, marginTop: 12, marginBottom: 8 },
+    h3: { fontSize: headingSize, fontWeight: '600', color: HEADING_COLOR, marginTop: 10, marginBottom: 6 },
+    h4: { fontSize: headingSize, fontWeight: '600', color: HEADING_COLOR, marginTop: 10, marginBottom: 6 },
     strong: { fontWeight: '700' },
     b: { fontWeight: '700' },
     em: { fontStyle: 'italic' },

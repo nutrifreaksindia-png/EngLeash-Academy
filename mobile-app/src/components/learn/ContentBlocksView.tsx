@@ -232,7 +232,7 @@ function ListItemRow({
   ordered?: boolean;
 }) {
   const indent = depth * LIST_LEVEL_INDENT;
-  const markerText = ordered ? `${marker} ` : `${marker} `;
+  const markerText = `${marker} `;
   return (
     <Text style={[styles.listRow, { paddingLeft: indent }]}>
       <Text style={styles.listGlyphInline}>{markerText}</Text>
@@ -279,7 +279,7 @@ function ContentBlocksBody({
         if (b.type === 'heading') {
           const size = b.level === 1 ? H1_FONT : b.level === 2 ? H2_FONT : H3_FONT;
           return (
-            <View key={b.id || `h-${idx}`} style={styles.blockWrap}>
+            <View key={b.id || `h-${idx}`} style={styles.headingWrap}>
               <InlineText
                 spans={normalizeHeadingSpans(b)}
                 baseStyle={[
@@ -353,14 +353,18 @@ function ContentBlocksBody({
         if (b.type === 'highlightedQuote') {
           if (paragraphHasRenderableHtml(b)) {
             return (
-              <View key={b.id || `q-${idx}`} style={[styles.quoteCard, { alignSelf: 'stretch' }]}>
-                <HtmlContent html={b.html} horizontalInset={horizontalInset + 24} baseFontSize={BODY_FONT} studyContent />
+              <View key={b.id || `q-${idx}`} style={styles.blockWrap}>
+                <View style={[styles.quoteCard, { alignSelf: 'stretch' }]}>
+                  <HtmlContent html={b.html} horizontalInset={horizontalInset + 24} baseFontSize={BODY_FONT} studyContent />
+                </View>
               </View>
             );
           }
           return (
-            <View key={b.id || `q-${idx}`} style={[styles.quoteCard, { alignSelf: 'stretch' }]}>
-              <Text style={styles.quoteText}>{stripHtml(b.html || '')}</Text>
+            <View key={b.id || `q-${idx}`} style={styles.blockWrap}>
+              <View style={[styles.quoteCard, { alignSelf: 'stretch' }]}>
+                <Text style={styles.quoteText}>{stripHtml(b.html || '')}</Text>
+              </View>
             </View>
           );
         }
@@ -371,8 +375,8 @@ function ContentBlocksBody({
           const fitContain = b.layout?.fitMode !== 'cover';
           const imageWidth = contentWidth - 16;
           return (
+            <View key={b.id || `img-${idx}`} style={styles.blockWrap}>
             <View
-              key={b.id || `img-${idx}`}
               style={[
                 styles.mediaCard,
                 { width: imageWidth },
@@ -393,12 +397,14 @@ function ContentBlocksBody({
                 <Text style={styles.caption}>{b.caption}</Text>
               ) : null}
             </View>
+            </View>
           );
         }
         if (b.type === 'imageCarousel') {
           const slideWidth = Math.min(300, contentWidth * 0.85);
           return (
-            <ScrollView key={b.id || `car-${idx}`} horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.carouselRow}>
+            <View key={b.id || `car-${idx}`} style={styles.blockWrap}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.carouselRow}>
               {(b.items || []).map((item: any, i: number) => (
                 <View key={`${b.id || idx}-${i}`} style={[styles.carouselCard, { width: slideWidth }]}>
                   {item.url ? (
@@ -412,12 +418,14 @@ function ContentBlocksBody({
                 </View>
               ))}
             </ScrollView>
+            </View>
           );
         }
         if (b.type === 'table') {
           const rows = splitRows(b.rows);
           return (
-            <View key={b.id || `t-${idx}`} style={styles.tableWrap}>
+            <View key={b.id || `t-${idx}`} style={styles.blockWrap}>
+            <View style={styles.tableWrap}>
               {rows.map((row, rIdx) => (
                 <View key={`${idx}-r-${rIdx}`} style={styles.tableRow}>
                   {row.map((cell, cIdx) => (
@@ -428,12 +436,13 @@ function ContentBlocksBody({
                 </View>
               ))}
             </View>
+            </View>
           );
         }
         if (b.type === 'pdfAttachment') {
           return (
+            <View key={b.id || `pdf-${idx}`} style={styles.blockWrap}>
             <TouchableOpacity
-              key={b.id || `pdf-${idx}`}
               style={[
                 styles.linkCard,
                 b.align === 'left' ? { alignSelf: 'flex-start' } :
@@ -443,13 +452,16 @@ function ContentBlocksBody({
             >
               <Text style={styles.linkText}>{b.label || 'Download PDF'}</Text>
             </TouchableOpacity>
+            </View>
           );
         }
         if (b.type === 'audioAttachment') {
           return (
-            <TouchableOpacity key={b.id || `aud-${idx}`} style={styles.linkCard} onPress={() => b.url && Linking.openURL(b.url)}>
+            <View key={b.id || `aud-${idx}`} style={styles.blockWrap}>
+            <TouchableOpacity style={styles.linkCard} onPress={() => b.url && Linking.openURL(b.url)}>
               <Text style={styles.linkText}>{b.title || 'Open Audio File'}</Text>
             </TouchableOpacity>
+            </View>
           );
         }
         if (b.type === 'divider') {
@@ -496,18 +508,22 @@ export function ContentBlocksView({
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8fafc' },
   content: { padding: 16, paddingBottom: 36 },
-  blockWrap: { marginBottom: 8 },
-  description: { color: '#475569', fontSize: 16, lineHeight: 24, marginBottom: 8 },
-  heading: { color: '#0f172a', fontWeight: '700', marginTop: 4, marginBottom: 2 },
+  /** Space after paragraphs, images, quotes — matches admin (~10px). */
+  blockWrap: { marginBottom: 10 },
+  /** Space after headings — admin marginBottom: 8. */
+  headingWrap: { marginTop: 8, marginBottom: 8 },
+  description: { color: '#475569', fontSize: 16, lineHeight: 24, marginBottom: 12 },
+  heading: { color: '#0f172a', fontWeight: '700' },
   listBlock: {
     alignSelf: 'stretch',
     marginBottom: 12,
   },
+  /** Tighter spacing only between rows inside a list (admin 6px; slightly reduced). */
   listRow: {
     fontSize: BODY_FONT,
     lineHeight: BODY_LINE,
     color: '#334155',
-    marginBottom: 6,
+    marginBottom: 4,
   },
   listGlyphInline: {
     fontSize: BODY_FONT,
@@ -515,8 +531,8 @@ const styles = StyleSheet.create({
     color: '#475569',
     fontWeight: '600',
   },
-  paragraph: { fontSize: BODY_FONT, lineHeight: BODY_LINE, marginTop: 0, marginBottom: 0 },
-  richHtmlWrap: { marginTop: 0, marginBottom: 0 },
+  paragraph: { fontSize: BODY_FONT, lineHeight: BODY_LINE, marginTop: 4, marginBottom: 0 },
+  richHtmlWrap: { marginTop: 4, marginBottom: 0 },
   mediaCard: { backgroundColor: '#fff', borderRadius: 12, padding: 8, borderWidth: 1, borderColor: '#e2e8f0' },
   image: { width: '100%', borderRadius: 10, backgroundColor: '#e2e8f0' },
   caption: { marginTop: 6, fontSize: 14, lineHeight: 20, color: '#64748b' },
