@@ -71,7 +71,12 @@ function runPurge(db) {
   };
 
   const tx = db.transaction(() => {
-    /* --- Payments & access referencing courses/combos/packages (before batch & billing teardown) --- */
+    /* --- Apply billing & payment ledger (before courses/batches/users) --- */
+    if (tableExists(db, 'razorpay_apply_due_orders')) run('DELETE FROM razorpay_apply_due_orders');
+    if (tableExists(db, 'apply_course_enquiries')) run('DELETE FROM apply_course_enquiries');
+    if (tableExists(db, 'apply_course_due_items')) run('DELETE FROM apply_course_due_items');
+    if (tableExists(db, 'apply_course_billing_profiles')) run('DELETE FROM apply_course_billing_profiles');
+    if (tableExists(db, 'payment_records')) run('DELETE FROM payment_records');
     if (tableExists(db, 'razorpay_billing_orders')) run('DELETE FROM razorpay_billing_orders');
     if (tableExists(db, 'course_access_grants')) run('DELETE FROM course_access_grants');
     if (tableExists(db, 'razorpay_course_orders')) run('DELETE FROM razorpay_course_orders');
@@ -127,6 +132,7 @@ function runPurge(db) {
     if (tableExists(db, 'batch_sessions')) run('DELETE FROM batch_sessions');
     if (tableExists(db, 'batch_members')) run('DELETE FROM batch_members');
     if (tableExists(db, 'batch_trainers')) run('DELETE FROM batch_trainers');
+    if (tableExists(db, 'batch_courses')) run('DELETE FROM batch_courses');
     if (tableExists(db, 'batches')) run('DELETE FROM batches');
 
     /* --- Modern curriculum --- */
@@ -159,6 +165,15 @@ function runPurge(db) {
     if (tableExists(db, 'courses')) run('DELETE FROM courses');
 
     /* --- Students only (keep Admin, Trainer, Creator, Lab) --- */
+    if (tableExists(db, 'sessions')) {
+      run(`DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE role = 'Student')`);
+    }
+    if (tableExists(db, 'student_profiles')) {
+      run(`DELETE FROM student_profiles WHERE user_id IN (SELECT id FROM users WHERE role = 'Student')`);
+    }
+    if (tableExists(db, 'user_profiles')) {
+      run(`DELETE FROM user_profiles WHERE user_id IN (SELECT id FROM users WHERE role = 'Student')`);
+    }
     if (tableExists(db, 'users')) {
       run(`DELETE FROM users WHERE role = 'Student'`);
     }

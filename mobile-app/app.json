@@ -18,6 +18,6 @@
       },
       "package": "com.engleash.academy"
     },
-    "packagerOpts": { "port": 8082 }
+    "packagerOpts": { "port": 8081 }
   }
 }

@@ -19,4 +19,4 @@ echo "Installing iOS pods..."
 (cd ios && pod install)
 
 echo "Building iOS app (Metro should be running: npm run start:dev-client)..."
-exec npx expo run:ios --port 8082 "$@"
+exec npx expo run:ios --port 8081 "$@"
