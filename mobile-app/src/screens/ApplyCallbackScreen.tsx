@@ -1,6 +1,5 @@
 import React from 'react';
 import { View, StyleSheet } from 'react-native';
-import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import CallbackBookingWizard from '../components/apply/CallbackBookingWizard';
 import type { ApplyCallbackNavParams } from '../lib/applyNavigation';
 
@@ -18,7 +17,6 @@ export default function ApplyCallbackScreen({ navigation, route }: any) {
 
   return (
     <View style={styles.root}>
-      <ScreenPageTitle title={params.editMode ? 'Edit your call' : 'Book a call'} />
       <CallbackBookingWizard
         params={params}
         onDone={() => {

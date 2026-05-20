@@ -307,10 +307,12 @@ router.put('/:id', auth, requireRole('Admin'), (req, res) => {
     applyInstallmentGapDays,
     applyGraceDays,
     applyEnquiryEnabled,
+    removeCover,
   } = req.body;
 
   const current = db.prepare('SELECT * FROM courses WHERE id = ?').get(req.params.id);
   if (!current) return res.status(404).json({ error: 'Course not found' });
+  const clearCover = removeCover === true || removeCover === 1 || removeCover === '1';
   const nextFeeInr = feeInr === undefined ? current.fee_inr : feeInr;
   const nextDiscountInr = discountInr === undefined ? current.discount_inr : discountInr;
   const nextEnrollmentType = enrollmentType === undefined ? current.enrollment_type : enrollmentType;
@@ -346,7 +348,7 @@ router.put('/:id', auth, requireRole('Admin'), (req, res) => {
     `UPDATE courses SET
       name = COALESCE(?, name),
       description = COALESCE(?, description),
-      image_url = COALESCE(?, image_url),
+      image_url = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, image_url) END,
       sort_order = COALESCE(?, sort_order),
       is_published = COALESCE(?, is_published),
       highlights = COALESCE(?, highlights),
@@ -370,6 +372,7 @@ router.put('/:id', auth, requireRole('Admin'), (req, res) => {
   ).run(
     name,
     description,
+    clearCover ? 1 : 0,
     image_url,
     sort_order,
     is_published,

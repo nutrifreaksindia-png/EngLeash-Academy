@@ -2,9 +2,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
-  Animated,
   Dimensions,
+  KeyboardAvoidingView,
   Modal,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -22,14 +25,13 @@ import {
   formatCallbackDateChip,
   formatCallbackDateLong,
   formatCallbackSlotRange,
-  timezoneFootnote,
 } from '../../lib/callbackTimezone';
 import type { ApplyCallbackNavParams } from '../../lib/applyNavigation';
 import { api } from '../../api/client';
 
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
-const STEPS = ['When', 'Time', 'You'] as const;
+const STEP_COUNT = 3;
 const { width: SCREEN_W } = Dimensions.get('window');
 
 type TimeSlot = { id: string; label: string };
@@ -62,7 +64,22 @@ function buildFullMessage(
   const interest = buildInterestLine(courseName, batchLabel, noOpenBatches);
   const datePart = formatCallbackDateLong(dateYmd);
   const slotPart = formatCallbackSlotRange(slotId, dateYmd).local;
-  return `${interest}\n\nPlease call me on ${datePart} between ${slotPart}.\n\n— ${name.trim()}, ${dialCode} ${phone.trim()}`;
+  return `${interest}\nCall on ${datePart}, ${slotPart}.\n${name.trim()} · ${dialCode} ${phone.trim()}`;
+}
+
+function Arrow({ dir, disabled, onPress }: { dir: 'left' | 'right'; disabled?: boolean; onPress: () => void }) {
+  return (
+    <TouchableOpacity
+      style={[styles.arrowHit, disabled && styles.arrowDisabled]}
+      onPress={onPress}
+      disabled={disabled}
+      hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+      accessibilityRole="button"
+      accessibilityLabel={dir === 'left' ? 'Previous' : 'Next'}
+    >
+      <Text style={[styles.arrowGlyph, disabled && styles.arrowGlyphDisabled]}>{dir === 'left' ? '‹' : '›'}</Text>
+    </TouchableOpacity>
+  );
 }
 
 export default function CallbackBookingWizard({ params, onDone, onCancel }: Props) {
@@ -78,10 +95,9 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
   const batchLabel =
     params.batchLabel || (batchIdNorm != null ? `Batch ${batchIdNorm}` : undefined);
   const noOpenBatches = params.noOpenBatches === true || !batchLabel;
-  const [prefillDone, setPrefillDone] = useState(!editMode);
 
+  const pagerRef = useRef<ScrollView>(null);
   const [step, setStep] = useState(0);
-  const slideX = useRef(new Animated.Value(0)).current;
   const [metaLoading, setMetaLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -101,15 +117,6 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
     return () => clearInterval(timer);
   }, []);
 
-  useEffect(() => {
-    Animated.spring(slideX, {
-      toValue: -step * SCREEN_W,
-      useNativeDriver: true,
-      tension: 68,
-      friction: 12,
-    }).start();
-  }, [step, slideX]);
-
   const rawDateOptions = useMemo(() => buildCallbackDateOptions(holidays, 7), [holidays]);
   const dateOptions = useMemo(
     () => rawDateOptions.filter((ymd) => filterCallbackTimeSlotsForDate(timeSlots, ymd, now).length > 0),
@@ -125,24 +132,98 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
     return c ? `+${c.phonecode}` : '+91';
   }, [allCountries, countryIso]);
 
-  const interestPreview = useMemo(
+  const interestMessage = useMemo(
     () => buildInterestLine(courseName, batchLabel, noOpenBatches),
     [courseName, batchLabel, noOpenBatches],
   );
 
-  const finalPreview = useMemo(() => {
-    if (!callbackDate || !callbackSlot || !displayName.trim()) return '';
-    return buildFullMessage(
-      courseName,
-      batchLabel,
-      noOpenBatches,
-      callbackDate,
-      callbackSlot,
-      displayName,
-      dialCode,
-      phoneLocal,
-    );
+  const scheduleSummary = useMemo(() => {
+    if (!callbackDate || !callbackSlot) return '';
+    const slot = formatCallbackSlotRange(callbackSlot, callbackDate);
+    return `${formatCallbackDateLong(callbackDate)} · ${slot.local}`;
+  }, [callbackDate, callbackSlot]);
+
+  const contactReady = useMemo(() => {
+    const name = displayName.trim();
+    const digits = phoneLocal.replace(/\D/g, '');
+    return name.length >= 2 && digits.length >= 6 && digits.length <= 15 && !!callbackDate && !!callbackSlot;
+  }, [displayName, phoneLocal, callbackDate, callbackSlot]);
+
+  const scrollToStep = useCallback((index: number) => {
+    const next = Math.max(0, Math.min(STEP_COUNT - 1, index));
+    setStep(next);
+    pagerRef.current?.scrollTo({ x: next * SCREEN_W, animated: true });
+  }, []);
+
+  const onPagerScrollEnd = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const x = e.nativeEvent.contentOffset.x;
+    const i = Math.round(x / SCREEN_W);
+    if (i !== step) setStep(i);
+  }, [step]);
+
+  const pickDate = useCallback(
+    (ymd: string) => {
+      setCallbackDate(ymd);
+      setCallbackSlot('');
+      setTimeout(() => scrollToStep(1), 120);
+    },
+    [scrollToStep],
+  );
+
+  const pickSlot = useCallback(
+    (slotId: string) => {
+      setCallbackSlot(slotId);
+      setTimeout(() => scrollToStep(2), 120);
+    },
+    [scrollToStep],
+  );
+
+  const submit = useCallback(async () => {
+    const name = displayName.trim();
+    const digits = phoneLocal.replace(/\D/g, '');
+    if (!contactReady) return;
+    setSubmitting(true);
+    try {
+      const note = buildFullMessage(
+        courseName,
+        batchLabel,
+        noOpenBatches,
+        callbackDate,
+        callbackSlot,
+        name,
+        dialCode,
+        digits,
+      );
+      if (editMode && enquiryId) {
+        await api.patch(`/payments/apply/enquiries/${enquiryId}`, {
+          batch_id: batchIdNorm,
+          display_name: name,
+          phone_country_code: dialCode,
+          phone_local: digits,
+          callback_date: callbackDate,
+          callback_slot: callbackSlot,
+          note,
+        });
+      } else {
+        await api.post('/payments/apply/enquiries', {
+          course_id: courseId,
+          batch_id: batchIdNorm,
+          display_name: name,
+          phone_country_code: dialCode,
+          phone_local: digits,
+          callback_date: callbackDate,
+          callback_slot: callbackSlot,
+          note,
+        });
+      }
+      setSuccess(true);
+    } catch (e: any) {
+      Alert.alert(editMode ? 'Update failed' : 'Booking failed', e?.message || 'Try again');
+    } finally {
+      setSubmitting(false);
+    }
   }, [
+    contactReady,
     courseName,
     batchLabel,
     noOpenBatches,
@@ -151,17 +232,31 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
     displayName,
     dialCode,
     phoneLocal,
+    editMode,
+    enquiryId,
+    batchIdNorm,
+    courseId,
   ]);
 
-  useEffect(() => {
-    if (!editMode || !params.initialEnquiry || prefillDone) return;
-    const e = params.initialEnquiry;
-    if (e.displayName) setDisplayName(e.displayName);
-    if (e.phoneLocal) setPhoneLocal(e.phoneLocal);
-    if (e.callbackDate) setCallbackDate(e.callbackDate);
-    if (e.callbackSlot) setCallbackSlot(e.callbackSlot);
-    setPrefillDone(true);
-  }, [editMode, params.initialEnquiry, prefillDone]);
+  const onRightArrow = useCallback(() => {
+    if (success) {
+      onDone();
+      return;
+    }
+    if (step === 0 && callbackDate) scrollToStep(1);
+    else if (step === 1 && callbackSlot) scrollToStep(2);
+  }, [success, step, callbackDate, callbackSlot, scrollToStep, onDone]);
+
+  const onLeftArrow = useCallback(() => {
+    if (success) {
+      onDone();
+      return;
+    }
+    if (step === 0) onCancel();
+    else scrollToStep(step - 1);
+  }, [success, step, scrollToStep, onCancel, onDone]);
+
+  const rightEnabled = success || (step === 0 && !!callbackDate) || (step === 1 && !!callbackSlot);
 
   useEffect(() => {
     if (!Number.isFinite(courseId)) return;
@@ -207,7 +302,6 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
           const mob = String(me?.mobile_number || '').replace(/\D/g, '');
           if (mob) setPhoneLocal(mob);
         }
-        setPrefillDone(true);
       })
       .catch(() => {
         if (!cancelled) {
@@ -224,312 +318,184 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
   }, [courseId, editMode, params.initialEnquiry]);
 
   useEffect(() => {
-    if (!dateOptions.length) return;
-    if (editMode && callbackDate && dateOptions.includes(callbackDate)) return;
-    if (!callbackDate || !dateOptions.includes(callbackDate)) {
-      setCallbackDate(dateOptions[0]);
-    }
-  }, [dateOptions, callbackDate]);
-
-  useEffect(() => {
     if (!callbackSlot) return;
     if (!availableTimeSlots.some((slot) => slot.id === callbackSlot)) {
       setCallbackSlot('');
     }
   }, [availableTimeSlots, callbackSlot]);
 
-  useEffect(() => {
-    if (availableTimeSlots.length === 1 && !callbackSlot) {
-      setCallbackSlot(availableTimeSlots[0].id);
-    }
-  }, [availableTimeSlots, callbackSlot]);
-
-  const goStep = useCallback((next: number) => {
-    setStep(Math.max(0, Math.min(2, next)));
-  }, []);
-
-  async function submit() {
-    const name = displayName.trim();
-    const digits = phoneLocal.replace(/\D/g, '');
-    if (name.length < 2) {
-      Alert.alert('Almost there', 'Please enter your name.');
-      return;
-    }
-    if (digits.length < 6 || digits.length > 15) {
-      Alert.alert('Almost there', 'Please enter a valid phone number.');
-      return;
-    }
-    if (!callbackDate || !callbackSlot) {
-      Alert.alert('Almost there', 'Please choose a date and time.');
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const note = buildFullMessage(
-        courseName,
-        batchLabel,
-        noOpenBatches,
-        callbackDate,
-        callbackSlot,
-        name,
-        dialCode,
-        digits,
-      );
-      if (editMode && enquiryId) {
-        await api.patch(`/payments/apply/enquiries/${enquiryId}`, {
-          batch_id: batchIdNorm,
-          display_name: name,
-          phone_country_code: dialCode,
-          phone_local: digits,
-          callback_date: callbackDate,
-          callback_slot: callbackSlot,
-          note,
-        });
-      } else {
-        await api.post('/payments/apply/enquiries', {
-          course_id: courseId,
-          batch_id: batchIdNorm,
-          display_name: name,
-          phone_country_code: dialCode,
-          phone_local: digits,
-          callback_date: callbackDate,
-          callback_slot: callbackSlot,
-          note,
-        });
-      }
-      setSuccess(true);
-    } catch (e: any) {
-      Alert.alert(editMode ? 'Could not update' : 'Could not book', e?.message || 'Please try again.');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   if (success) {
-    const slotLabel = formatCallbackSlotRange(callbackSlot, callbackDate);
     return (
-      <View style={[styles.page, styles.successPage, { paddingBottom: 24 + insets.bottom }]}>
-        <Text style={styles.successIcon}>✓</Text>
-        <Text style={styles.successTitle}>{editMode ? 'Call updated!' : "You're booked!"}</Text>
-        <Text style={styles.successBody}>
-          {editMode ? 'Your callback details are saved. ' : ''}
-          We&apos;ll call you on {formatCallbackDateLong(callbackDate)} between {slotLabel.local}.
-          {slotLabel.ist ? `\n(${slotLabel.ist})` : ''}
-        </Text>
-        <Text style={styles.privacyLine}>We only use your details for this callback.</Text>
-        <TouchableOpacity style={styles.btnPrimary} onPress={onDone}>
-          <Text style={styles.btnPrimaryText}>Done</Text>
-        </TouchableOpacity>
+      <View style={[styles.page, { paddingBottom: insets.bottom }]}>
+        <View style={styles.topHeader}>
+          <Text style={styles.topTitle}>Book a call back — We&apos;ll reach you!</Text>
+          <Text style={styles.messageLabel}>Your message is:</Text>
+          <Text style={styles.interestLine}>{interestMessage}</Text>
+        </View>
+        <View style={styles.navRow}>
+          <Arrow dir="left" onPress={onDone} />
+          <View style={styles.dotsRow}>
+            {[0, 1, 2].map((i) => (
+              <View key={i} style={[styles.dot, styles.dotDone]} />
+            ))}
+          </View>
+          <Arrow dir="right" onPress={onDone} />
+        </View>
+        <View style={styles.successBody}>
+          <Text style={styles.successMark}>✓</Text>
+          <Text style={styles.successTitle}>{editMode ? 'Updated' : 'Booked'}</Text>
+          <Text style={styles.successSub}>{scheduleSummary}</Text>
+        </View>
       </View>
     );
   }
 
-  const canContinueStep0 = !!callbackDate && dateOptions.length > 0;
-  const canContinueStep1 = !!callbackSlot && availableTimeSlots.length > 0;
-
   return (
-    <View style={[styles.page, { paddingBottom: 12 + insets.bottom }]}>
-      <View style={styles.progressRow}>
-        {STEPS.map((label, i) => (
-          <View key={label} style={styles.progressItem}>
-            <View style={[styles.progressDot, i < step && styles.progressDotOn, i === step && styles.progressDotCurrent]}>
-              <Text
-                style={[
-                  styles.progressDotText,
-                  i < step && styles.progressDotTextOn,
-                  i === step && styles.progressDotTextCurrent,
-                ]}
-              >
-                {i + 1}
-              </Text>
-            </View>
-            <Text style={[styles.progressLabel, i === step && styles.progressLabelOn]}>{label}</Text>
+    <KeyboardAvoidingView
+      style={[styles.page, { paddingBottom: insets.bottom }]}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <View style={styles.topHeader}>
+        <Text style={styles.topTitle}>Book a call back — We&apos;ll reach you!</Text>
+        <Text style={styles.messageLabel}>Your message is:</Text>
+        <Text style={styles.interestLine}>{interestMessage}</Text>
+      </View>
+
+      <View style={styles.navRow}>
+        <Arrow dir="left" onPress={onLeftArrow} />
+        <View style={styles.dotsRow}>
+          {[0, 1, 2].map((i) => (
+            <View key={i} style={[styles.dot, i === step && styles.dotActive, i < step && styles.dotDone]} />
+          ))}
+        </View>
+        {submitting && step === 2 ? (
+          <View style={styles.arrowHit}>
+            <ActivityIndicator color={BRAND_RED} size="small" />
           </View>
-        ))}
+        ) : (
+          <Arrow dir="right" disabled={!rightEnabled} onPress={onRightArrow} />
+        )}
       </View>
 
       {metaLoading ? (
         <View style={styles.loadingWrap}>
           <ActivityIndicator size="large" color={BRAND_RED} />
-          <Text style={styles.loadingText}>Loading available times…</Text>
         </View>
       ) : (
-        <>
-          <View style={styles.pagerClip}>
-            <Animated.View style={[styles.pagerTrack, { width: SCREEN_W * 3, transform: [{ translateX: slideX }] }]}>
-              {/* Step 1 — When */}
-              <ScrollView
-                style={{ width: SCREEN_W }}
-                contentContainerStyle={styles.stepScroll}
-                keyboardShouldPersistTaps="handled"
-                showsVerticalScrollIndicator={false}
-              >
-                <View style={styles.card}>
-                  <Text style={styles.stepTitle}>
-                    {editMode ? 'Update your booked call' : "Let's find a time that works for you"}
-                  </Text>
-                  {editMode ? (
-                    <Text style={styles.stepSub}>Change your preferred date below. You already have one call booked for this course.</Text>
-                  ) : null}
-                  <View style={styles.bubble}>
-                    <Text style={styles.bubbleText}>{interestPreview}</Text>
-                    <Text style={styles.bubbleText}>Please call me on…</Text>
-                  </View>
-                  <Text style={styles.fieldLabel}>Choose a day</Text>
-                  <Text style={styles.tzHint}>{timezoneFootnote()}</Text>
-                  {dateOptions.length === 0 ? (
-                    <Text style={styles.warn}>No slots this week. Please try again in a day or two.</Text>
-                  ) : (
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
-                      {dateOptions.map((ymd) => (
-                        <TouchableOpacity
-                          key={ymd}
-                          style={[styles.chip, callbackDate === ymd && styles.chipOn]}
-                          onPress={() => setCallbackDate(ymd)}
-                        >
-                          <Text style={[styles.chipText, callbackDate === ymd && styles.chipTextOn]}>
-                            {formatCallbackDateChip(ymd)}
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </ScrollView>
-                  )}
-                </View>
-              </ScrollView>
-
-              {/* Step 2 — Time */}
-              <ScrollView
-                style={{ width: SCREEN_W }}
-                contentContainerStyle={styles.stepScroll}
-                keyboardShouldPersistTaps="handled"
-                showsVerticalScrollIndicator={false}
-              >
-                <View style={styles.card}>
-                  <Text style={styles.stepTitle}>What time suits you?</Text>
-                  <View style={styles.bubble}>
-                    <Text style={styles.bubbleText}>{interestPreview}</Text>
-                    <Text style={styles.bubbleText}>
-                      Please call me on{' '}
-                      <Text style={styles.bubbleStrong}>
-                        {callbackDate ? formatCallbackDateLong(callbackDate) : '…'}
-                      </Text>{' '}
-                      between
-                    </Text>
-                  </View>
-                  {availableTimeSlots.length === 0 ? (
-                    <Text style={styles.warn}>No times left on this day. Go back and pick another day.</Text>
-                  ) : (
-                    <View style={styles.slotGrid}>
-                      {availableTimeSlots.map((slot) => {
-                        const range = formatCallbackSlotRange(slot.id, callbackDate);
-                        const on = callbackSlot === slot.id;
-                        return (
-                          <TouchableOpacity
-                            key={slot.id}
-                            style={[styles.slotBtn, on && styles.slotBtnOn]}
-                            onPress={() => setCallbackSlot(slot.id)}
-                          >
-                            <Text style={[styles.slotText, on && styles.slotTextOn]}>{range.local}</Text>
-                            {range.ist ? <Text style={styles.slotIst}>{range.ist}</Text> : null}
-                          </TouchableOpacity>
-                        );
-                      })}
-                    </View>
-                  )}
-                  <Text style={styles.microHint}>We&apos;ll call within the hour you choose.</Text>
-                </View>
-              </ScrollView>
-
-              {/* Step 3 — You */}
-              <ScrollView
-                style={{ width: SCREEN_W }}
-                contentContainerStyle={styles.stepScroll}
-                keyboardShouldPersistTaps="handled"
-                showsVerticalScrollIndicator={false}
-              >
-                <View style={styles.card}>
-                  <Text style={styles.stepTitle}>Almost done — how should we reach you?</Text>
-                  <Text style={styles.stepSub}>
-                    Takes under a minute. Your details stay private and are only used for this callback.
-                  </Text>
-                  <Text style={styles.fieldLabel}>My name is</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={displayName}
-                    onChangeText={setDisplayName}
-                    placeholder="Your full name"
-                    placeholderTextColor="#94a3b8"
-                  />
-                  <Text style={styles.fieldLabel}>Call my number</Text>
-                  <View style={styles.phoneRow}>
-                    <TouchableOpacity style={styles.codeBtn} onPress={() => setCountryModal(true)}>
-                      <Text style={styles.codeBtnText}>{dialCode}</Text>
+        <ScrollView
+          ref={pagerRef}
+          horizontal
+          pagingEnabled
+          showsHorizontalScrollIndicator={false}
+          onMomentumScrollEnd={onPagerScrollEnd}
+          scrollEventThrottle={16}
+          keyboardShouldPersistTaps="handled"
+          style={styles.pager}
+        >
+          {/* Day */}
+          <View style={[styles.slide, { width: SCREEN_W }]}>
+            <Text style={styles.slideTitle}>Call me on</Text>
+            {dateOptions.length === 0 ? (
+              <Text style={styles.empty}>No slots this week</Text>
+            ) : (
+              <ScrollView style={styles.listFill} contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
+                {dateOptions.map((ymd) => {
+                  const on = callbackDate === ymd;
+                  return (
+                    <TouchableOpacity
+                      key={ymd}
+                      style={[styles.optionRow, on && styles.optionRowOn]}
+                      onPress={() => pickDate(ymd)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.optionText, on && styles.optionTextOn]}>{formatCallbackDateChip(ymd)}</Text>
                     </TouchableOpacity>
-                    <TextInput
-                      style={[styles.input, styles.phoneInput]}
-                      value={phoneLocal}
-                      onChangeText={(t) => setPhoneLocal(t.replace(/[^\d\s-]/g, ''))}
-                      placeholder="Mobile number"
-                      keyboardType="phone-pad"
-                      placeholderTextColor="#94a3b8"
-                    />
-                  </View>
-                  {finalPreview ? (
-                    <View style={styles.previewCard}>
-                      <Text style={styles.previewLabel}>Your request</Text>
-                      <Text style={styles.previewBody}>{finalPreview}</Text>
-                    </View>
-                  ) : null}
-                </View>
+                  );
+                })}
               </ScrollView>
-            </Animated.View>
+            )}
           </View>
 
-          <Text style={styles.privacyLine}>We only use this to call you about this course. No spam.</Text>
-
-          <View style={styles.footer}>
-            {step > 0 ? (
-              <TouchableOpacity style={styles.btnOutline} onPress={() => goStep(step - 1)} disabled={submitting}>
-                <Text style={styles.btnOutlineText}>Back</Text>
-              </TouchableOpacity>
+          {/* Time */}
+          <View style={[styles.slide, { width: SCREEN_W }]}>
+            <Text style={styles.slideTitle}>Call me between</Text>
+            {availableTimeSlots.length === 0 ? (
+              <Text style={styles.empty}>Pick another day</Text>
             ) : (
-              <TouchableOpacity style={styles.btnOutline} onPress={onCancel} disabled={submitting}>
-                <Text style={styles.btnOutlineText}>Cancel</Text>
-              </TouchableOpacity>
+              <ScrollView style={styles.listFill} contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
+                {availableTimeSlots.map((slot) => {
+                  const range = formatCallbackSlotRange(slot.id, callbackDate);
+                  const on = callbackSlot === slot.id;
+                  return (
+                    <TouchableOpacity
+                      key={slot.id}
+                      style={[styles.optionRow, on && styles.optionRowOn]}
+                      onPress={() => pickSlot(slot.id)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.optionText, on && styles.optionTextOn]}>{range.local}</Text>
+                      {range.ist ? <Text style={[styles.optionSub, on && styles.optionSubOn]}>{range.ist}</Text> : null}
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
             )}
-            {step < 2 ? (
+          </View>
+
+          {/* Contact */}
+          <View style={[styles.slide, { width: SCREEN_W }]}>
+            <View style={styles.formFill}>
+              <Text style={styles.slideTitle}>My name is</Text>
+              <TextInput
+                style={styles.field}
+                value={displayName}
+                onChangeText={setDisplayName}
+                placeholder="Name"
+                placeholderTextColor="#94a3b8"
+                autoCapitalize="words"
+                returnKeyType="next"
+              />
+              <Text style={[styles.slideTitle, styles.slideTitleSpaced]}>My number is</Text>
+              <View style={styles.phoneRow}>
+                <TouchableOpacity style={styles.codeTap} onPress={() => setCountryModal(true)}>
+                  <Text style={styles.codeTapText}>{dialCode}</Text>
+                </TouchableOpacity>
+                <TextInput
+                  style={[styles.field, styles.phoneField]}
+                  value={phoneLocal}
+                  onChangeText={(t) => setPhoneLocal(t.replace(/[^\d\s-]/g, ''))}
+                  placeholder="Mobile"
+                  keyboardType="phone-pad"
+                  placeholderTextColor="#94a3b8"
+                  returnKeyType="done"
+                  onSubmitEditing={() => {
+                    if (contactReady && !submitting) void submit();
+                  }}
+                />
+              </View>
+            </View>
+            <View style={styles.finishBlock}>
+              {scheduleSummary ? <Text style={styles.scheduleAboveBtn}>{scheduleSummary}</Text> : null}
               <TouchableOpacity
-                style={[
-                  styles.btnPrimary,
-                  styles.btnPrimaryFlex,
-                  (step === 0 && !canContinueStep0) || (step === 1 && !canContinueStep1) ? styles.btnDisabled : null,
-                ]}
-                disabled={(step === 0 && !canContinueStep0) || (step === 1 && !canContinueStep1)}
-                onPress={() => goStep(step + 1)}
-              >
-                <Text style={styles.btnPrimaryText}>Continue</Text>
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity
-                style={[styles.btnPrimary, styles.btnPrimaryFlex, submitting && styles.btnDisabled]}
+                style={[styles.finishBtn, (!contactReady || submitting) && styles.finishBtnDisabled]}
                 onPress={() => void submit()}
-                disabled={submitting}
+                disabled={!contactReady || submitting}
+                activeOpacity={0.85}
               >
                 {submitting ? (
                   <ActivityIndicator color="#fff" />
                 ) : (
-                  <Text style={styles.btnPrimaryText}>{editMode ? 'Save changes' : 'Request my call'}</Text>
+                  <Text style={styles.finishBtnText}>{editMode ? 'Update call back' : 'Book call back'}</Text>
                 )}
               </TouchableOpacity>
-            )}
+            </View>
           </View>
-        </>
+        </ScrollView>
       )}
 
       <Modal visible={countryModal} animationType="fade" transparent onRequestClose={() => setCountryModal(false)}>
         <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setCountryModal(false)}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Country code</Text>
+          <View style={styles.modalSheet}>
             <ScrollView style={{ maxHeight: 360 }}>
               {allCountries.map((c) => (
                 <TouchableOpacity
@@ -540,155 +506,139 @@ export default function CallbackBookingWizard({ params, onDone, onCancel }: Prop
                     setCountryModal(false);
                   }}
                 >
-                  <Text style={styles.modalRowText}>{`+${c.phonecode} — ${c.name}`}</Text>
+                  <Text style={styles.modalRowText}>{`+${c.phonecode}`}</Text>
                 </TouchableOpacity>
               ))}
             </ScrollView>
           </View>
         </TouchableOpacity>
       </Modal>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   page: { flex: 1, backgroundColor: '#f5f5f5' },
-  successPage: { justifyContent: 'center', alignItems: 'center', padding: 28 },
-  successIcon: { fontSize: 48, color: '#166534', marginBottom: 12 },
-  successTitle: { fontSize: 22, fontWeight: '800', color: BRAND_BLUE, marginBottom: 10 },
-  successBody: { fontSize: 15, lineHeight: 22, color: '#334155', textAlign: 'center', marginBottom: 12 },
-  progressRow: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 8, paddingBottom: 4 },
-  progressItem: { alignItems: 'center', flex: 1 },
-  progressDot: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#e2e8f0',
+  topHeader: {
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 10,
+  },
+  topTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: BRAND_BLUE,
+    lineHeight: 24,
+  },
+  messageLabel: {
+    marginTop: 12,
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#64748b',
+  },
+  interestLine: {
+    marginTop: 6,
+    fontSize: 15,
+    lineHeight: 22,
+    color: '#334155',
+  },
+  navRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    minHeight: 48,
+  },
+  arrowHit: {
+    width: 48,
+    height: 48,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  progressDotOn: { backgroundColor: '#c7d2fe' },
-  progressDotCurrent: { backgroundColor: BRAND_BLUE },
-  progressDotText: { fontSize: 12, fontWeight: '700', color: '#64748b' },
-  progressDotTextOn: { color: BRAND_BLUE },
-  progressDotTextCurrent: { color: '#fff' },
-  progressLabel: { fontSize: 11, color: '#94a3b8', marginTop: 4, fontWeight: '600' },
-  progressLabelOn: { color: BRAND_BLUE },
-  loadingWrap: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
-  loadingText: { color: '#64748b', fontSize: 14 },
-  pagerClip: { flex: 1, overflow: 'hidden' },
-  pagerTrack: { flexDirection: 'row', flex: 1 },
-  stepScroll: { paddingHorizontal: 16, paddingBottom: 16 },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#e8eaf6',
-    shadowColor: '#0f172a',
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
-  },
-  stepTitle: { fontSize: 18, fontWeight: '800', color: '#0f172a', marginBottom: 12 },
-  stepSub: { fontSize: 14, lineHeight: 20, color: '#64748b', marginBottom: 14 },
-  bubble: {
-    backgroundColor: '#f8fafc',
-    borderRadius: 12,
-    padding: 14,
-    borderLeftWidth: 4,
-    borderLeftColor: BRAND_BLUE,
-    marginBottom: 16,
-  },
-  bubbleText: { fontSize: 15, lineHeight: 22, color: '#334155' },
-  bubbleStrong: { fontWeight: '700', color: BRAND_BLUE },
-  fieldLabel: { fontSize: 13, fontWeight: '700', color: '#0f172a', marginBottom: 6 },
-  tzHint: { fontSize: 12, color: '#94a3b8', marginBottom: 10 },
-  microHint: { fontSize: 12, color: '#64748b', marginTop: 10 },
-  warn: { fontSize: 13, color: '#b45309', lineHeight: 18 },
-  chipScroll: { marginBottom: 4 },
-  chip: {
-    borderWidth: 1,
-    borderColor: '#cbd5e1',
-    borderRadius: 999,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    marginRight: 8,
-    backgroundColor: '#fff',
-  },
-  chipOn: { backgroundColor: BRAND_BLUE, borderColor: BRAND_BLUE },
-  chipText: { fontSize: 13, color: '#334155', fontWeight: '600' },
-  chipTextOn: { color: '#fff' },
-  slotGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  slotBtn: {
-    width: (SCREEN_W - 32 - 32 - 8) / 2,
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 10,
-    backgroundColor: '#fafbff',
-  },
-  slotBtnOn: { borderColor: BRAND_BLUE, backgroundColor: '#eef2ff' },
-  slotText: { fontSize: 14, fontWeight: '600', color: '#334155' },
-  slotTextOn: { color: BRAND_BLUE },
-  slotIst: { fontSize: 11, color: '#64748b', marginTop: 4 },
-  input: {
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 15,
-    color: '#0f172a',
+  arrowDisabled: { opacity: 0.25 },
+  arrowGlyph: { fontSize: 36, fontWeight: '300', color: BRAND_BLUE, lineHeight: 40 },
+  arrowGlyphDisabled: { color: '#cbd5e1' },
+  dotsRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#cbd5e1' },
+  dotActive: { backgroundColor: BRAND_RED, width: 10, height: 10, borderRadius: 5 },
+  dotDone: { backgroundColor: BRAND_BLUE },
+  loadingWrap: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  pager: { flex: 1 },
+  slide: { flex: 1, paddingHorizontal: 20, paddingTop: 8 },
+  slideTitle: {
+    fontSize: 28,
+    fontWeight: '800',
+    color: BRAND_BLUE,
     marginBottom: 12,
-    backgroundColor: '#fff',
+    letterSpacing: -0.5,
   },
-  phoneRow: { flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 12 },
-  codeBtn: {
-    borderWidth: 1,
-    borderColor: BRAND_BLUE,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: '#fff',
+  slideTitleSpaced: {
+    marginTop: 8,
+    marginBottom: 10,
   },
-  codeBtnText: { fontWeight: '700', color: BRAND_BLUE, fontSize: 14 },
-  phoneInput: { flex: 1, marginBottom: 0 },
-  previewCard: {
-    backgroundColor: '#f0fdf4',
+  listFill: { flex: 1 },
+  listContent: { paddingBottom: 24, gap: 10 },
+  optionRow: {
+    paddingVertical: 18,
+    paddingHorizontal: 16,
     borderRadius: 12,
-    padding: 12,
+    backgroundColor: '#fff',
     borderWidth: 1,
-    borderColor: '#bbf7d0',
-    marginTop: 4,
+    borderColor: '#e2e8f0',
   },
-  previewLabel: { fontSize: 11, fontWeight: '700', color: '#166534', marginBottom: 6, textTransform: 'uppercase' },
-  previewBody: { fontSize: 14, lineHeight: 20, color: '#14532d' },
-  privacyLine: { fontSize: 12, color: '#64748b', textAlign: 'center', paddingHorizontal: 20, marginTop: 4 },
-  footer: {
-    flexDirection: 'row',
-    gap: 10,
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    alignItems: 'center',
-  },
-  btnOutline: {
-    borderWidth: 1.5,
+  optionRowOn: {
+    backgroundColor: BRAND_BLUE,
     borderColor: BRAND_BLUE,
-    borderRadius: 10,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
   },
-  btnOutlineText: { color: BRAND_BLUE, fontWeight: '700', fontSize: 14 },
-  btnPrimary: { backgroundColor: BRAND_RED, borderRadius: 10, paddingVertical: 12, paddingHorizontal: 20 },
-  btnPrimaryFlex: { flex: 1, alignItems: 'center' },
-  btnPrimaryText: { color: '#fff', fontWeight: '700', fontSize: 14 },
-  btnDisabled: { opacity: 0.45 },
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'center', padding: 20 },
-  modalCard: { backgroundColor: '#fff', borderRadius: 12, padding: 12, maxHeight: '70%' },
-  modalTitle: { fontWeight: '800', fontSize: 16, marginBottom: 8, color: BRAND_BLUE },
-  modalRow: { paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#e2e8f0' },
-  modalRowText: { fontSize: 14, color: '#0f172a' },
+  optionText: { fontSize: 17, fontWeight: '600', color: '#1e293b' },
+  optionTextOn: { color: '#fff' },
+  optionSub: { fontSize: 12, color: '#64748b', marginTop: 4 },
+  optionSubOn: { color: '#e0e7ff' },
+  empty: { fontSize: 15, color: '#94a3b8', marginTop: 8 },
+  formFill: { flex: 1, gap: 14 },
+  field: {
+    borderBottomWidth: 2,
+    borderBottomColor: '#cbd5e1',
+    paddingVertical: 14,
+    fontSize: 20,
+    fontWeight: '600',
+    color: '#0f172a',
+  },
+  phoneRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  codeTap: { paddingVertical: 14, paddingRight: 4, borderBottomWidth: 2, borderBottomColor: BRAND_BLUE },
+  codeTapText: { fontSize: 20, fontWeight: '700', color: BRAND_BLUE },
+  phoneField: { flex: 1 },
+  finishBlock: {
+    paddingTop: 12,
+    paddingBottom: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#e2e8f0',
+  },
+  scheduleAboveBtn: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: BRAND_BLUE,
+    textAlign: 'center',
+    marginBottom: 12,
+    lineHeight: 21,
+  },
+  finishBtn: {
+    backgroundColor: BRAND_RED,
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 52,
+  },
+  finishBtnDisabled: { opacity: 0.45 },
+  finishBtnText: { color: '#fff', fontSize: 17, fontWeight: '800' },
+  successBody: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 32 },
+  successMark: { fontSize: 56, color: '#166534', marginBottom: 12 },
+  successTitle: { fontSize: 32, fontWeight: '800', color: BRAND_BLUE },
+  successSub: { fontSize: 16, color: '#64748b', marginTop: 8, textAlign: 'center' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'flex-end' },
+  modalSheet: { backgroundColor: '#fff', borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 16, maxHeight: '50%' },
+  modalRow: { paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#e2e8f0' },
+  modalRowText: { fontSize: 17, fontWeight: '600', color: '#0f172a' },
 });

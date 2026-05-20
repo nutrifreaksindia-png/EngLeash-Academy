@@ -580,6 +580,7 @@ export default function App() {
           applyGraceDays: Number(payload.applyGraceDays ?? 7),
           applyEnquiryEnabled: payload.applyEnquiryEnabled !== false,
           is_published: payload.isPublished === false ? 0 : 1,
+          removeCover: payload.coverRemoved === true,
         }),
       });
       await uploadCourseCover(payload.id, token, payload.coverBlob);

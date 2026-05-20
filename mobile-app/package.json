@@ -15,7 +15,8 @@
     "run:android:server": "/Users/manuelamalraj/Library/Android/sdk/platform-tools/adb reverse tcp:8081 tcp:8081 || true; /Users/manuelamalraj/Library/Android/sdk/platform-tools/adb reverse tcp:8082 tcp:8082 || true; REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1 expo run:android",
     "run:android:local": "/Users/manuelamalraj/Library/Android/sdk/platform-tools/adb reverse tcp:3001 tcp:3001 || true; /Users/manuelamalraj/Library/Android/sdk/platform-tools/adb reverse tcp:8081 tcp:8081 || true; /Users/manuelamalraj/Library/Android/sdk/platform-tools/adb reverse tcp:8082 tcp:8082 || true; EXPO_PUBLIC_USE_LOCAL_API=1 REACT_NATIVE_PACKAGER_HOSTNAME=127.0.0.1 expo run:android",
     "logs:android": "bash scripts/android-live-logs.sh",
-    "run:ios": "expo run:ios",
+    "run:ios": "bash scripts/run-ios.sh",
+    "run:ios:device": "bash scripts/run-ios.sh --device",
     "test": "jest",
     "generate-icon": "node scripts/generate-icon.js",
     "generate-tv-icon": "node scripts/generate-tv-icon.js"

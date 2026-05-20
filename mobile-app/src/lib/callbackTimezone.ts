@@ -34,11 +34,35 @@ function istSlotInstantMs(ymd: string, hour: number): number {
   return Date.UTC(y, mo - 1, d, hour - 5, -30, 0);
 }
 
-const timeFmt = new Intl.DateTimeFormat(undefined, {
-  hour: 'numeric',
-  minute: '2-digit',
-  hour12: true,
-});
+/** IST wall-clock hour (10–19) → "10 a.m.", "12 p.m.", "1 p.m.", etc. */
+export function formatCallbackWallHour(hour: number): string {
+  const h12 = hour % 12 || 12;
+  const isPm = hour >= 12;
+  return `${h12} ${isPm ? 'p.m.' : 'a.m.'}`;
+}
+
+function formatCallbackInstant(d: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).formatToParts(d);
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value);
+  const dayPeriod = parts.find((p) => p.type === 'dayPeriod')?.value?.toLowerCase();
+  if (!Number.isFinite(hour)) return '';
+  const suffix = dayPeriod === 'pm' ? 'p.m.' : 'a.m.';
+  if (minute === 0) return `${hour} ${suffix}`;
+  const mm = String(minute).padStart(2, '0');
+  return `${hour}:${mm} ${suffix}`;
+}
+
+function formatIstSlotRangeLabel(slotId: string): string {
+  const hours = parseSlotHours(slotId);
+  if (!hours) return slotId;
+  return `${formatCallbackWallHour(hours.startHour)} - ${formatCallbackWallHour(hours.endHour)}`;
+}
 
 const dateFmt = new Intl.DateTimeFormat(undefined, {
   weekday: 'short',
@@ -71,21 +95,23 @@ export function formatCallbackSlotRange(
   timeZone = deviceTimeZone(),
 ): { local: string; ist?: string } {
   const hours = parseSlotHours(slotId);
-  if (!hours || !ymd) return { local: slotId };
+  if (!hours) return { local: formatIstSlotRangeLabel(slotId) };
+
+  // Slots are IST wall hours; skip conversion when date is unknown or user is on IST.
+  if (!ymd || isUserInIst() || timeZone === ACADEMY_TZ) {
+    return { local: formatIstSlotRangeLabel(slotId) };
+  }
+
   const startMs = istSlotInstantMs(ymd, hours.startHour);
   const endMs = istSlotInstantMs(ymd, hours.endHour);
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return { local: slotId };
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+    return { local: formatIstSlotRangeLabel(slotId) };
+  }
 
-  const local = `${timeFmt.format(new Date(startMs))} – ${timeFmt.format(new Date(endMs))}`;
-  if (isUserInIst() || timeZone === ACADEMY_TZ) return { local };
-
-  const istFmt = new Intl.DateTimeFormat('en-IN', {
-    timeZone: ACADEMY_TZ,
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
-  const ist = `${istFmt.format(new Date(startMs))} – ${istFmt.format(new Date(endMs))} IST`;
+  const start = new Date(startMs);
+  const end = new Date(endMs);
+  const local = `${formatCallbackInstant(start, timeZone)} - ${formatCallbackInstant(end, timeZone)}`;
+  const ist = `${formatCallbackInstant(start, ACADEMY_TZ)} - ${formatCallbackInstant(end, ACADEMY_TZ)} IST`;
   return { local, ist };
 }
 

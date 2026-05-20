@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import SectionCard from '../components/SectionCard';
 import Modal from '../components/Modal';
 import RichTextField from '../components/RichTextField';
@@ -25,6 +25,8 @@ const emptyForm = {
   isPublished: true,
   coverBlob: null,
   coverPreviewUrl: '',
+  coverRemoved: false,
+  existingImageUrl: '',
   /** Curriculum: day_wise = calendar unlock; unlock_all = self-paced access to all lessons in period */
   progressionType: 'unlock_all',
   applyRegistrationFeeInr: 999,
@@ -159,6 +161,10 @@ function resolveCoverPreviewUrl(url) {
   return `${base}${url.startsWith('/') ? '' : '/'}${url}`;
 }
 
+function revokeBlobUrl(url) {
+  if (url && String(url).startsWith('blob:')) URL.revokeObjectURL(url);
+}
+
 async function optimizeCoverImage(file) {
   const srcUrl = URL.createObjectURL(file);
   try {
@@ -232,6 +238,12 @@ export default function CoursesPage({
   const [scheduleRows, setScheduleRows] = useState([]);
   const [scheduleLoading, setScheduleLoading] = useState(false);
   const [scheduleSavingMapId, setScheduleSavingMapId] = useState(null);
+  const coverInputRef = useRef(null);
+  const [coverPreviewBroken, setCoverPreviewBroken] = useState(false);
+
+  useEffect(() => {
+    setCoverPreviewBroken(false);
+  }, [open, form.id, form.coverPreviewUrl]);
 
   const libraryLessons = useMemo(
     () => (library || []).filter((l) => l.source !== 'legacy_lessons' && Number.isFinite(Number(l.id))),
@@ -280,6 +292,8 @@ export default function CoursesPage({
       isPublished: c.is_published !== 0 && c.is_published !== false,
       coverBlob: null,
       coverPreviewUrl: resolveCoverPreviewUrl(c.image_url),
+      coverRemoved: false,
+      existingImageUrl: c.image_url || '',
     });
     setOpen(true);
   }
@@ -348,6 +362,8 @@ export default function CoursesPage({
       isPublished: c.is_published !== 0 && c.is_published !== false,
       coverBlob: null,
       coverPreviewUrl: resolveCoverPreviewUrl(c.image_url),
+      coverRemoved: false,
+      existingImageUrl: c.image_url || '',
       progressionType: String(c.progression_type || '').toLowerCase() === 'day_wise' ? 'day_wise' : 'unlock_all',
     });
   }
@@ -384,7 +400,25 @@ export default function CoursesPage({
   async function onCoverFileChange(file) {
     if (!file) return;
     const { blob, previewUrl } = await optimizeCoverImage(file);
-    setForm((prev) => ({ ...prev, coverBlob: blob, coverPreviewUrl: previewUrl }));
+    setForm((prev) => {
+      revokeBlobUrl(prev.coverPreviewUrl);
+      return { ...prev, coverBlob: blob, coverPreviewUrl: previewUrl, coverRemoved: false };
+    });
+    setCoverPreviewBroken(false);
+    if (coverInputRef.current) coverInputRef.current.value = '';
+  }
+
+  function removeCoverPhoto() {
+    setForm((prev) => {
+      revokeBlobUrl(prev.coverPreviewUrl);
+      return { ...prev, coverBlob: null, coverPreviewUrl: '', coverRemoved: true };
+    });
+    setCoverPreviewBroken(false);
+    if (coverInputRef.current) coverInputRef.current.value = '';
+  }
+
+  function triggerCoverPicker() {
+    coverInputRef.current?.click();
   }
 
   async function reloadScheduleForCourse(courseId) {
@@ -753,20 +787,50 @@ export default function CoursesPage({
           </div>
 
           <div className="courseFormField">
-            <label className="fieldLabel" htmlFor="course-cover">
-              Cover photo (16:9)
-            </label>
-            <p className="fieldHint">Image is auto-cropped and optimized to 1280x720 during upload.</p>
+            <span className="fieldLabel">Cover photo (16:9)</span>
+            <p className="fieldHint">Auto-cropped to 1280×720 on upload. Shown on the app home screen and course listings.</p>
             <input
+              ref={coverInputRef}
               id="course-cover"
-              className="courseInput"
+              className="srOnly"
               type="file"
               accept="image/*"
-              onChange={(e) => onCoverFileChange(e.target.files?.[0])}
+              onChange={(e) => void onCoverFileChange(e.target.files?.[0])}
             />
             {form.coverPreviewUrl ? (
-              <img src={form.coverPreviewUrl} alt="Course cover preview" className="coverPreviewImg" />
-            ) : null}
+              <div className="coverPreviewWrap">
+                {coverPreviewBroken ? (
+                  <div className="coverPreviewMissing" role="img" aria-label="Cover photo unavailable">
+                    <span>Cover photo unavailable on server</span>
+                    {form.existingImageUrl ? (
+                      <span className="coverPreviewMissingPath">{resolveCoverPreviewUrl(form.existingImageUrl)}</span>
+                    ) : null}
+                  </div>
+                ) : (
+                  <img
+                    src={form.coverPreviewUrl}
+                    alt="Course cover preview"
+                    className="coverPreviewImg"
+                    onError={() => setCoverPreviewBroken(true)}
+                  />
+                )}
+                <div className="coverPreviewActions">
+                  <button type="button" className="secondaryBtn" onClick={triggerCoverPicker}>
+                    Change photo
+                  </button>
+                  <button type="button" className="dangerBtn" onClick={removeCoverPhoto}>
+                    Remove photo
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="coverPreviewEmpty">
+                <p className="fieldHint">No cover photo yet.</p>
+                <button type="button" className="secondaryBtn" onClick={triggerCoverPicker}>
+                  Upload cover photo
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="courseFormField">

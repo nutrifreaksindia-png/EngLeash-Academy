@@ -64,7 +64,7 @@ function HomeStackNavigator() {
           title: route.params?.course?.name ? `Apply — ${route.params.course.name}` : 'Apply',
         })}
       />
-      <HomeStack.Screen name="ApplyCallback" component={ApplyCallbackScreen} options={{ title: 'Book a call' }} />
+      <HomeStack.Screen name="ApplyCallback" component={ApplyCallbackScreen} options={{ title: '' }} />
       <HomeStack.Screen name="CoursePurchaseSummary" component={CoursePurchaseSummaryScreen} options={{ title: 'Purchase' }} />
       <HomeStack.Screen
         name="CourseSubscribePackages"
