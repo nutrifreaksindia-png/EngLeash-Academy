@@ -43,6 +43,7 @@ const {
   preparePartSchedule,
   settleDueItem,
   updateApplyEnquiryStatus,
+  deleteApplyEnquiry,
 } = require('../lib/applyBilling');
 const {
   CALLBACK_TIME_SLOTS,
@@ -639,6 +640,14 @@ router.patch('/admin/apply-enquiries/:id', auth, requireRole('Admin', 'Trainer',
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
   const result = updateApplyEnquiryStatus(id, req.body?.status);
+  if (!result.ok) return res.status(result.error === 'Not found' ? 404 : 400).json({ error: result.error });
+  res.json({ ok: true });
+});
+
+router.delete('/admin/apply-enquiries/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+  const result = deleteApplyEnquiry(id);
   if (!result.ok) return res.status(result.error === 'Not found' ? 404 : 400).json({ error: result.error });
   res.json({ ok: true });
 });

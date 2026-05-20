@@ -965,6 +965,15 @@ export default function App() {
     pushToast('Lead updated', 'success');
   }
 
+  async function deleteApplyLead(id) {
+    await apiFetch(`/payments/admin/apply-enquiries/${id}`, token, {
+      method: 'DELETE',
+    });
+    const data = await apiFetch('/payments/admin/apply-enquiries', token);
+    setApplyLeads(Array.isArray(data) ? data : []);
+    pushToast('Lead deleted', 'success');
+  }
+
   async function startBatch(batchId, startDate) {
     const id = batchId ?? selectedBatchId;
     if (!id) return;
@@ -1372,7 +1381,7 @@ export default function App() {
       />
     );
   } else if (currentPage === 'leads') {
-    page = <LeadsPage leads={applyLeads} onUpdateStatus={updateApplyLeadStatus} />;
+    page = <LeadsPage leads={applyLeads} onUpdateStatus={updateApplyLeadStatus} onDeleteLead={deleteApplyLead} />;
   } else if (currentPage === 'courses') {
     page = (
       <CoursesPage

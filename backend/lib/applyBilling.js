@@ -1281,6 +1281,15 @@ function updateApplyEnquiryStatus(enquiryId, status) {
   return { ok: true };
 }
 
+function deleteApplyEnquiry(enquiryId) {
+  const id = Number(enquiryId);
+  if (!Number.isFinite(id)) return { ok: false, error: 'Invalid id' };
+  const info = db.prepare('SELECT id FROM apply_course_enquiries WHERE id = ?').get(id);
+  if (!info) return { ok: false, error: 'Not found' };
+  db.prepare('DELETE FROM apply_course_enquiries WHERE id = ?').run(id);
+  return { ok: true };
+}
+
 function listOverdueDueItems(nowMs = Date.now()) {
   const todayYmd = formatYmd(nowMs);
   return db.prepare(
@@ -1329,4 +1338,5 @@ module.exports = {
   syncApplyBillingDatesForBatch,
   toPaise,
   updateApplyEnquiryStatus,
+  deleteApplyEnquiry,
 };

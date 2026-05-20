@@ -22,13 +22,31 @@ function batchLabel(row) {
   return [num, title].filter(Boolean).join(' ') || `Batch ${row.batch_id}`;
 }
 
-export default function LeadsPage({ leads = [], onUpdateStatus }) {
+export default function LeadsPage({ leads = [], onUpdateStatus, onDeleteLead }) {
   const [busyId, setBusyId] = React.useState(null);
 
   async function setStatus(id, status) {
     setBusyId(id);
     try {
       await onUpdateStatus(id, status);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function deleteLead(row) {
+    const name = row.display_name || row.user_account_name || row.user_email || `Lead #${row.id}`;
+    const course = row.course_name || 'this course';
+    if (
+      !window.confirm(
+        `Delete callback request from ${name} for ${course}?\n\nThis removes the lead and callback details only. The student account and billing are not affected.`,
+      )
+    ) {
+      return;
+    }
+    setBusyId(row.id);
+    try {
+      await onDeleteLead(row.id);
     } finally {
       setBusyId(null);
     }
@@ -104,6 +122,16 @@ export default function LeadsPage({ leads = [], onUpdateStatus }) {
                           onClick={() => void setStatus(row.id, 'open')}
                         >
                           Reopen
+                        </button>
+                      ) : null}
+                      {onDeleteLead ? (
+                        <button
+                          type="button"
+                          className="dangerBtn"
+                          disabled={busyId === row.id}
+                          onClick={() => void deleteLead(row)}
+                        >
+                          Delete
                         </button>
                       ) : null}
                     </div>
