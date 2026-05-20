@@ -1,14 +1,23 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   Image,
   Linking,
   ScrollView,
   StyleSheet,
   Text,
+  TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import { HtmlContent } from '../HtmlContent';
 
 const BRAND_BLUE = '#1a237e';
+
+const BODY_FONT = 17;
+const BODY_LINE = 26;
+const H1_FONT = 28;
+const H2_FONT = 24;
+const H3_FONT = 21;
 
 type Block = {
   id: string;
@@ -78,16 +87,66 @@ function applyCasing(text: string, mode?: string) {
   return t;
 }
 
-function normalizeSpans(block: any): InlineSpan[] {
-  if (Array.isArray(block?.spans) && block.spans.length) return block.spans;
-  return [{
-    text: String(block?.text || ''),
-    bold: !!block?.bold,
-    italic: !!block?.italic,
-    underline: !!block?.underline,
-    color: block?.color || '#334155',
-    href: '',
-  }];
+const LIST_LEVEL_INDENT = 18;
+const LIST_GLYPH_WIDTH = 22;
+
+const BULLET_ONLY_RE = /^\s*[\u2022\u2023\u25AA\u25E6\u25CF\u25CB\u25C6\u25C7◦▪•\-–—*]+\s*$/;
+const LEADING_MARKER_RE = /^[\s\u00A0]*(?:[\u2022\u2023\u25AA\u25E6\u25CF\u25CB\u25C6\u25C7◦▪•\-–—*]|\d+[.)])\s*/;
+
+/** Remove stray list markers pasted into heading or list item text. */
+function stripLeadingListMarker(text: string) {
+  let t = String(text || '');
+  while (LEADING_MARKER_RE.test(t)) {
+    t = t.replace(LEADING_MARKER_RE, '');
+  }
+  return t;
+}
+
+function isBulletOnlySpan(text: string) {
+  return BULLET_ONLY_RE.test(String(text || ''));
+}
+
+/** Headings in admin use spans only — drop bullet-only spans and strip markers from text. */
+function normalizeHeadingSpans(block: any): InlineSpan[] {
+  const raw = normalizeSpans(block, false);
+  const filtered = raw.filter((s) => !isBulletOnlySpan(s.text || ''));
+  const spans = filtered.length ? filtered : raw;
+  return spans.map((s, i) => ({
+    ...s,
+    text: applyCasing(i === 0 ? stripLeadingListMarker(s.text || '') : String(s.text || '').trimStart(), block?.casing),
+  }));
+}
+
+function normalizeListItemSpans(item: any): InlineSpan[] {
+  const raw = normalizeSpans(item, false);
+  const filtered = raw.filter((s) => !isBulletOnlySpan(s.text || ''));
+  const spans = filtered.length ? filtered : raw;
+  return spans.map((s, i) => ({
+    ...s,
+    text: (i === 0 ? stripLeadingListMarker(s.text || '') : String(s.text || '')).replace(/^\s+/, ''),
+  }));
+}
+
+function normalizeSpans(block: any, stripMarkers = false): InlineSpan[] {
+  let spans: InlineSpan[];
+  if (Array.isArray(block?.spans) && block.spans.length) {
+    spans = block.spans;
+  } else {
+    spans = [{
+      text: String(block?.text || ''),
+      bold: !!block?.bold,
+      italic: !!block?.italic,
+      underline: !!block?.underline,
+      color: block?.color || '#334155',
+      href: '',
+    }];
+  }
+  if (!stripMarkers) return spans;
+  const out = [...spans];
+  if (out[0]?.text) {
+    out[0] = { ...out[0], text: stripLeadingListMarker(out[0].text || '') };
+  }
+  return out;
 }
 
 function InlineText({ spans, baseStyle }: { spans: InlineSpan[]; baseStyle: any }) {
@@ -113,21 +172,15 @@ function InlineText({ spans, baseStyle }: { spans: InlineSpan[]; baseStyle: any 
   );
 }
 
-function normalizeSpansWithCasing(block: any): InlineSpan[] {
-  return normalizeSpans(block).map((s) => ({ ...s, text: applyCasing(String(s.text || ''), block?.casing) }));
-}
-
 const MAX_LIST_LEVEL = 8;
 
 function clampListLevel(n: number) {
   return Math.min(MAX_LIST_LEVEL, Math.max(0, n));
 }
 
-function bulletGlyphForLevel(level: number) {
-  const L = clampListLevel(level || 0);
-  if (L <= 0) return '• ';
-  if (L === 1) return '◦ ';
-  return '▪ ';
+/** Match admin preview: one bullet glyph, nesting shown by indent only. */
+function bulletGlyphForLevel(_level: number) {
+  return '\u2022';
 }
 
 function computeOrderedListLabels(items: any[]): string[] {
@@ -141,37 +194,81 @@ function computeOrderedListLabels(items: any[]): string[] {
   });
 }
 
-type Props = { blocks: Block[]; description?: string | null };
+function parseContainerRatio(ratio?: string): number {
+  if (!ratio || typeof ratio !== 'string') return 16 / 9;
+  const parts = ratio.split(':').map((x) => parseFloat(x.trim()));
+  if (parts.length === 2 && parts[0] > 0 && parts[1] > 0) return parts[0] / parts[1];
+  return 16 / 9;
+}
 
-export function ContentBlocksView({ blocks, description }: Props) {
+function ListItemRow({
+  marker,
+  spans,
+  depth,
+}: {
+  marker: string;
+  spans: InlineSpan[];
+  depth: number;
+}) {
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}
-      showsVerticalScrollIndicator={false}
-    >
+    <View style={[styles.listRow, { marginLeft: depth * LIST_LEVEL_INDENT }]}>
+      <Text style={styles.listGlyph}>{marker}</Text>
+      <View style={styles.listBodyWrap}>
+        <InlineText spans={spans} baseStyle={styles.listBodyText} />
+      </View>
+    </View>
+  );
+}
+
+type Props = {
+  blocks: Block[];
+  description?: string | null;
+  /** When false, render a View (for screens that already use ScrollView). Default true. */
+  scrollable?: boolean;
+  horizontalInset?: number;
+};
+
+function ContentBlocksBody({
+  blocks,
+  description,
+  horizontalInset = 32,
+}: Omit<Props, 'scrollable'>) {
+  const { width } = useWindowDimensions();
+  const contentWidth = Math.max(200, width - horizontalInset);
+
+  return (
+    <>
       {description ? <Text style={styles.description}>{description}</Text> : null}
       {blocks.map((b, idx) => {
         if (b.type === 'heading') {
-          const size = b.level === 1 ? 26 : b.level === 2 ? 22 : 19;
+          const size = b.level === 1 ? H1_FONT : b.level === 2 ? H2_FONT : H3_FONT;
           return (
             <InlineText
               key={b.id || `h-${idx}`}
-              spans={normalizeSpansWithCasing(b)}
-              baseStyle={[styles.heading, {
-                fontSize: size,
-                color: b.color || '#0f172a',
-                textAlign: b.align || (b.level === 1 ? 'center' : 'left'),
-              }]}
+              spans={normalizeHeadingSpans(b)}
+              baseStyle={[
+                styles.heading,
+                {
+                  fontSize: size,
+                  lineHeight: size + 8,
+                  color: b.color || '#0f172a',
+                  textAlign: b.align || (b.level === 1 ? 'center' : 'left'),
+                },
+              ]}
             />
           );
         }
         if (b.type === 'paragraph') {
           if (paragraphHasRenderableHtml(b)) {
             return (
-              <Text key={b.id || `p-${idx}`} style={styles.paragraph}>
-                {stripHtml(b.html)}
-              </Text>
+              <HtmlContent
+                key={b.id || `p-${idx}`}
+                html={b.html}
+                horizontalInset={horizontalInset}
+                baseFontSize={BODY_FONT}
+                studyContent
+                style={styles.richHtmlWrap}
+              />
             );
           }
           return (
@@ -200,23 +297,27 @@ export function ContentBlocksView({ blocks, description }: Props) {
                 const marker =
                   b.type === 'bulletList'
                     ? bulletGlyphForLevel(depth)
-                    : `${ordLabs[li] ?? String(li + 1)}. `;
+                    : `${ordLabs[li] ?? String(li + 1)}.`;
                 return (
-                  <View
+                  <ListItemRow
                     key={`${b.id || idx}-${li}`}
-                    style={[styles.listRow, { marginLeft: depth * 14 }]}
-                  >
-                    <Text style={styles.listMarker}>{marker}</Text>
-                    <View style={styles.listLine}>
-                      <InlineText spans={normalizeSpans(item)} baseStyle={styles.paragraph} />
-                    </View>
-                  </View>
+                    marker={marker}
+                    spans={normalizeListItemSpans(item)}
+                    depth={depth}
+                  />
                 );
               })}
             </View>
           );
         }
         if (b.type === 'highlightedQuote') {
+          if (paragraphHasRenderableHtml(b)) {
+            return (
+              <View key={b.id || `q-${idx}`} style={[styles.quoteCard, { alignSelf: 'stretch' }]}>
+                <HtmlContent html={b.html} horizontalInset={horizontalInset + 24} baseFontSize={BODY_FONT} studyContent />
+              </View>
+            );
+          }
           return (
             <View key={b.id || `q-${idx}`} style={[styles.quoteCard, { alignSelf: 'stretch' }]}>
               <Text style={styles.quoteText}>{stripHtml(b.html || '')}</Text>
@@ -226,11 +327,15 @@ export function ContentBlocksView({ blocks, description }: Props) {
         if (b.type === 'image_v2' || b.type === 'gif' || b.type === 'image') {
           const imageUrl = b.renderCache?.derivedUrl || b.asset?.originalUrl || b.url;
           const align = b.layout?.align || b.align || 'center';
+          const aspectRatio = parseContainerRatio(b.layout?.containerRatio);
+          const fitContain = b.layout?.fitMode !== 'cover';
+          const imageWidth = contentWidth - 16;
           return (
             <View
               key={b.id || `img-${idx}`}
               style={[
                 styles.mediaCard,
+                { width: imageWidth },
                 align === 'left' ? { alignSelf: 'flex-start' } :
                   align === 'right' ? { alignSelf: 'flex-end' } : { alignSelf: 'center' },
               ]}
@@ -238,12 +343,12 @@ export function ContentBlocksView({ blocks, description }: Props) {
               {imageUrl ? (
                 <Image
                   source={{ uri: imageUrl }}
-                  style={styles.image}
-                  resizeMode={b.layout?.fitMode === 'contain' ? 'contain' : 'cover'}
+                  style={[styles.image, { aspectRatio, maxHeight: 300 }]}
+                  resizeMode={fitContain ? 'contain' : 'cover'}
                 />
               ) : null}
               {b.caption?.html ? (
-                <Text style={styles.caption}>{stripHtml(b.caption.html)}</Text>
+                <HtmlContent html={b.caption.html} horizontalInset={horizontalInset + 16} baseFontSize={14} style={styles.captionHtml} />
               ) : b.caption ? (
                 <Text style={styles.caption}>{b.caption}</Text>
               ) : null}
@@ -251,12 +356,17 @@ export function ContentBlocksView({ blocks, description }: Props) {
           );
         }
         if (b.type === 'imageCarousel') {
+          const slideWidth = Math.min(300, contentWidth * 0.85);
           return (
             <ScrollView key={b.id || `car-${idx}`} horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.carouselRow}>
               {(b.items || []).map((item: any, i: number) => (
-                <View key={`${b.id || idx}-${i}`} style={styles.carouselCard}>
+                <View key={`${b.id || idx}-${i}`} style={[styles.carouselCard, { width: slideWidth }]}>
                   {item.url ? (
-                    <Image source={{ uri: item.url }} style={styles.carouselImage} resizeMode="cover" />
+                    <Image
+                      source={{ uri: item.url }}
+                      style={[styles.carouselImage, { aspectRatio: 4 / 3 }]}
+                      resizeMode="contain"
+                    />
                   ) : null}
                   {item.caption ? <Text style={styles.caption}>{item.caption}</Text> : null}
                 </View>
@@ -280,32 +390,117 @@ export function ContentBlocksView({ blocks, description }: Props) {
             </View>
           );
         }
+        if (b.type === 'pdfAttachment') {
+          return (
+            <TouchableOpacity
+              key={b.id || `pdf-${idx}`}
+              style={[
+                styles.linkCard,
+                b.align === 'left' ? { alignSelf: 'flex-start' } :
+                  b.align === 'center' ? { alignSelf: 'center' } : { alignSelf: 'flex-end' },
+              ]}
+              onPress={() => b.url && Linking.openURL(b.url)}
+            >
+              <Text style={styles.linkText}>{b.label || 'Download PDF'}</Text>
+            </TouchableOpacity>
+          );
+        }
+        if (b.type === 'audioAttachment') {
+          return (
+            <TouchableOpacity key={b.id || `aud-${idx}`} style={styles.linkCard} onPress={() => b.url && Linking.openURL(b.url)}>
+              <Text style={styles.linkText}>{b.title || 'Open Audio File'}</Text>
+            </TouchableOpacity>
+          );
+        }
+        if (b.type === 'divider') {
+          return <View key={b.id || `div-${idx}`} style={styles.divider} />;
+        }
         return null;
       })}
+    </>
+  );
+}
+
+export function ContentBlocksView({
+  blocks,
+  description,
+  scrollable = true,
+  horizontalInset = 32,
+}: Props) {
+  const body = useMemo(
+    () => (
+      <ContentBlocksBody
+        blocks={blocks}
+        description={description}
+        horizontalInset={horizontalInset}
+      />
+    ),
+    [blocks, description, horizontalInset],
+  );
+
+  if (!scrollable) {
+    return <View style={styles.content}>{body}</View>;
+  }
+
+  return (
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      showsVerticalScrollIndicator={false}
+    >
+      {body}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8fafc' },
-  content: { padding: 20, paddingBottom: 32, gap: 10 },
-  description: { color: '#475569', fontSize: 14, marginBottom: 6 },
-  heading: { color: '#0f172a', fontWeight: '700', marginTop: 8 },
-  listBlock: { alignSelf: 'stretch', marginBottom: 8, gap: 6 },
-  listRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 6 },
-  listMarker: { color: '#334155', fontSize: 15, lineHeight: 22, minWidth: 22 },
-  listLine: { flex: 1 },
-  paragraph: { fontSize: 15, lineHeight: 22, marginTop: 4 },
+  content: { padding: 16, paddingBottom: 36, gap: 8 },
+  description: { color: '#475569', fontSize: 16, lineHeight: 24, marginBottom: 4 },
+  heading: { color: '#0f172a', fontWeight: '700', marginTop: 8, marginBottom: 6 },
+  listBlock: {
+    alignSelf: 'stretch',
+    marginBottom: 12,
+    paddingLeft: 4,
+  },
+  listRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 6,
+    gap: 8,
+  },
+  listGlyph: {
+    width: LIST_GLYPH_WIDTH,
+    fontSize: BODY_FONT,
+    lineHeight: BODY_LINE,
+    color: '#475569',
+    fontWeight: '600',
+    textAlign: 'left',
+  },
+  listBodyWrap: { flex: 1, minWidth: 0 },
+  listBodyText: {
+    fontSize: BODY_FONT,
+    lineHeight: BODY_LINE,
+    color: '#334155',
+    marginTop: 0,
+    marginBottom: 0,
+  },
+  paragraph: { fontSize: BODY_FONT, lineHeight: BODY_LINE, marginTop: 2, marginBottom: 6 },
+  richHtmlWrap: { marginVertical: 4 },
   mediaCard: { backgroundColor: '#fff', borderRadius: 12, padding: 8, borderWidth: 1, borderColor: '#e2e8f0' },
-  image: { width: '100%', height: 210, borderRadius: 10, backgroundColor: '#e2e8f0' },
-  caption: { marginTop: 6, fontSize: 12, color: '#64748b' },
+  image: { width: '100%', borderRadius: 10, backgroundColor: '#e2e8f0' },
+  caption: { marginTop: 6, fontSize: 14, lineHeight: 20, color: '#64748b' },
+  captionHtml: { marginTop: 4 },
   carouselRow: { gap: 10, paddingVertical: 2 },
-  carouselCard: { width: 280, backgroundColor: '#fff', borderRadius: 12, padding: 8, borderWidth: 1, borderColor: '#e2e8f0' },
-  carouselImage: { width: '100%', height: 170, borderRadius: 10, backgroundColor: '#e2e8f0' },
+  carouselCard: { backgroundColor: '#fff', borderRadius: 12, padding: 8, borderWidth: 1, borderColor: '#e2e8f0' },
+  carouselImage: { width: '100%', borderRadius: 10, backgroundColor: '#e2e8f0' },
   tableWrap: { borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 10, overflow: 'hidden', backgroundColor: '#fff' },
   tableRow: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#e2e8f0' },
-  tableCell: { flex: 1, padding: 8, color: '#334155', fontSize: 13 },
+  tableCell: { flex: 1, padding: 10, color: '#334155', fontSize: 15, lineHeight: 22 },
   tableHeader: { fontWeight: '700', color: BRAND_BLUE, backgroundColor: '#eef2ff' },
+  linkCard: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#dbe3f0', borderRadius: 10, padding: 12 },
+  linkText: { color: BRAND_BLUE, fontWeight: '700', fontSize: 16 },
+  divider: { height: 1, backgroundColor: '#e2e8f0', marginVertical: 8 },
   quoteCard: {
     backgroundColor: '#eff6ff',
     borderLeftWidth: 4,
@@ -313,5 +508,5 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 12,
   },
-  quoteText: { color: BRAND_BLUE, fontSize: 15, lineHeight: 22, fontStyle: 'italic', fontWeight: '600' },
+  quoteText: { color: BRAND_BLUE, fontSize: BODY_FONT, lineHeight: BODY_LINE, fontStyle: 'italic', fontWeight: '600' },
 });

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  BackHandler,
   FlatList,
   NativeScrollEvent,
   NativeSyntheticEvent,
@@ -13,6 +14,7 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ResizeMode, Video } from 'expo-av';
 import { api } from '../api/client';
@@ -24,6 +26,8 @@ import {
   getLessonProgress,
   saveLessonProgress,
 } from '../lib/learnProgress';
+import { lockAppPortrait } from '../utils/appScreenOrientation';
+import { applyVideoFullscreenOrientation } from '../utils/videoFullscreenOrientation';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -62,9 +66,31 @@ export default function LearnModeScreen({ route, navigation }: any) {
   const [quizSubmitLoading, setQuizSubmitLoading] = useState<string | null>(null);
 
   const flatListRef = useRef<FlatList<LearnSlide>>(null);
+  const learnVideoRef = useRef<Video | null>(null);
   const pendingScrollIdx = useRef<number | null>(null);
   const slidesRef = useRef<LearnSlide[]>([]);
+  const [nativeFullscreen, setNativeFullscreen] = useState(false);
   slidesRef.current = slides;
+
+  useFocusEffect(
+    useCallback(() => {
+      void lockAppPortrait();
+      return () => {
+        void lockAppPortrait();
+      };
+    }, []),
+  );
+
+  useEffect(() => {
+    if (!nativeFullscreen) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      learnVideoRef.current?.dismissFullscreenPlayer();
+      void lockAppPortrait();
+      setNativeFullscreen(false);
+      return true;
+    });
+    return () => sub.remove();
+  }, [nativeFullscreen]);
 
   const qKey = useCallback((pack: QuizPayload, qId: number | string) => `${pack.quizKey}:${qId}`, []);
 
@@ -235,11 +261,13 @@ export default function LearnModeScreen({ route, navigation }: any) {
     [persistIndex, slideW],
   );
 
+  const pagePad = { width: slideW, paddingBottom: Math.max(insets.bottom, 12) };
+
   const renderSlide = ({ item, index: listIndex }: { item: LearnSlide; index: number }) => {
     switch (item.kind) {
       case 'intro':
         return (
-          <View style={[styles.page, { width: slideW }]}>
+          <View style={[styles.page, styles.introPage, pagePad]}>
             <View style={styles.heroCard}>
               <Text style={styles.heroEyebrow}>Lesson</Text>
               <Text style={styles.heroTitle}>{item.lessonTitle}</Text>
@@ -250,21 +278,25 @@ export default function LearnModeScreen({ route, navigation }: any) {
 
       case 'video':
         return (
-          <View style={[styles.page, styles.videoPage, { width: slideW }]}>
+          <View style={[styles.page, styles.videoPage, pagePad]}>
             <Text style={styles.sectionLabel}>{item.title}</Text>
             <Video
+              ref={listIndex === index ? learnVideoRef : undefined}
               source={{ uri: item.videoUrl }}
               style={styles.video}
               resizeMode={ResizeMode.CONTAIN}
               shouldPlay={listIndex === index}
               useNativeControls
+              onFullscreenUpdate={(e) => {
+                void applyVideoFullscreenOrientation(e.fullscreenUpdate, setNativeFullscreen);
+              }}
             />
           </View>
         );
 
       case 'text':
         return (
-          <View style={[styles.page, { width: slideW }]}>
+          <View style={[styles.page, pagePad]}>
             <Text style={styles.sectionLabel}>{item.sectionTitle}</Text>
             {(!item.blocks || item.blocks.length === 0) && item.description ? (
               <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.textScroll}>
@@ -282,7 +314,7 @@ export default function LearnModeScreen({ route, navigation }: any) {
 
       case 'quiz_question':
         return (
-          <View style={[styles.page, { width: slideW }]}>
+          <View style={[styles.page, pagePad]}>
             <QuizQuestionPage
               item={item}
               qKey={qKey(item.quiz, item.question.id)}
@@ -300,7 +332,7 @@ export default function LearnModeScreen({ route, navigation }: any) {
 
       case 'quiz_submit':
         return (
-          <View style={[styles.page, styles.centerSheet, { width: slideW }]}>
+          <View style={[styles.page, styles.centerSheet, pagePad]}>
             <Text style={styles.quizDeckTitle}>{item.quiz.mode === 'v2' ? item.quiz.quiz?.title || 'Quiz' : item.quiz.quiz.title}</Text>
             <Text style={styles.submitHint}>
               {"When you're happy with all answers on the previous slides, submit for scoring."}
@@ -320,7 +352,7 @@ export default function LearnModeScreen({ route, navigation }: any) {
       case 'quiz_result': {
         const o = quizOutcome[item.quiz.quizKey];
         return (
-          <View style={[styles.page, styles.centerSheet, { width: slideW }]}>
+          <View style={[styles.page, styles.centerSheet, pagePad]}>
             {!o ? (
               <>
                 <Text style={styles.quizDeckTitle}>Results pending</Text>
@@ -340,7 +372,7 @@ export default function LearnModeScreen({ route, navigation }: any) {
 
       case 'open_notes':
         return (
-          <View style={[styles.page, styles.centerSheet, { width: slideW }]}>
+          <View style={[styles.page, styles.centerSheet, pagePad]}>
             <Text style={styles.sectionLabel}>{item.sectionTitle}</Text>
             <Text style={styles.submitHint}>{item.notes.length} PDF file{item.notes.length === 1 ? '' : 's'} attached.</Text>
             <TouchableOpacity
@@ -354,7 +386,7 @@ export default function LearnModeScreen({ route, navigation }: any) {
 
       case 'open_pdf_sheet':
         return (
-          <View style={[styles.page, styles.centerSheet, { width: slideW }]}>
+          <View style={[styles.page, styles.centerSheet, pagePad]}>
             <Text style={styles.sectionLabel}>{item.sectionTitle}</Text>
             <TouchableOpacity
               style={styles.primaryBtn}
@@ -367,7 +399,7 @@ export default function LearnModeScreen({ route, navigation }: any) {
 
       case 'assignment':
         return (
-          <View style={[styles.page, styles.centerSheet, { width: slideW }]}>
+          <View style={[styles.page, styles.centerSheet, pagePad]}>
             <Text style={styles.sectionLabel}>{item.title}</Text>
             {item.description ? <Text style={styles.submitHint}>{item.description}</Text> : null}
             <TouchableOpacity
@@ -386,7 +418,7 @@ export default function LearnModeScreen({ route, navigation }: any) {
 
       case 'done':
         return (
-          <View style={[styles.page, styles.centerSheet, { width: slideW }]}>
+          <View style={[styles.page, styles.centerSheet, pagePad]}>
             <Text style={styles.doneEmoji}>✓</Text>
             <Text style={styles.quizDeckTitle}>Lesson complete</Text>
             <Text style={styles.submitHint}>
@@ -396,7 +428,7 @@ export default function LearnModeScreen({ route, navigation }: any) {
         );
 
       default:
-        return <View style={{ width: slideW }} />;
+        return <View style={pagePad} />;
     }
   };
 
@@ -433,22 +465,25 @@ export default function LearnModeScreen({ route, navigation }: any) {
           </TouchableOpacity>
         </View>
       ) : (
-        <FlatList
-          ref={flatListRef}
-          data={slides}
-          horizontal
-          pagingEnabled
-          keyExtractor={(s) => s.key}
-          renderItem={renderSlide}
-          getItemLayout={(_, i) => ({ length: slideW, offset: slideW * i, index: i })}
-          showsHorizontalScrollIndicator={false}
-          onMomentumScrollEnd={onMomentumEnd}
-          scrollEventThrottle={16}
-          onScrollToIndexFailed={(info) => {
-            flatListRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false });
-          }}
-          extraData={{ index, quizOutcome }}
-        />
+        <View style={styles.slideHost}>
+          <FlatList
+            ref={flatListRef}
+            data={slides}
+            horizontal
+            pagingEnabled
+            keyExtractor={(s) => s.key}
+            renderItem={renderSlide}
+            style={styles.slideList}
+            getItemLayout={(_, i) => ({ length: slideW, offset: slideW * i, index: i })}
+            showsHorizontalScrollIndicator={false}
+            onMomentumScrollEnd={onMomentumEnd}
+            scrollEventThrottle={16}
+            onScrollToIndexFailed={(info) => {
+              flatListRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false });
+            }}
+            extraData={{ index, quizOutcome, bottomInset: insets.bottom }}
+          />
+        </View>
       )}
     </View>
   );
@@ -557,7 +592,7 @@ function QuizQuestionPage({
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#e8eef9' },
+  root: { flex: 1, backgroundColor: '#e8eef9', minHeight: 0 },
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -576,18 +611,18 @@ const styles = StyleSheet.create({
   exitSpacer: { width: 52 },
   loader: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 28 },
   err: { color: '#991b1b', textAlign: 'center', marginBottom: 16, fontSize: 16 },
-  page: { flex: 1, backgroundColor: '#f8fafc' },
-  videoPage: { paddingTop: 8 },
-  video: { flex: 1, width: '100%', backgroundColor: '#0f172a' },
+  slideHost: { flex: 1, minHeight: 0 },
+  slideList: { flex: 1 },
+  page: { flex: 1, backgroundColor: '#f8fafc', minHeight: 0 },
+  introPage: { justifyContent: 'center', paddingHorizontal: 16 },
+  videoPage: { paddingTop: 8, minHeight: 0 },
+  video: { flex: 1, width: '100%', minHeight: 0, backgroundColor: '#0f172a' },
   centerSheet: {
     justifyContent: 'center',
     paddingHorizontal: 24,
   },
   heroCard: {
-    flex: 1,
-    justifyContent: 'center',
-    margin: 22,
-    padding: 26,
+    padding: 22,
     borderRadius: 20,
     backgroundColor: '#fff',
     borderWidth: 1,
@@ -597,6 +632,7 @@ const styles = StyleSheet.create({
     shadowRadius: 20,
     shadowOffset: { width: 0, height: 8 },
     elevation: 4,
+    maxHeight: '88%',
   },
   heroEyebrow: { fontSize: 13, letterSpacing: 1.6, fontWeight: '700', color: BRAND_RED, marginBottom: 10 },
   heroTitle: { fontSize: 26, fontWeight: '700', color: '#0f172a', lineHeight: 32 },
@@ -612,7 +648,7 @@ const styles = StyleSheet.create({
   },
   textScroll: { padding: 28, paddingBottom: 40 },
   fallbackText: { fontSize: 16, color: '#64748b', lineHeight: 24 },
-  quizScroll: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 120 },
+  quizScroll: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 24 },
   progressPill: {
     alignSelf: 'flex-start',
     paddingHorizontal: 12,

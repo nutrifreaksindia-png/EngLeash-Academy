@@ -1,11 +1,12 @@
-import React, { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, BackHandler, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import Slider from '@react-native-community/slider';
 import { Video, ResizeMode, AVPlaybackStatus } from 'expo-av';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { allowLandscapeForMedia, lockAppPortrait } from '../utils/appScreenOrientation';
+import { lockAppPortrait } from '../utils/appScreenOrientation';
+import { applyVideoFullscreenOrientation } from '../utils/videoFullscreenOrientation';
 
 const BRAND_RED = '#c41e3a';
 
@@ -19,17 +20,29 @@ export default function VideoPlayerScreen({ route, navigation }: any) {
   const [status, setStatus] = useState<LoadedStatus | null>(null);
   const [speed, setSpeed] = useState<1 | 1.25 | 1.5 | 1.75 | 2>(1);
   const [quality, setQuality] = useState<'low' | 'normal' | 'high'>('normal');
+  const [nativeFullscreen, setNativeFullscreen] = useState(false);
   const lastTapRef = useRef<number | null>(null);
   const insets = useSafeAreaInsets();
 
   useFocusEffect(
     useCallback(() => {
-      void allowLandscapeForMedia();
+      void lockAppPortrait();
       return () => {
         void lockAppPortrait();
       };
-    }, [])
+    }, []),
   );
+
+  useEffect(() => {
+    if (!nativeFullscreen) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      videoRef.current?.dismissFullscreenPlayer();
+      void lockAppPortrait();
+      setNativeFullscreen(false);
+      return true;
+    });
+    return () => sub.remove();
+  }, [nativeFullscreen]);
 
   const isLoaded = status?.isLoaded ?? false;
 
@@ -87,6 +100,9 @@ export default function VideoPlayerScreen({ route, navigation }: any) {
         shouldPlay
         onLoad={() => setLoading(false)}
         onError={() => setError('Playback failed')}
+        onFullscreenUpdate={(e) => {
+          void applyVideoFullscreenOrientation(e.fullscreenUpdate, setNativeFullscreen);
+        }}
         onPlaybackStatusUpdate={(s: AVPlaybackStatus) => {
           if (!s.isLoaded) return;
           setStatus(s as LoadedStatus);
