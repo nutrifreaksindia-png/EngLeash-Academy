@@ -87,11 +87,11 @@ function applyCasing(text: string, mode?: string) {
   return t;
 }
 
+/** Admin .studyPreviewList--leveled: row margin-left = depth * 18px */
 const LIST_LEVEL_INDENT = 18;
-const LIST_GLYPH_WIDTH = 22;
 
-const BULLET_ONLY_RE = /^\s*[\u2022\u2023\u25AA\u25E6\u25CF\u25CB\u25C6\u25C7◦▪•\-–—*]+\s*$/;
-const LEADING_MARKER_RE = /^[\s\u00A0]*(?:[\u2022\u2023\u25AA\u25E6\u25CF\u25CB\u25C6\u25C7◦▪•\-–—*]|\d+[.)])\s*/;
+const BULLET_ONLY_RE = /^\s*[\u2022\u2023\u25AA\u25E6\u25CF\u25CB\u25C6\u25C7◦▪•\-–—*\uf0b7\uF0B7]+\s*$/i;
+const LEADING_MARKER_RE = /^[\s\u00A0]*(?:[\u2022\u2023\u25AA\u25E6\u25CF\u25CB\u25C6\u25C7◦▪•\-–—*\uf0b7]|\d+[.)])\s*/i;
 
 /** Remove stray list markers pasted into heading or list item text. */
 function stripLeadingListMarker(text: string) {
@@ -106,25 +106,44 @@ function isBulletOnlySpan(text: string) {
   return BULLET_ONLY_RE.test(String(text || ''));
 }
 
-/** Headings in admin use spans only — drop bullet-only spans and strip markers from text. */
+function collapseInlineWhitespace(text: string) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+/** Headings in admin use spans only — no list markers. */
 function normalizeHeadingSpans(block: any): InlineSpan[] {
-  const raw = normalizeSpans(block, false);
-  const filtered = raw.filter((s) => !isBulletOnlySpan(s.text || ''));
-  const spans = filtered.length ? filtered : raw;
-  return spans.map((s, i) => ({
-    ...s,
-    text: applyCasing(i === 0 ? stripLeadingListMarker(s.text || '') : String(s.text || '').trimStart(), block?.casing),
-  }));
+  const raw = normalizeSpans(block, false).filter((s) => !isBulletOnlySpan(s.text || ''));
+  if (!raw.length) return [{ text: '', bold: true, color: '#0f172a' }];
+  const style = raw.find((s) => String(s.text || '').trim()) || raw[0];
+  const joined = collapseInlineWhitespace(
+    raw.map((s) => stripLeadingListMarker(s.text || '')).join(''),
+  );
+  return [{
+    ...style,
+    text: applyCasing(joined, block?.casing),
+    bold: true,
+  }];
 }
 
 function normalizeListItemSpans(item: any): InlineSpan[] {
-  const raw = normalizeSpans(item, false);
-  const filtered = raw.filter((s) => !isBulletOnlySpan(s.text || ''));
-  const spans = filtered.length ? filtered : raw;
-  return spans.map((s, i) => ({
-    ...s,
-    text: (i === 0 ? stripLeadingListMarker(s.text || '') : String(s.text || '')).replace(/^\s+/, ''),
-  }));
+  const raw = normalizeSpans(item, false).filter((s) => !isBulletOnlySpan(s.text || ''));
+  if (!raw.length) return [{ text: '', color: '#334155' }];
+  const style = raw[0];
+  const joined = collapseInlineWhitespace(
+    raw.map((s) => stripLeadingListMarker(s.text || '')).join(''),
+  );
+  return [{ ...style, text: joined }];
+}
+
+/** Prefer structured spans when they match HTML plain text (avoids RenderHTML list quirks). */
+function paragraphShouldUseHtml(block: any): boolean {
+  if (!paragraphHasRenderableHtml(block)) return false;
+  const spanText = collapseInlineWhitespace(
+    normalizeSpans(block, false).map((s) => s.text || '').join(''),
+  );
+  if (!spanText) return true;
+  const htmlText = collapseInlineWhitespace(stripHtml(block.html));
+  return htmlText.length > 0 && htmlText !== spanText;
 }
 
 function normalizeSpans(block: any, stripMarkers = false): InlineSpan[] {
@@ -205,18 +224,35 @@ function ListItemRow({
   marker,
   spans,
   depth,
+  ordered,
 }: {
   marker: string;
   spans: InlineSpan[];
   depth: number;
+  ordered?: boolean;
 }) {
+  const indent = depth * LIST_LEVEL_INDENT;
+  const markerText = ordered ? `${marker} ` : `${marker} `;
   return (
-    <View style={[styles.listRow, { marginLeft: depth * LIST_LEVEL_INDENT }]}>
-      <Text style={styles.listGlyph}>{marker}</Text>
-      <View style={styles.listBodyWrap}>
-        <InlineText spans={spans} baseStyle={styles.listBodyText} />
-      </View>
-    </View>
+    <Text style={[styles.listRow, { paddingLeft: indent }]}>
+      <Text style={styles.listGlyphInline}>{markerText}</Text>
+      {spans.map((s, i) => (
+        <Text
+          key={`${i}-${s.text || ''}`}
+          style={{
+            color: s.color || '#334155',
+            fontWeight: s.bold ? '700' : '400',
+            fontStyle: s.italic ? 'italic' : 'normal',
+            textDecorationLine: s.underline ? 'underline' : 'none',
+          }}
+          onPress={() => {
+            if (s.href) void Linking.openURL(s.href);
+          }}
+        >
+          {s.text || ''}
+        </Text>
+      ))}
+    </Text>
   );
 }
 
@@ -243,67 +279,71 @@ function ContentBlocksBody({
         if (b.type === 'heading') {
           const size = b.level === 1 ? H1_FONT : b.level === 2 ? H2_FONT : H3_FONT;
           return (
-            <InlineText
-              key={b.id || `h-${idx}`}
-              spans={normalizeHeadingSpans(b)}
-              baseStyle={[
-                styles.heading,
-                {
-                  fontSize: size,
-                  lineHeight: size + 8,
-                  color: b.color || '#0f172a',
-                  textAlign: b.align || (b.level === 1 ? 'center' : 'left'),
-                },
-              ]}
-            />
+            <View key={b.id || `h-${idx}`} style={styles.blockWrap}>
+              <InlineText
+                spans={normalizeHeadingSpans(b)}
+                baseStyle={[
+                  styles.heading,
+                  {
+                    fontSize: size,
+                    lineHeight: size + 6,
+                    color: b.color || '#0f172a',
+                    textAlign: b.align || (b.level === 1 ? 'center' : 'left'),
+                  },
+                ]}
+              />
+            </View>
           );
         }
         if (b.type === 'paragraph') {
-          if (paragraphHasRenderableHtml(b)) {
+          if (paragraphShouldUseHtml(b)) {
             return (
-              <HtmlContent
-                key={b.id || `p-${idx}`}
-                html={b.html}
-                horizontalInset={horizontalInset}
-                baseFontSize={BODY_FONT}
-                studyContent
-                style={styles.richHtmlWrap}
-              />
+              <View key={b.id || `p-${idx}`} style={styles.blockWrap}>
+                <HtmlContent
+                  html={b.html}
+                  horizontalInset={horizontalInset}
+                  baseFontSize={BODY_FONT}
+                  studyContent
+                  style={styles.richHtmlWrap}
+                />
+              </View>
             );
           }
           return (
-            <InlineText
-              key={b.id || `p-${idx}`}
-              spans={normalizeSpans(b)}
-              baseStyle={[
-                styles.paragraph,
-                {
-                  color: b.color || '#334155',
-                  fontWeight: b.bold ? '700' : '400',
-                  fontStyle: b.italic ? 'italic' : 'normal',
-                  textDecorationLine: b.underline ? 'underline' : 'none',
-                },
-              ]}
-            />
+            <View key={b.id || `p-${idx}`} style={styles.blockWrap}>
+              <InlineText
+                spans={normalizeSpans(b)}
+                baseStyle={[
+                  styles.paragraph,
+                  {
+                    color: b.color || '#334155',
+                    fontWeight: b.bold ? '700' : '400',
+                    fontStyle: b.italic ? 'italic' : 'normal',
+                    textDecorationLine: b.underline ? 'underline' : 'none',
+                  },
+                ]}
+              />
+            </View>
           );
         }
         if (b.type === 'bulletList' || b.type === 'numberedList') {
           const listItems = b.items || [];
-          const ordLabs = b.type === 'numberedList' ? computeOrderedListLabels(listItems) : [];
+          const isOrdered = b.type === 'numberedList';
+          const ordLabs = isOrdered ? computeOrderedListLabels(listItems) : [];
           return (
             <View key={b.id || `list-${idx}`} style={styles.listBlock}>
               {listItems.map((item: any, li: number) => {
                 const depth = clampListLevel(Number(item?.level) || 0);
-                const marker =
-                  b.type === 'bulletList'
-                    ? bulletGlyphForLevel(depth)
-                    : `${ordLabs[li] ?? String(li + 1)}.`;
+                const marker = isOrdered
+                  ? `${ordLabs[li] ?? String(li + 1)}.`
+                  : bulletGlyphForLevel(depth);
                 return (
                   <ListItemRow
                     key={`${b.id || idx}-${li}`}
                     marker={marker}
                     spans={normalizeListItemSpans(item)}
                     depth={depth}
+                    ordered={isOrdered}
                   />
                 );
               })}
@@ -455,38 +495,28 @@ export function ContentBlocksView({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8fafc' },
-  content: { padding: 16, paddingBottom: 36, gap: 8 },
-  description: { color: '#475569', fontSize: 16, lineHeight: 24, marginBottom: 4 },
-  heading: { color: '#0f172a', fontWeight: '700', marginTop: 8, marginBottom: 6 },
+  content: { padding: 16, paddingBottom: 36 },
+  blockWrap: { marginBottom: 8 },
+  description: { color: '#475569', fontSize: 16, lineHeight: 24, marginBottom: 8 },
+  heading: { color: '#0f172a', fontWeight: '700', marginTop: 4, marginBottom: 2 },
   listBlock: {
     alignSelf: 'stretch',
     marginBottom: 12,
-    paddingLeft: 4,
   },
   listRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
+    fontSize: BODY_FONT,
+    lineHeight: BODY_LINE,
+    color: '#334155',
     marginBottom: 6,
-    gap: 8,
   },
-  listGlyph: {
-    width: LIST_GLYPH_WIDTH,
+  listGlyphInline: {
     fontSize: BODY_FONT,
     lineHeight: BODY_LINE,
     color: '#475569',
     fontWeight: '600',
-    textAlign: 'left',
   },
-  listBodyWrap: { flex: 1, minWidth: 0 },
-  listBodyText: {
-    fontSize: BODY_FONT,
-    lineHeight: BODY_LINE,
-    color: '#334155',
-    marginTop: 0,
-    marginBottom: 0,
-  },
-  paragraph: { fontSize: BODY_FONT, lineHeight: BODY_LINE, marginTop: 2, marginBottom: 6 },
-  richHtmlWrap: { marginVertical: 4 },
+  paragraph: { fontSize: BODY_FONT, lineHeight: BODY_LINE, marginTop: 0, marginBottom: 0 },
+  richHtmlWrap: { marginTop: 0, marginBottom: 0 },
   mediaCard: { backgroundColor: '#fff', borderRadius: 12, padding: 8, borderWidth: 1, borderColor: '#e2e8f0' },
   image: { width: '100%', borderRadius: 10, backgroundColor: '#e2e8f0' },
   caption: { marginTop: 6, fontSize: 14, lineHeight: 20, color: '#64748b' },

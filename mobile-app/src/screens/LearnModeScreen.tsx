@@ -307,7 +307,18 @@ export default function LearnModeScreen({ route, navigation }: any) {
                 <Text style={styles.fallbackText}>No body text for this section.</Text>
               </ScrollView>
             ) : (
-              <ContentBlocksView blocks={item.blocks} description={item.description} />
+              <ScrollView
+                style={styles.textBlocksScroll}
+                contentContainerStyle={styles.textBlocksContent}
+                showsVerticalScrollIndicator={false}
+              >
+                <ContentBlocksView
+                  blocks={item.blocks}
+                  description={item.description}
+                  scrollable={false}
+                  horizontalInset={40}
+                />
+              </ScrollView>
             )}
           </View>
         );
@@ -647,6 +658,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
   },
   textScroll: { padding: 28, paddingBottom: 40 },
+  textBlocksScroll: { flex: 1 },
+  textBlocksContent: { paddingBottom: 24 },
   fallbackText: { fontSize: 16, color: '#64748b', lineHeight: 24 },
   quizScroll: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 24 },
   progressPill: {

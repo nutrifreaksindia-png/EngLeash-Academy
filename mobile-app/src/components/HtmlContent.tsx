@@ -6,34 +6,43 @@ const BODY_COLOR = '#334155';
 const HEADING_COLOR = '#0f172a';
 const LINK_COLOR = '#1a237e';
 
-/** Strip bullets from headings in pasted paragraph HTML so they match admin heading blocks. */
+const MARKER_CHARS = '[\u2022\u2023\u25AA\u25E6\u25CF\u25CB\u25C6\u25C7◦▪•\\-*–—]';
+
+/** Strip Word/list-style bullets from study HTML so headings match admin preview. */
 export function sanitizeStudyMaterialHtml(html: string) {
-  return String(html || '').replace(/<(h[1-4])([^>]*)>([\s\S]*?)<\/\1>/gi, (_m, tag, attrs, inner) => {
+  let out = String(html || '');
+  out = out.replace(/display\s*:\s*list-item/gi, 'display:block');
+  out = out.replace(/list-style(?:-type)?\s*:[^;"']+;?/gi, '');
+  out = out.replace(/mso-list\s*:[^;"']+;?/gi, '');
+  out = out.replace(new RegExp(`<p([^>]*)>\\s*${MARKER_CHARS}\\s*`, 'gi'), '<p$1>');
+  out = out.replace(new RegExp(`<strong([^>]*)>\\s*${MARKER_CHARS}\\s*`, 'gi'), '<strong$1>');
+  out = out.replace(/<(h[1-4])([^>]*)>([\s\S]*?)<\/\1>/gi, (_m, tag, attrs, inner) => {
     let body = inner
-      .replace(/<span[^>]*>\s*[\u2022◦▪•\-–—*]+\s*<\/span>/gi, '')
-      .replace(/^\s*[\u2022◦▪•\-–—*]+\s*/gm, '')
+      .replace(new RegExp(`<span[^>]*>\\s*${MARKER_CHARS}\\s*<\\/span>`, 'gi'), '')
+      .replace(new RegExp(`^\\s*${MARKER_CHARS}\\s*`, 'gm'), '')
       .replace(/^\s*\d+[.)]\s*/gm, '');
-    body = body.replace(/>(\s*[\u2022◦▪•\-–—*]+\s*)</g, '><');
+    body = body.replace(new RegExp(`>(\\s*${MARKER_CHARS}\\s*)<`, 'g'), '><');
     return `<${tag}${attrs}>${body}</${tag}>`;
   });
+  return out;
 }
 
 function buildTagStyles(baseFontSize: number, studyContent = false): MixedStyleRecord {
   const lineHeight = Math.round(baseFontSize * 1.55);
   const headingSize = Math.round(baseFontSize * 1.15);
-  const listPad = studyContent ? 18 : 20;
-  const blockGap = studyContent ? 6 : 8;
+  const listPad = studyContent ? 0 : 20;
+  const blockGap = studyContent ? 4 : 8;
   return {
     body: { color: BODY_COLOR, fontSize: baseFontSize, lineHeight },
     p: { marginTop: blockGap, marginBottom: blockGap, color: BODY_COLOR, fontSize: baseFontSize, lineHeight },
     div: { color: BODY_COLOR, fontSize: baseFontSize, lineHeight },
-    ul: { marginTop: blockGap, marginBottom: blockGap, paddingLeft: listPad },
+    ul: { marginTop: blockGap, marginBottom: blockGap, paddingLeft: listPad, marginLeft: studyContent ? 0 : 0 },
     ol: { marginTop: blockGap, marginBottom: blockGap, paddingLeft: listPad },
-    li: { marginBottom: studyContent ? 2 : 4, color: BODY_COLOR, fontSize: baseFontSize, lineHeight },
-    h1: { fontSize: headingSize + 4, fontWeight: '700', color: HEADING_COLOR, marginTop: 12, marginBottom: 6 },
-    h2: { fontSize: headingSize + 2, fontWeight: '700', color: HEADING_COLOR, marginTop: 12, marginBottom: 6 },
-    h3: { fontSize: headingSize, fontWeight: '600', color: HEADING_COLOR, marginTop: 12, marginBottom: 6 },
-    h4: { fontSize: headingSize, fontWeight: '600', color: HEADING_COLOR, marginTop: 12, marginBottom: 6 },
+    li: { marginTop: 0, marginBottom: studyContent ? 0 : 4, paddingLeft: 0, color: BODY_COLOR, fontSize: baseFontSize, lineHeight },
+    h1: { fontSize: headingSize + 4, fontWeight: '700', color: HEADING_COLOR, marginTop: 10, marginBottom: 4 },
+    h2: { fontSize: headingSize + 2, fontWeight: '700', color: HEADING_COLOR, marginTop: 10, marginBottom: 4 },
+    h3: { fontSize: headingSize, fontWeight: '600', color: HEADING_COLOR, marginTop: 8, marginBottom: 4 },
+    h4: { fontSize: headingSize, fontWeight: '600', color: HEADING_COLOR, marginTop: 8, marginBottom: 4 },
     strong: { fontWeight: '700' },
     b: { fontWeight: '700' },
     em: { fontStyle: 'italic' },
@@ -54,11 +63,8 @@ export function htmlHasVisibleContent(html?: string | null) {
 type HtmlContentProps = {
   html: string;
   style?: StyleProp<ViewStyle>;
-  /** Horizontal inset from screen edges (default matches course detail block padding). */
   horizontalInset?: number;
-  /** Base body font size (default 16 for course specs, 17 for study content). */
   baseFontSize?: number;
-  /** Study material / worksheet rich paragraphs — tighter lists, no heading bullets. */
   studyContent?: boolean;
 };
 
