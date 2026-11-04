@@ -3705,7 +3705,7 @@ th {
   color: #1e293b;
 }
 
-/* Full-screen live classroom (Phase 3 — Agora Web) */
+/* Full-screen live classroom (LiveKit Web) */
 .liveClassroomRoot {
   position: fixed;
   inset: 0;

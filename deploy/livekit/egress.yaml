@@ -1,0 +1,7 @@
+api_key: API_KEY_PLACEHOLDER
+api_secret: API_SECRET_PLACEHOLDER
+ws_url: ws://127.0.0.1:7880
+redis:
+  address: 127.0.0.1:6380
+insecure: true
+log_level: info

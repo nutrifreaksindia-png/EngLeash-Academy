@@ -41,7 +41,7 @@ function ensureLiveSessionsForBatch(batchId) {
   const rows = db.prepare('SELECT * FROM batch_sessions WHERE batch_id = ? ORDER BY session_day').all(batchId);
 
   const insert = db.prepare(`
-    INSERT INTO live_sessions (batch_id, title, agora_channel, starts_at, ends_at, status, created_by, batch_session_id)
+    INSERT INTO live_sessions (batch_id, title, room_name, starts_at, ends_at, status, created_by, batch_session_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
@@ -87,7 +87,7 @@ function ensureLiveSessionsForBatch(batchId) {
       created += 1;
     } catch (e) {
       if (String(e.message || '').includes('UNIQUE')) {
-        const clash = db.prepare('SELECT id FROM live_sessions WHERE agora_channel = ?').get(channel);
+        const clash = db.prepare('SELECT id FROM live_sessions WHERE room_name = ?').get(channel);
         if (clash) {
           db.prepare('UPDATE live_sessions SET batch_session_id = ?, title = ?, starts_at = ?, ends_at = ?, status = ? WHERE id = ?').run(
             bs.id,

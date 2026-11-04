@@ -3,15 +3,8 @@ const express = require('express');
 const db = require('../db');
 const { auth, requireRole } = require('../middleware/auth');
 const liveRecording = require('../services/liveRecording');
+const liveRtc = require('../services/liveRtc');
 const { buildPublicUrl, getSignedPlaybackUrl, isSpacesConfigured } = require('../services/spaces');
-
-let RtcTokenBuilder = null;
-let RtcRole = null;
-try {
-  ({ RtcTokenBuilder, RtcRole } = require('agora-access-token'));
-} catch (_) {
-  // Keep route functional without crashing when dependency/env is missing.
-}
 
 const router = express.Router();
 
@@ -159,36 +152,25 @@ function reconcileLiveSessionLifecycle(sessionLike) {
   return sessionLike;
 }
 
-/**
- * Batch live sessions use two-way communication: every allowed participant gets a publisher token
- * (camera/mic) so web (rtc) and mobile (communication profile) can all send and receive.
- */
-function roleForAgora() {
-  return 'publisher';
+function sessionRoomName(session) {
+  return session?.room_name || null;
 }
 
-function buildAgoraToken({ channelName, uid, role }) {
-  const appId = process.env.AGORA_APP_ID;
-  const appCertificate = process.env.AGORA_APP_CERTIFICATE;
-  if (!appId || !appCertificate || !RtcTokenBuilder || !RtcRole) {
-    return { token: null, expiresAt: null };
+async function buildRtcJoinPayload(session, user) {
+  const creds = await liveRtc.buildJoinCredentials({
+    roomName: sessionRoomName(session),
+    userId: user.id,
+    displayName: user.name || user.email || String(user.id),
+  });
+  const recordingConfigured = liveRecording.isRecordingApiConfigured();
+  let recordingWarning = null;
+  if (!creds.livekitReady) {
+    recordingWarning =
+      creds.warning || 'Set LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET on the API server.';
+  } else if (!recordingConfigured) {
+    recordingWarning = 'Cloud recording is off: set LIVEKIT_* and SPACES_* on the API server.';
   }
-
-  const privilegeSeconds = Number(process.env.AGORA_TOKEN_EXPIRY_SECONDS || 3600);
-  const privilegeExpireTime = Math.floor(Date.now() / 1000) + privilegeSeconds;
-  const agoraRole = role === 'publisher' ? RtcRole.PUBLISHER : RtcRole.SUBSCRIBER;
-
-  return {
-    token: RtcTokenBuilder.buildTokenWithUid(
-      appId,
-      appCertificate,
-      channelName,
-      uid,
-      agoraRole,
-      privilegeExpireTime
-    ),
-    expiresAt: new Date(privilegeExpireTime * 1000).toISOString(),
-  };
+  return { creds, recordingConfigured, recordingWarning };
 }
 
 router.get('/sessions', auth, (req, res) => {
@@ -221,7 +203,7 @@ router.get('/sessions', auth, (req, res) => {
                ))
                ELSE ls.title
              END AS title,
-             ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
+             ls.room_name, ls.starts_at, ls.ends_at, ls.status,
              b.name AS batch_name, b.session_type, b.trainer_id, u.name AS trainer_name
       FROM live_sessions ls
       JOIN batches b ON b.id = ls.batch_id
@@ -257,7 +239,7 @@ router.get('/sessions', auth, (req, res) => {
                ))
                ELSE ls.title
              END AS title,
-             ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
+             ls.room_name, ls.starts_at, ls.ends_at, ls.status,
              b.name AS batch_name, b.session_type, b.trainer_id, u.name AS trainer_name
       FROM live_sessions ls
       JOIN batches b ON b.id = ls.batch_id
@@ -296,7 +278,7 @@ router.get('/sessions', auth, (req, res) => {
                ))
                ELSE ls.title
              END AS title,
-             ls.agora_channel, ls.starts_at, ls.ends_at, ls.status,
+             ls.room_name, ls.starts_at, ls.ends_at, ls.status,
              b.name AS batch_name, b.session_type, b.trainer_id, u.name AS trainer_name
       FROM live_sessions ls
       JOIN batches b ON b.id = ls.batch_id
@@ -761,11 +743,11 @@ router.post('/sessions', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     return res.status(403).json({ error: 'You can only create sessions for your own batch' });
   }
 
-  const agoraChannel = `live_${batchId}_${crypto.randomUUID().slice(0, 12)}`;
+  const roomName = `live_${batchId}_${crypto.randomUUID().slice(0, 12)}`;
   const result = db.prepare(`
-    INSERT INTO live_sessions (batch_id, title, agora_channel, starts_at, ends_at, status, created_by)
+    INSERT INTO live_sessions (batch_id, title, room_name, starts_at, ends_at, status, created_by)
     VALUES (?, ?, ?, ?, ?, 'scheduled', ?)
-  `).run(Number(batchId), title.trim(), agoraChannel, startsAt, endsAt, req.user.id);
+  `).run(Number(batchId), title.trim(), roomName, startsAt, endsAt, req.user.id);
 
   const session = db.prepare('SELECT * FROM live_sessions WHERE id = ?').get(result.lastInsertRowid);
   res.status(201).json(session);
@@ -799,11 +781,9 @@ router.post('/sessions/:id/end', auth, requireRole('Admin', 'Trainer'), async (r
   if (req.user.role === 'Trainer' && !isStaffForBatch(req.user.id, session.batch_id)) {
     return res.status(403).json({ error: 'You can only end your own session' });
   }
-  try {
-    await liveRecording.forceStopRecordingForSession(sessionId);
-  } catch (e) {
-    console.warn('liveRecording.forceStopRecordingForSession', sessionId, e?.message || e);
-  }
+  void liveRecording.forceStopRecordingForSession(sessionId).catch((e) =>
+    console.warn('liveRecording.forceStopRecordingForSession', sessionId, e?.message || e)
+  );
   const endedAt = new Date(session.ends_at || '').getTime();
   const shouldBeEnded = !Number.isNaN(endedAt) && Date.now() > endedAt;
   db.prepare('UPDATE live_session_participants SET left_at = datetime(\'now\') WHERE live_session_id = ? AND left_at IS NULL').run(sessionId);
@@ -814,10 +794,10 @@ router.post('/sessions/:id/end', auth, requireRole('Admin', 'Trainer'), async (r
   res.json({ ok: true, status: shouldBeEnded ? 'ended' : 'scheduled' });
 });
 
-router.post('/sessions/:id/join', auth, (req, res) => {
+router.post('/sessions/:id/join', auth, async (req, res) => {
   const sessionId = Number(req.params.id);
   let session = db.prepare(`
-    SELECT ls.id, ls.batch_id, ls.batch_session_id, ls.title, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status, b.trainer_id, b.session_type
+    SELECT ls.id, ls.batch_id, ls.batch_session_id, ls.title, ls.room_name, ls.starts_at, ls.ends_at, ls.status, b.trainer_id, b.session_type
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
@@ -848,12 +828,8 @@ router.post('/sessions/:id/join', auth, (req, res) => {
     });
   }
 
-  const agoraRole = roleForAgora();
-  const { token, expiresAt } = buildAgoraToken({
-    channelName: session.agora_channel,
-    uid: req.user.id,
-    role: agoraRole,
-  });
+  const { creds, recordingConfigured, recordingWarning } = await buildRtcJoinPayload(session, req.user);
+  const rtcReady = creds.livekitReady;
 
   db.prepare(`
     INSERT INTO live_session_participants (live_session_id, user_id, joined_at)
@@ -875,26 +851,26 @@ router.post('/sessions/:id/join', auth, (req, res) => {
     liveSessionId: session.id,
     batchSessionId: session.batch_session_id || null,
     title: session.title,
-    channelName: session.agora_channel,
-    uid: req.user.id,
-    role: agoraRole,
+    channelName: creds.channelName,
+    roomName: creds.roomName,
+    uid: creds.uid,
+    role: creds.role,
     sessionType: session.session_type,
     canEndSession,
-    recordingConfigured: liveRecording.isRecordingApiConfigured(),
-    appId: process.env.AGORA_APP_ID || null,
-    token,
-    tokenExpiresAt: expiresAt,
-    agoraReady: Boolean(process.env.AGORA_APP_ID && process.env.AGORA_APP_CERTIFICATE && token),
-    warning: token
-      ? null
-      : 'Agora token is not generated. Set AGORA_APP_ID, AGORA_APP_CERTIFICATE and install agora-access-token in backend.',
+    recordingConfigured,
+    rtcProvider: creds.rtcProvider,
+    tokenExpiresAt: creds.tokenExpiresAt,
+    livekitUrl: creds.livekitUrl,
+    livekitToken: creds.livekitToken,
+    livekitReady: creds.livekitReady,
+    warning: rtcReady ? null : recordingWarning,
   });
 });
 
-router.post('/sessions/:id/token', auth, (req, res) => {
+router.post('/sessions/:id/token', auth, async (req, res) => {
   const sessionId = Number(req.params.id);
   let session = db.prepare(`
-    SELECT ls.id, ls.batch_id, ls.agora_channel, ls.starts_at, ls.ends_at, ls.status, b.trainer_id, b.session_type
+    SELECT ls.id, ls.batch_id, ls.room_name, ls.starts_at, ls.ends_at, ls.status, b.trainer_id, b.session_type
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
@@ -920,19 +896,26 @@ router.post('/sessions/:id/token', auth, (req, res) => {
     });
   }
 
-  const agoraRole = roleForAgora();
-  const { token, expiresAt } = buildAgoraToken({
-    channelName: session.agora_channel,
-    uid: req.user.id,
-    role: agoraRole,
-  });
-  if (!token) {
+  const { creds, recordingWarning } = await buildRtcJoinPayload(session, req.user);
+  const rtcReady = creds.livekitReady;
+  if (!rtcReady) {
     return res.status(503).json({
-      error: 'Agora token generation is not configured',
-      warning: 'Set AGORA_APP_ID, AGORA_APP_CERTIFICATE and install agora-access-token in backend.',
+      error: 'Live RTC token generation is not configured',
+      warning: recordingWarning,
+      rtcProvider: creds.rtcProvider,
     });
   }
-  res.json({ token, tokenExpiresAt: expiresAt, channelName: session.agora_channel, uid: req.user.id, role: agoraRole });
+  res.json({
+    rtcProvider: creds.rtcProvider,
+    token: creds.livekitToken,
+    tokenExpiresAt: creds.tokenExpiresAt,
+    channelName: creds.channelName,
+    roomName: creds.roomName,
+    uid: creds.uid,
+    role: creds.role,
+    livekitUrl: creds.livekitUrl,
+    livekitToken: creds.livekitToken,
+  });
 });
 
 router.post('/sessions/:id/leave', auth, (req, res) => {

@@ -8,3 +8,5 @@ tv-app/.gradle/
 tv-app/app/build/
 *.log
 .DS_Store
+._*
+**/._*

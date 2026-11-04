@@ -907,7 +907,7 @@ router.get('/:id/sessions', auth, (req, res) => {
            ls.status AS live_status,
            ls.starts_at AS live_starts_at,
            ls.ends_at AS live_ends_at,
-           ls.agora_channel AS live_agora_channel,
+           ls.room_name AS live_room_name,
            (
              SELECT COUNT(*) FROM live_session_participants p
              WHERE p.live_session_id = ls.id AND p.left_at IS NULL

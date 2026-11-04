@@ -1,0 +1,35 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save "" --appendonly no
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - livekit_redis:/data
+
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    network_mode: host
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    depends_on:
+      - redis
+
+  egress:
+    image: livekit/egress:latest
+    restart: unless-stopped
+    command: --config /etc/egress.yaml
+    network_mode: host
+    volumes:
+      - ./egress.yaml:/etc/egress.yaml:ro
+    depends_on:
+      - livekit
+      - redis
+    environment:
+      - EGRESS_CONFIG_FILE=/etc/egress.yaml
+
+volumes:
+  livekit_redis:

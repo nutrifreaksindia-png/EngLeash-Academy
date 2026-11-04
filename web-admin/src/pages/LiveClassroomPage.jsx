@@ -1,5 +1,11 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { Track } from 'livekit-client';
+import {
+  attachLiveKitVideo,
+  connectLiveKitRoom,
+  detachAllLiveKitRemoteAudio,
+} from '../live/connectLiveKitRoom.js';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
 
@@ -21,29 +27,56 @@ function liveDbgWarn(...args) {
   if (isLiveDebug()) console.warn('[EngLeash Live]', ...args);
 }
 
-function formatAgoraErr(e) {
-  if (e == null) return String(e);
-  if (typeof e === 'string') return e;
-  const code = e.code != null ? `code=${e.code}` : '';
-  const msg = e.message != null ? e.message : String(e);
-  return [code, msg].filter(Boolean).join(' ');
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    }),
+  ]);
+}
+
+async function exitPictureInPictureWithTimeout(ms = 1500) {
+  try {
+    if (!document.pictureInPictureElement) return;
+    await withTimeout(document.exitPictureInPicture().catch(() => {}), ms);
+  } catch {
+    /* ignore */
+  }
 }
 
 async function liveApi(path, token, options = {}) {
-  const res = await fetch(`${API_BASE}/api${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-      Authorization: `Bearer ${token}`,
-    },
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || 'Request failed');
-  return data;
+  const { timeoutMs, ...fetchOptions } = options;
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(fetchOptions.headers || {}),
+    Authorization: `Bearer ${token}`,
+  };
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timer =
+    controller != null
+      ? window.setTimeout(() => {
+          controller.abort();
+        }, timeoutMs)
+      : null;
+  try {
+    const res = await fetch(`${API_BASE}/api${path}`, {
+      ...fetchOptions,
+      headers,
+      signal: controller?.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+    return data;
+  } catch (e) {
+    if (e?.name === 'AbortError') throw new Error('Request timed out');
+    throw e;
+  } finally {
+    if (timer != null) window.clearTimeout(timer);
+  }
 }
 
-/** Request layout pass after DOM / Agora state updates (replaces legacy schedulePlayRemoteVideo). */
+/** Request layout pass after DOM / RTC state updates. */
 function bumpRemoteLayout(repositionRef) {
   requestAnimationFrame(() => {
     try {
@@ -99,6 +132,7 @@ export default function LiveClassroomPage({ token }) {
   const [preJoinMeta, setPreJoinMeta] = useState(null);
   const [sessionRunId, setSessionRunId] = useState(0);
   const suppressJoinRef = useRef(false);
+  const leaveInProgressRef = useRef(false);
   const [error, setError] = useState('');
   const [hint, setHint] = useState('');
   const [deviceHint, setDeviceHint] = useState('');
@@ -116,12 +150,12 @@ export default function LiveClassroomPage({ token }) {
   const [remoteTileCount, setRemoteTileCount] = useState(0);
   /** Count of remote users publishing video (empty-state hints). */
   const [remoteVideoCount, setRemoteVideoCount] = useState(0);
-  /** Others connected to the Agora channel (drives solo vs gallery layout). */
+  /** Others connected to the LiveKit room (drives solo vs gallery layout). */
   const [remotePeerCount, setRemotePeerCount] = useState(0);
   const [activeSpeakerUid, setActiveSpeakerUid] = useState(null);
   const [participantPanelOpen, setParticipantPanelOpen] = useState(false);
   const [roomState, setRoomState] = useState(null);
-  /** Re-render participant panel when Agora remotes change (panel reads clientRef). */
+  /** Re-render participant panel when remotes change (panel reads clientRef). */
   const [rtcPresenceTick, setRtcPresenceTick] = useState(0);
   const [chatMessages, setChatMessages] = useState([]);
   const [chatOpen, setChatOpen] = useState(false);
@@ -131,12 +165,6 @@ export default function LiveClassroomPage({ token }) {
   const [flashMessages, setFlashMessages] = useState([]);
   /** Bumps when pre-join getUserMedia stream is attached so track enabled state can sync to micOn/camOn. */
   const [preJoinPreviewKey, setPreJoinPreviewKey] = useState(0);
-  const [screenSharing, setScreenSharing] = useState(false);
-  /** Next screen share includes tab/system audio when supported (default off). */
-  const [screenSharePrefIncludeAudio, setScreenSharePrefIncludeAudio] = useState(false);
-  /** Mic uplink unpublished so screen-capture audio can publish (remotes hear screen/system audio only). */
-  const [screenSharePublishedAudio, setScreenSharePublishedAudio] = useState(false);
-  const [screenShareBusy, setScreenShareBusy] = useState(false);
   const menuRef = useRef(null);
   const reactionMenuRef = useRef(null);
   const hangupMenuRef = useRef(null);
@@ -147,16 +175,9 @@ export default function LiveClassroomPage({ token }) {
   const flashTimersRef = useRef(new Map());
 
   const clientRef = useRef(null);
-  /** Cached Agora Web module (set on join) for screen-share without re-importing. */
-  const agoraRtcRef = useRef(null);
-  /** Active screen-share tracks (camera stays in `localTracksRef` but is unpublished while sharing). */
-  const screenShareVideoTrackRef = useRef(null);
-  const screenShareAudioTrackRef = useRef(null);
-  /** Optional Document PiP window when sharing alone (Chrome 116+). */
-  const docPipWindowRef = useRef(null);
-  /** True if mic was unpublished so screen-capture audio could be published. */
-  const micWasUnpublishedForScreenShareRef = useRef(false);
-  /** Latest mic/cam intent; read when publishing Agora tracks so join effect deps stay stable. */
+  const rtcProviderRef = useRef('livekit');
+  const livekitLocalDetachRef = useRef(null);
+  /** Latest mic/cam intent; read when joining so join effect deps stay stable. */
   const micCamForJoinRef = useRef({ mic: true, cam: true });
   const localTracksRef = useRef([]);
   const renewTimerRef = useRef(null);
@@ -197,8 +218,16 @@ export default function LiveClassroomPage({ token }) {
     const tick = () => {
       setRemoteTileCount(remoteElsRef.current.size);
       const c = clientRef.current;
-      const vid = c ? c.remoteUsers.filter((u) => u.videoTrack).length : 0;
-      const peers = c ? c.remoteUsers.length : 0;
+      let vid = 0;
+      let peers = 0;
+      if (c?.kind === 'livekit') {
+        const remotes = c.getRemoteParticipants?.() || [];
+        peers = remotes.length;
+        vid = remotes.filter((p) => {
+          const pub = p.getTrackPublication?.(Track.Source.Camera);
+          return pub?.track && !pub.isMuted;
+        }).length;
+      }
       setRemoteVideoCount((prev) => (prev !== vid ? vid : prev));
       setRemotePeerCount((prev) => (prev !== peers ? peers : prev));
     };
@@ -331,102 +360,90 @@ export default function LiveClassroomPage({ token }) {
     const mount = galleryRemoteSlotRef.current;
     if (!client || phase !== 'inRoom') return;
 
-    const solo = client.remoteUsers.length === 0;
-    if (solo || !mount) {
-      for (const [, el] of [...remoteElsRef.current.entries()]) {
-        try {
-          el.remove();
-        } catch {
-          /* ignore */
-        }
-      }
-      remoteElsRef.current.clear();
-      return;
-    }
-
-    const users = client.remoteUsers.slice().sort((a, b) => Number(a.uid) - Number(b.uid));
-    const validKeys = new Set(users.map((u) => String(u.uid)));
-
-    for (const u of users) {
-      const uidKey = String(u.uid);
-      const label = displayNameForUid(u.uid);
-      const camLive = Boolean(u.videoTrack && u.hasVideo);
-      const micLive = Boolean(u.hasAudio);
-
-      let el = remoteElsRef.current.get(uidKey);
-      if (!el) {
-        el = document.createElement('div');
-        el.className = 'liveMeetCell liveMeetCell--remote';
-        el.dataset.uid = uidKey;
-        el.title = label;
-        const media = document.createElement('div');
-        media.className = 'liveMeetCellMedia';
-        const blackout = document.createElement('div');
-        blackout.className = 'liveMeetCellBlackout';
-        const bn = document.createElement('div');
-        bn.className = 'liveMeetBlackoutName';
-        const bh = document.createElement('div');
-        bh.className = 'liveMeetBlackoutHint';
-        bh.textContent = 'Camera Off';
-        blackout.appendChild(bn);
-        blackout.appendChild(bh);
-        const namebar = document.createElement('div');
-        namebar.className = 'liveMeetCellNamebar';
-        const mic = document.createElement('div');
-        mic.className = 'liveMeetCellMic';
-        mic.setAttribute('aria-hidden', 'true');
-        el.appendChild(media);
-        el.appendChild(blackout);
-        el.appendChild(namebar);
-        el.appendChild(mic);
-        remoteElsRef.current.set(uidKey, el);
-      }
-
-      const media = el.querySelector(':scope > .liveMeetCellMedia');
-      const blackout = el.querySelector(':scope > .liveMeetCellBlackout');
-      const bn = el.querySelector(':scope > .liveMeetBlackoutName');
-      const namebar = el.querySelector(':scope > .liveMeetCellNamebar');
-      const mic = el.querySelector(':scope > .liveMeetCellMic');
-      if (bn) bn.textContent = label;
-      if (namebar) namebar.textContent = label;
-      if (mic) {
-        mic.classList.toggle('liveMeetCellMic--muted', !micLive);
-        mic.innerHTML = micLive
-          ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>'
-          : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2"/></svg>';
-      }
-
-      if (blackout) blackout.classList.toggle('liveMeetCellBlackout--visible', !camLive);
-      if (namebar) namebar.classList.toggle('liveMeetCellNamebar--visible', camLive);
-      if (media) {
-        if (camLive && u.videoTrack) {
+    if (client.kind === 'livekit') {
+      const remotes = client.getRemoteParticipants();
+      const solo = remotes.length === 0;
+      if (solo || !mount) {
+        for (const [, el] of [...remoteElsRef.current.entries()]) {
           try {
-            u.videoTrack.play(media, { fit: 'cover' });
-          } catch (e) {
-            console.warn('Live classroom: remote play failed', e);
-          }
-        } else {
-          try {
-            u.videoTrack?.stop();
+            el.remove();
           } catch {
             /* ignore */
           }
         }
+        remoteElsRef.current.clear();
+        return;
       }
-
-      if (el.parentNode !== mount) mount.appendChild(el);
-      el.classList.toggle('liveMeetCellSpeaking', activeSpeakerUid != null && Number(u.uid) === Number(activeSpeakerUid));
-    }
-
-    for (const [key, el] of [...remoteElsRef.current.entries()]) {
-      if (!validKeys.has(key)) {
-        try {
-          el.remove();
-        } catch {
-          /* ignore */
+      const validKeys = new Set(remotes.map((p) => String(p.identity)));
+      for (const p of remotes) {
+        const uidKey = String(p.identity);
+        const uid = client.identityToUid(p.identity);
+        const label = displayNameForUid(uid ?? uidKey);
+        const camPub = p.getTrackPublication(Track.Source.Camera);
+        const micPub = p.getTrackPublication(Track.Source.Microphone);
+        const camLive = Boolean(camPub?.track && !camPub.isMuted);
+        const micLive = Boolean(micPub && !micPub.isMuted);
+        let el = remoteElsRef.current.get(uidKey);
+        if (!el) {
+          el = document.createElement('div');
+          el.className = 'liveMeetCell liveMeetCell--remote';
+          el.dataset.uid = uidKey;
+          const media = document.createElement('div');
+          media.className = 'liveMeetCellMedia';
+          const blackout = document.createElement('div');
+          blackout.className = 'liveMeetCellBlackout';
+          const bn = document.createElement('div');
+          bn.className = 'liveMeetBlackoutName';
+          const bh = document.createElement('div');
+          bh.className = 'liveMeetBlackoutHint';
+          bh.textContent = 'Camera Off';
+          blackout.appendChild(bn);
+          blackout.appendChild(bh);
+          const namebar = document.createElement('div');
+          namebar.className = 'liveMeetCellNamebar';
+          const mic = document.createElement('div');
+          mic.className = 'liveMeetCellMic';
+          el.appendChild(media);
+          el.appendChild(blackout);
+          el.appendChild(namebar);
+          el.appendChild(mic);
+          remoteElsRef.current.set(uidKey, el);
         }
-        remoteElsRef.current.delete(key);
+        const media = el.querySelector(':scope > .liveMeetCellMedia');
+        const blackout = el.querySelector(':scope > .liveMeetCellBlackout');
+        const bn = el.querySelector(':scope > .liveMeetBlackoutName');
+        const namebar = el.querySelector(':scope > .liveMeetCellNamebar');
+        const mic = el.querySelector(':scope > .liveMeetCellMic');
+        if (bn) bn.textContent = label;
+        if (namebar) namebar.textContent = label;
+        if (mic) {
+          mic.classList.toggle('liveMeetCellMic--muted', !micLive);
+        }
+        if (blackout) blackout.classList.toggle('liveMeetCellBlackout--visible', !camLive);
+        if (namebar) namebar.classList.toggle('liveMeetCellNamebar--visible', camLive);
+        if (media) {
+          media.innerHTML = '';
+          if (camLive && camPub?.track) {
+            attachLiveKitVideo(camPub.track, media);
+          }
+        }
+        if (el.parentNode !== mount) mount.appendChild(el);
+        el.classList.toggle(
+          'liveMeetCellSpeaking',
+          activeSpeakerUid != null && uid != null && Number(uid) === Number(activeSpeakerUid)
+        );
       }
+      for (const [key, el] of [...remoteElsRef.current.entries()]) {
+        if (!validKeys.has(key)) {
+          try {
+            el.remove();
+          } catch {
+            /* ignore */
+          }
+          remoteElsRef.current.delete(key);
+        }
+      }
+      return;
     }
   }, [phase, activeSpeakerUid, displayNameForUid]);
 
@@ -441,55 +458,45 @@ export default function LiveClassroomPage({ token }) {
     if (phase !== 'inRoom') return;
     const el = localVideoRef.current;
     if (!el) return;
-    const screenV = screenShareVideoTrackRef.current;
-    if (screenSharing && screenV) {
-      try {
-        screenV.play(el, { mirror: false, fit: 'contain' });
-        setDeviceHint('');
-      } catch (e) {
-        setDeviceHint(e?.message || 'Could not show screen preview.');
-      }
-      return () => {
-        try {
-          screenV.stop?.();
-        } catch {
-          /* ignore */
-        }
-      };
+    const client = clientRef.current;
+    if (!client || client.kind !== 'livekit') return undefined;
+    if (!camOn) {
+      el.innerHTML = '';
+      return undefined;
     }
-    const tracks = localTracksRef.current;
-    if (!tracks?.length) return;
-    const camTrack = tracks[1];
-    if (!camTrack) return;
+    const track = client.getLocalVideoTrack?.();
+    if (!track) return undefined;
     try {
-      camTrack.play(el, { mirror: true, fit: 'cover' });
+      livekitLocalDetachRef.current?.();
+      livekitLocalDetachRef.current = attachLiveKitVideo(track, el);
       setDeviceHint('');
     } catch (e) {
       setDeviceHint(e?.message || 'Could not show camera preview.');
     }
-  }, [phase, localTracksVersion, camOn, remotePeerCount, screenSharing]);
+    return () => {
+      try {
+        livekitLocalDetachRef.current?.();
+      } catch {
+        /* ignore */
+      }
+      livekitLocalDetachRef.current = null;
+    };
+  }, [phase, localTracksVersion, camOn, remotePeerCount]);
 
-  /** Dev / ?liveDebug=1: periodic Agora snapshot (confirms whether any remote *hosts* exist vs REST participant list). */
+  /** Dev / ?liveDebug=1: periodic LiveKit snapshot. */
   useEffect(() => {
     if (phase !== 'inRoom' || !isLiveDebug()) return;
     const tick = () => {
       const c = clientRef.current;
-      if (!c) return;
-      let stats = null;
-      try {
-        stats = typeof c.getRTCStats === 'function' ? c.getRTCStats() : null;
-      } catch {
-        /* ignore */
-      }
+      if (!c || c.kind !== 'livekit') return;
+      const remotes = c.getRemoteParticipants?.() || [];
       liveDbg('rtc tick', {
-        remoteUsers: c.remoteUsers.length,
-        remotes: c.remoteUsers.map((u) => ({
-          uid: u.uid,
-          hasVideo: u.hasVideo,
-          hasAudio: u.hasAudio,
+        remoteCount: remotes.length,
+        remotes: remotes.map((p) => ({
+          identity: p.identity,
+          camera: Boolean(p.getTrackPublication?.(Track.Source.Camera)?.track),
+          mic: Boolean(p.getTrackPublication?.(Track.Source.Microphone)),
         })),
-        statsUserCount: stats?.UserCount,
-        recvBitrate: stats?.RecvBitrate,
       });
     };
     tick();
@@ -641,86 +648,20 @@ export default function LiveClassroomPage({ token }) {
     return () => window.clearInterval(t);
   }, [phase, id, token, joinMeta?.uid, pushFlash]);
 
-  /** After React mounts the remote grid, subscribe/play any users already in the channel (join-after-publish / missed events). */
-  useLayoutEffect(() => {
-    if (phase !== 'inRoom') return;
-    const client = clientRef.current;
-    if (!client) return;
-
-    void (async () => {
-      liveDbg('layout sync remoteUsers', {
-        count: client.remoteUsers.length,
-        remotes: client.remoteUsers.map((u) => ({
-          uid: u.uid,
-          hasVideo: u.hasVideo,
-          hasAudio: u.hasAudio,
-        })),
-      });
-      for (const u of client.remoteUsers) {
-        if (u.hasVideo) {
-          if (!u.videoTrack) {
-            try {
-              liveDbg('layout sync: subscribe video', { uid: u.uid });
-              await client.subscribe(u, 'video');
-            } catch (e) {
-              liveDbgWarn('layout sync subscribe video failed', { uid: u.uid }, formatAgoraErr(e));
-            }
-          } else {
-            liveDbg('layout sync: existing videoTrack', { uid: u.uid });
-          }
-        }
-        if (u.hasAudio) {
-          try {
-            const audioTrack = u.audioTrack ?? (await client.subscribe(u, 'audio'));
-            audioTrack?.play();
-            liveDbg('layout sync audio', { uid: u.uid, hadTrack: Boolean(u.audioTrack) });
-          } catch (e) {
-            liveDbgWarn('layout sync subscribe audio failed', { uid: u.uid }, formatAgoraErr(e));
-          }
-        }
-      }
-      repositionRemoteVideoTiles();
-    })();
-  }, [phase, repositionRemoteVideoTiles, remotePeerCount]);
-
   const teardown = useCallback(async () => {
     if (renewTimerRef.current) {
       clearInterval(renewTimerRef.current);
       renewTimerRef.current = null;
     }
     const client = clientRef.current;
-    const sv = screenShareVideoTrackRef.current;
-    const sa = screenShareAudioTrackRef.current;
-    if (client && (sv || sa)) {
-      try {
-        await client.unpublish([sv, sa].filter(Boolean));
-      } catch {
-        /* ignore */
-      }
-      try {
-        sv?.close?.();
-      } catch {
-        /* ignore */
-      }
-      try {
-        sa?.close?.();
-      } catch {
-        /* ignore */
-      }
-    }
-    screenShareVideoTrackRef.current = null;
-    screenShareAudioTrackRef.current = null;
-    micWasUnpublishedForScreenShareRef.current = false;
+    clientRef.current = null;
     try {
-      const dw = docPipWindowRef.current;
-      if (dw && !dw.closed) dw.close();
+      livekitLocalDetachRef.current?.();
     } catch {
       /* ignore */
     }
-    docPipWindowRef.current = null;
-    clientRef.current = null;
-    setScreenSharing(false);
-    setScreenSharePublishedAudio(false);
+    livekitLocalDetachRef.current = null;
+    detachAllLiveKitRemoteAudio();
     for (const t of localTracksRef.current) {
       try {
         t.stop?.();
@@ -738,71 +679,75 @@ export default function LiveClassroomPage({ token }) {
       }
     });
     remoteElsRef.current.clear();
-    if (client) {
-      try {
-        await client.removeAllListeners();
-        await client.leave();
-      } catch {
-        /* ignore */
-      }
+    if (client?.kind === 'livekit') {
+      void withTimeout(client.disconnect(), 3000);
     }
   }, []);
 
-  const leaveRoom = useCallback(async () => {
-    setHangupMenuOpen(false);
-    setPhase('leaving');
-    try {
-      if (document.pictureInPictureElement) {
-        await document.exitPictureInPicture().catch(() => {});
-      }
-    } catch {
-      /* ignore */
-    }
-    suppressJoinRef.current = true;
-    try {
-      await liveApi(`/live/sessions/${id}/leave`, token, { method: 'POST', body: '{}' });
-    } catch {
-      /* ignore */
-    }
-    await teardown();
-    setParticipantPanelOpen(false);
-    setChatOpen(false);
-    setPhase('left');
-    setSessionRunId((x) => x + 1);
-  }, [id, teardown, token]);
+  const finishLeaveNavigate = useCallback(() => {
+    if (window.history.length > 1) navigate(-1);
+    else navigate('/', { replace: true });
+  }, [navigate]);
 
-  const endSessionForAll = useCallback(async () => {
-    setHangupMenuOpen(false);
-    if (
-      !window.confirm(
-        'End this session for everyone? All participants will be disconnected from the classroom.'
-      )
-    ) {
-      return;
-    }
-    setPhase('leaving');
-    try {
-      if (document.pictureInPictureElement) {
-        await document.exitPictureInPicture().catch(() => {});
+  const exitClassroom = useCallback(
+    async (mode) => {
+      if (leaveInProgressRef.current) return;
+      leaveInProgressRef.current = true;
+      setHangupMenuOpen(false);
+      if (
+        mode === 'end' &&
+        !window.confirm(
+          'End this session for everyone? All participants will be disconnected from the classroom.'
+        )
+      ) {
+        leaveInProgressRef.current = false;
+        return;
       }
-    } catch {
-      /* ignore */
-    }
-    suppressJoinRef.current = true;
-    try {
-      await liveApi(`/live/sessions/${id}/end`, token, { method: 'POST', body: '{}' });
-    } catch (e) {
-      setPhase('inRoom');
-      setHint(e?.message || 'Could not end session. You might not have permission.');
-      window.setTimeout(() => setHint(''), 5000);
-      return;
-    }
-    await teardown();
-    setParticipantPanelOpen(false);
-    setChatOpen(false);
-    setPhase('left');
-    setSessionRunId((x) => x + 1);
-  }, [id, teardown, token]);
+
+      setPhase('leaving');
+      suppressJoinRef.current = true;
+      await exitPictureInPictureWithTimeout(1500);
+
+      const apiPath = mode === 'end' ? `/live/sessions/${id}/end` : `/live/sessions/${id}/leave`;
+      let endFailed = false;
+      try {
+        if (mode === 'end') {
+          await withTimeout(
+            liveApi(apiPath, token, { method: 'POST', body: '{}', timeoutMs: 10000 }),
+            10000
+          );
+        } else {
+          void withTimeout(
+            liveApi(apiPath, token, { method: 'POST', body: '{}', timeoutMs: 10000 }),
+            10000
+          ).catch(() => {});
+        }
+      } catch (e) {
+        if (mode === 'end') {
+          endFailed = true;
+          suppressJoinRef.current = false;
+          setPhase('inRoom');
+          setHint(e?.message || 'Could not end session. You might not have permission.');
+          window.setTimeout(() => setHint(''), 5000);
+          return;
+        }
+      } finally {
+        if (!endFailed) {
+          await withTimeout(teardown(), 3500);
+          setParticipantPanelOpen(false);
+          setChatOpen(false);
+          setSessionRunId((x) => x + 1);
+          finishLeaveNavigate();
+        }
+        leaveInProgressRef.current = false;
+      }
+    },
+    [finishLeaveNavigate, id, teardown, token]
+  );
+
+  const leaveRoom = useCallback(() => exitClassroom('leave'), [exitClassroom]);
+
+  const endSessionForAll = useCallback(() => exitClassroom('end'), [exitClassroom]);
 
   const rejoinLiveSession = useCallback(() => {
     suppressJoinRef.current = false;
@@ -812,16 +757,21 @@ export default function LiveClassroomPage({ token }) {
     lastReactPollIdRef.current = 0;
     setActiveSpeakerUid(null);
     setHint('');
-    setScreenSharing(false);
-    setScreenSharePublishedAudio(false);
     setPhase('loading');
     setSessionRunId((x) => x + 1);
   }, []);
 
-  const finishLeaveNavigate = useCallback(() => {
-    if (window.history.length > 1) navigate(-1);
-    else navigate('/', { replace: true });
-  }, [navigate]);
+  /** Safety net: never stay on "Leaving…" if PiP, fetch, or RTC teardown stalls. */
+  useEffect(() => {
+    if (phase !== 'leaving') return undefined;
+    const t = window.setTimeout(() => {
+      if (!leaveInProgressRef.current) return;
+      setParticipantPanelOpen(false);
+      setChatOpen(false);
+      finishLeaveNavigate();
+    }, 8000);
+    return () => window.clearTimeout(t);
+  }, [finishLeaveNavigate, phase]);
 
   /**
    * PiP: prefer remote participant video when presenting (Google Meet–style), else any stage video.
@@ -889,276 +839,24 @@ export default function LiveClassroomPage({ token }) {
       const a = s?.getAudioTracks?.()?.[0];
       if (a) a.enabled = next;
     } else {
-      const t = localTracksRef.current[0];
-      if (!t?.setEnabled) return;
-      t.setEnabled(next);
+      const client = clientRef.current;
+      if (client?.kind === 'livekit') void client.setMicEnabled(next);
     }
     setMicOn(next);
   }
 
   function toggleCam() {
-    if (phase === 'inRoom' && screenSharing) return;
     const next = !camOn;
     if (phase === 'preJoin') {
       const s = preJoinStreamRef.current;
       const v = s?.getVideoTracks?.()?.[0];
       if (v) v.enabled = next;
     } else {
-      const t = localTracksRef.current[1];
-      if (!t?.setEnabled) return;
-      t.setEnabled(next);
+      const client = clientRef.current;
+      if (client?.kind === 'livekit') void client.setCamEnabled(next);
     }
     setCamOn(next);
   }
-
-  const stopScreenShare = useCallback(async () => {
-    const client = clientRef.current;
-    const sv = screenShareVideoTrackRef.current;
-    const sa = screenShareAudioTrackRef.current;
-    if (!client || (!sv && !sa)) {
-      setScreenSharing(false);
-      setScreenSharePublishedAudio(false);
-      return;
-    }
-    setScreenShareBusy(true);
-    try {
-      try {
-        if (document.pictureInPictureElement) {
-          await document.exitPictureInPicture().catch(() => {});
-        }
-      } catch {
-        /* ignore */
-      }
-      try {
-        const dw = docPipWindowRef.current;
-        if (dw && !dw.closed) dw.close();
-      } catch {
-        /* ignore */
-      }
-      docPipWindowRef.current = null;
-      const tracks = localTracksRef.current;
-      const mic = tracks?.[0];
-      const cam = tracks?.[1];
-      try {
-        await client.unpublish([sv, sa].filter(Boolean));
-      } catch {
-        /* ignore */
-      }
-      try {
-        const mst = sv?.getMediaStreamTrack?.();
-        if (mst) mst.onended = null;
-      } catch {
-        /* ignore */
-      }
-      try {
-        sv?.close?.();
-      } catch {
-        /* ignore */
-      }
-      try {
-        sa?.close?.();
-      } catch {
-        /* ignore */
-      }
-      screenShareVideoTrackRef.current = null;
-      screenShareAudioTrackRef.current = null;
-      setScreenSharePublishedAudio(false);
-      const needMic = micWasUnpublishedForScreenShareRef.current;
-      micWasUnpublishedForScreenShareRef.current = false;
-      if (mic && needMic) {
-        try {
-          await client.publish([mic]);
-        } catch (e) {
-          liveDbgWarn('republish mic after screen share', formatAgoraErr(e));
-        }
-        try {
-          mic.setEnabled?.(micOn);
-        } catch {
-          /* ignore */
-        }
-      }
-      if (cam) {
-        try {
-          await client.publish([cam]);
-        } catch (e) {
-          liveDbgWarn('republish camera after screen share', formatAgoraErr(e));
-        }
-        try {
-          cam.setEnabled?.(camOn);
-        } catch {
-          /* ignore */
-        }
-      }
-      setScreenSharing(false);
-      setScreenSharePublishedAudio(false);
-      setLocalTracksVersion((v) => v + 1);
-    } finally {
-      setScreenShareBusy(false);
-    }
-  }, [camOn, micOn]);
-
-  const startScreenShare = useCallback(async () => {
-    const AgoraRTC = agoraRtcRef.current;
-    const client = clientRef.current;
-    const tracks = localTracksRef.current;
-    const mic = tracks?.[0];
-    const cam = tracks?.[1];
-    if (!AgoraRTC || !client || !cam || phase !== 'inRoom') {
-      setHint('Screen sharing is not available right now.');
-      window.setTimeout(() => setHint(''), 4000);
-      return;
-    }
-    setScreenShareBusy(true);
-    setDeviceHint('');
-    micWasUnpublishedForScreenShareRef.current = false;
-    let camUnpublished = false;
-    let screenVideo = null;
-    let screenAudio = null;
-    try {
-      /**
-       * First `await` from the Share click must be `createScreenVideoTrack` (getDisplayMedia) so the browser keeps
-       * transient user activation. Immediately after that await, request participant PiP before any other await.
-       */
-      const withAudio = screenSharePrefIncludeAudio;
-      const created = await AgoraRTC.createScreenVideoTrack(
-        { encoderConfig: '720p_1' },
-        withAudio ? 'auto' : 'disable'
-      );
-      screenVideo = Array.isArray(created) ? created[0] : created;
-      screenAudio = Array.isArray(created) ? created[1] : null;
-
-      const stage = document.getElementById('live-main-stage');
-      const pipVideo = stage?.querySelector?.('.liveMeetCell--remote video');
-      if (pipVideo && document.pictureInPictureEnabled && typeof pipVideo.requestPictureInPicture === 'function') {
-        try {
-          if (document.pictureInPictureElement && document.pictureInPictureElement !== pipVideo) {
-            void document.exitPictureInPicture();
-          }
-        } catch {
-          /* ignore */
-        }
-        try {
-          if (document.pictureInPictureElement !== pipVideo) {
-            try {
-              if (pipVideo.paused) void pipVideo.play();
-            } catch {
-              /* ignore */
-            }
-            void pipVideo.requestPictureInPicture().catch((e) => {
-              liveDbgWarn('participant PiP after screen picker', formatAgoraErr(e));
-            });
-          }
-        } catch (e) {
-          liveDbgWarn('participant PiP after screen picker', formatAgoraErr(e));
-        }
-      } else if (
-        !pipVideo &&
-        typeof window !== 'undefined' &&
-        window.documentPictureInPicture &&
-        typeof window.documentPictureInPicture.requestWindow === 'function'
-      ) {
-        void window.documentPictureInPicture
-          .requestWindow({
-            width: 400,
-            height: 140,
-          })
-          .then((pipWin) => {
-            docPipWindowRef.current = pipWin;
-            const d = pipWin.document;
-            d.body.replaceChildren();
-            const style = d.createElement('style');
-            style.textContent =
-              'body{margin:0;background:#0f172a;color:#e2e8f0;font:14px/1.45 system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:16px;box-sizing:border-box}';
-            d.head.appendChild(style);
-            const msg = d.createElement('p');
-            msg.textContent =
-              'You are presenting. Keep this window open while you share your screen. Return to the meeting tab to stop sharing or use the meeting controls.';
-            d.body.appendChild(msg);
-          })
-          .catch((e) => {
-            liveDbgWarn('document PiP (solo presenter)', formatAgoraErr(e));
-          });
-      }
-
-      await client.unpublish([cam]);
-      camUnpublished = true;
-      if (screenAudio && mic) {
-        try {
-          await client.unpublish([mic]);
-          micWasUnpublishedForScreenShareRef.current = true;
-        } catch (e) {
-          liveDbgWarn('unpublish mic for screen audio', formatAgoraErr(e));
-        }
-      }
-      const toPublish = screenAudio ? [screenVideo, screenAudio] : [screenVideo];
-      await client.publish(toPublish);
-      screenShareVideoTrackRef.current = screenVideo;
-      screenShareAudioTrackRef.current = screenAudio || null;
-      try {
-        const mst = screenVideo.getMediaStreamTrack?.();
-        if (mst) {
-          mst.onended = () => {
-            void stopScreenShare();
-          };
-        }
-      } catch {
-        /* ignore */
-      }
-      setScreenSharing(true);
-      setScreenSharePublishedAudio(Boolean(screenAudio));
-      setLocalTracksVersion((v) => v + 1);
-    } catch (e) {
-      liveDbgWarn('startScreenShare failed', formatAgoraErr(e));
-      setDeviceHint(e?.message || 'Could not start screen sharing. Check browser permissions.');
-      try {
-        if (document.pictureInPictureElement) {
-          await document.exitPictureInPicture().catch(() => {});
-        }
-      } catch {
-        /* ignore */
-      }
-      try {
-        const dw = docPipWindowRef.current;
-        if (dw && !dw.closed) dw.close();
-      } catch {
-        /* ignore */
-      }
-      docPipWindowRef.current = null;
-      if (screenVideo || screenAudio) {
-        try {
-          await client.unpublish([screenVideo, screenAudio].filter(Boolean));
-        } catch {
-          /* ignore */
-        }
-        try {
-          screenVideo?.close?.();
-        } catch {
-          /* ignore */
-        }
-        try {
-          screenAudio?.close?.();
-        } catch {
-          /* ignore */
-        }
-      }
-      screenShareVideoTrackRef.current = null;
-      screenShareAudioTrackRef.current = null;
-      const hadUnpublishedMic = micWasUnpublishedForScreenShareRef.current;
-      micWasUnpublishedForScreenShareRef.current = false;
-      try {
-        if (camUnpublished && cam) await client.publish([cam]);
-      } catch (e2) {
-        liveDbgWarn('recover camera publish after screen share failure', formatAgoraErr(e2));
-      }
-      try {
-        if (hadUnpublishedMic && mic) await client.publish([mic]);
-      } catch (e3) {
-        liveDbgWarn('recover mic publish after screen share failure', formatAgoraErr(e3));
-      }
-    } finally {
-      setScreenShareBusy(false);
-    }
-  }, [phase, screenSharePrefIncludeAudio, stopScreenShare]);
 
   function stopPreJoinPreview() {
     const s = preJoinStreamRef.current;
@@ -1238,11 +936,14 @@ export default function LiveClassroomPage({ token }) {
         });
         if (cancelled) return;
 
+        rtcProviderRef.current = 'livekit';
+
         setJoinMeta({
           title: data.title,
           channelName: data.channelName,
           role: data.role,
-          agoraReady: data.agoraReady,
+          rtcProvider: 'livekit',
+          livekitReady: data.livekitReady,
           sessionType: data.sessionType === 'one_to_one' ? 'one_to_one' : 'group',
           uid: Number(data.uid),
           canEndSession: Boolean(data.canEndSession),
@@ -1250,190 +951,60 @@ export default function LiveClassroomPage({ token }) {
 
         if (data.canEndSession && data.recordingConfigured === false) {
           setHint(
-            'Cloud recording is off: set AGORA_CUSTOMER_ID, AGORA_CUSTOMER_SECRET, and DigitalOcean Spaces (SPACES_ENDPOINT, SPACES_BUCKET, SPACES_KEY, SPACES_SECRET) on the API server.'
+            'Cloud recording is off: set LIVEKIT_API_KEY, LIVEKIT_API_SECRET, and DigitalOcean Spaces (SPACES_ENDPOINT, SPACES_BUCKET, SPACES_KEY, SPACES_SECRET) on the API server.'
           );
           window.setTimeout(() => setHint(''), 14000);
         }
 
-        if (!data.agoraReady || !data.token || !data.appId) {
+        if (!data.livekitReady || !data.livekitToken || !data.livekitUrl) {
           setPhase('error');
-          setError(data.warning || 'Agora is not configured on the server (missing token or env).');
+          setError(data.warning || 'LiveKit is not configured on the server (missing token or env).');
           return;
         }
 
-        const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
-        agoraRtcRef.current = AgoraRTC;
-        // Match native: ChannelProfileCommunication ↔ Web `rtc` (everyone publishes/subscribes; two-way meeting).
-        const client = AgoraRTC.createClient({ mode: 'rtc', codec: 'h264' });
-        clientRef.current = client;
-
-        client.on('connection-state-change', (curState) => {
-          liveDbg('connection-state-change', String(curState));
-          setRtcState(String(curState));
-        });
-
-        const playRemoteOrSubscribe = async (user, existingTrack) => {
-          const track = existingTrack ?? user.videoTrack;
-          if (!track) {
-            try {
-              await client.subscribe(user, 'video');
-            } catch (e) {
-              liveDbgWarn('subscribe(video) failed', { uid: user?.uid }, formatAgoraErr(e));
-              console.warn('Live classroom: subscribe video failed', e);
-            }
-          }
-          bumpRemoteLayout(repositionRef);
-          setRtcPresenceTick((x) => x + 1);
-        };
-
-        const handlePublished = async (user, mediaType) => {
-          liveDbg('user-published', { uid: user?.uid, mediaType, hasVideo: user?.hasVideo, hasAudio: user?.hasAudio });
-          try {
-            if (mediaType === 'video') {
-              await playRemoteOrSubscribe(user, null);
-              liveDbg('user-published video handled', { uid: user?.uid });
-            } else if (mediaType === 'audio') {
-              const audioTrack = user.audioTrack ?? (await client.subscribe(user, 'audio'));
-              audioTrack?.play();
-              liveDbg('user-published audio playing', { uid: user?.uid, hadTrack: Boolean(user.audioTrack) });
-            }
-            setRtcPresenceTick((x) => x + 1);
-          } catch (e) {
-            liveDbgWarn('user-published handler error', { uid: user?.uid, mediaType }, formatAgoraErr(e));
-            console.warn('Live classroom: subscribe failed', e);
-          }
-        };
-
-        client.on('user-published', handlePublished);
-
-        /** Communication profile: user-joined for each remote peer. */
-        client.on('user-joined', (user) => {
-          liveDbg('user-joined', {
-            uid: user?.uid,
-            hasVideo: user?.hasVideo,
-            hasAudio: user?.hasAudio,
-            videoTrack: Boolean(user?.videoTrack),
-            audioTrack: Boolean(user?.audioTrack),
-          });
-          if (user.hasVideo) void playRemoteOrSubscribe(user, null);
-        });
-
-        client.on('user-unpublished', (user, mediaType) => {
-          liveDbg('user-unpublished', { uid: user?.uid, mediaType });
-          if (mediaType === 'video') {
-            try {
-              user.videoTrack?.stop();
-            } catch {
-              /* ignore */
-            }
-          }
-          bumpRemoteLayout(repositionRef);
-          setRtcPresenceTick((x) => x + 1);
-        });
-
-        client.on('user-left', (user, reason) => {
-          liveDbg('user-left', { uid: user?.uid, reason });
-          const gone = Number(user.uid);
-          setActiveSpeakerUid((a) => (a === gone ? null : a));
-          bumpRemoteLayout(repositionRef);
-          setRtcPresenceTick((x) => x + 1);
-        });
-
-        /*
-         * Agora Web SDK ≥4.24: join()'s IJoinOptions.autoSubscribe defaults to false — keep explicit subscription + true here.
-         */
         const joinUid = Number(data.uid);
         if (!Number.isFinite(joinUid)) {
-          throw new Error('Invalid Agora uid from server');
+          throw new Error('Invalid LiveKit uid from server');
         }
-        liveDbg('joining Agora', {
-          channel: data.channelName,
-          joinUid,
-          apiRole: data.role,
-          autoSubscribe: true,
-        });
-        await client.join(data.appId, data.channelName, data.token, joinUid, { autoSubscribe: true });
-        liveDbg('join ok', {
-          localUid: client.uid,
-          remoteCount: client.remoteUsers.length,
-          remotes: client.remoteUsers.map((u) => ({
-            uid: u.uid,
-            hasVideo: u.hasVideo,
-            hasAudio: u.hasAudio,
-            videoTrack: Boolean(u.videoTrack),
-            audioTrack: Boolean(u.audioTrack),
-          })),
-        });
-
         localJoinUidRef.current = joinUid;
-        try {
-          client.enableAudioVolumeIndicator();
-        } catch (e) {
-          liveDbgWarn('enableAudioVolumeIndicator failed', formatAgoraErr(e));
-        }
-        const SPEAK_LEVEL = 22;
-        client.on('volume-indicator', (volumes) => {
-          const selfUid = localJoinUidRef.current;
-          let bestUid = null;
-          let bestLevel = 0;
-          for (const { uid, level } of volumes) {
-            const n = Number(uid);
-            if (!Number.isFinite(n) || n === Number(selfUid)) continue;
-            if (level > bestLevel) {
-              bestLevel = level;
-              bestUid = n;
-            }
-          }
-          setActiveSpeakerUid(bestLevel >= SPEAK_LEVEL ? bestUid : null);
-        });
 
-        /* autoSubscribe may attach tracks before user-published; start remote audio. */
-        for (const u of client.remoteUsers) {
-          try {
-            u.audioTrack?.play();
-          } catch {
-            /* ignore */
-          }
-        }
-
-        /* Mount video layout before publishing so refs exist for remote tiles and local preview effect. */
-        setPhase('inRoom');
-
-        if (data.role === 'publisher') {
-          try {
-            const tracks = await AgoraRTC.createMicrophoneAndCameraTracks(
-              {},
-              {
-                encoderConfig: '720p_1',
-              }
-            );
+        const client = await connectLiveKitRoom({
+          url: data.livekitUrl,
+          token: data.livekitToken,
+          roomName: data.roomName || data.channelName,
+          onConnectionState: (state) => {
+            liveDbg('livekit connection-state', state);
+            setRtcState(String(state));
+          },
+          onRemotePresence: () => {
+            bumpRemoteLayout(repositionRef);
+            setRtcPresenceTick((x) => x + 1);
+          },
+          onActiveSpeaker: (uid) => setActiveSpeakerUid(uid),
+          onLocalTracks: (tracks) => {
             localTracksRef.current = tracks;
-            try {
-              const { mic, cam } = micCamForJoinRef.current;
-              tracks[0]?.setEnabled?.(mic);
-              tracks[1]?.setEnabled?.(cam);
-            } catch {
-              /* ignore */
-            }
-            await client.publish(tracks);
-            liveDbg('local publish ok', { tracks: tracks.length });
             setLocalTracksVersion((v) => v + 1);
-          } catch (e) {
-            liveDbgWarn('local publish failed', formatAgoraErr(e));
-            setDeviceHint(
-              e?.message || 'Camera/microphone permission denied or no device found. Allow access in the browser bar.'
-            );
-          }
-        } else {
-          setHint('You are connected as a subscriber only. If this message appears, refresh after a server update.');
+          },
+        });
+        clientRef.current = client;
+
+        try {
+          const { mic, cam } = micCamForJoinRef.current;
+          await client.setMicEnabled(mic);
+          await client.setCamEnabled(cam);
+        } catch {
+          /* ignore */
         }
+
+        setPhase('inRoom');
 
         renewTimerRef.current = window.setInterval(async () => {
           try {
             const td = await liveApi(`/live/sessions/${id}/token`, token, { method: 'POST', body: '{}' });
             const cl = clientRef.current;
-            if (!td?.token || !cl || typeof cl.renewToken !== 'function') return;
-            await cl.renewToken(td.token);
+            const next = td?.livekitToken || td?.token;
+            if (!next || !cl || cl.kind !== 'livekit' || typeof cl.renewToken !== 'function') return;
+            await cl.renewToken(next);
           } catch {
             /* ignore */
           }
@@ -1450,13 +1021,19 @@ export default function LiveClassroomPage({ token }) {
 
     return () => {
       cancelled = true;
+      if (suppressJoinRef.current) return;
       void (async () => {
         try {
           await liveApi(`/live/sessions/${id}/leave`, token, { method: 'POST', body: '{}' });
         } catch {
           /* ignore */
         }
-        await teardown();
+        await Promise.race([
+          teardown(),
+          new Promise((resolve) => {
+            setTimeout(resolve, 3000);
+          }),
+        ]);
       })();
     };
   }, [id, teardown, token, readyToEnter, sessionRunId]);
@@ -1485,18 +1062,33 @@ export default function LiveClassroomPage({ token }) {
   const handsRaw = roomState?.handRaisedUserIds;
   const handsSet = new Set((Array.isArray(handsRaw) ? handsRaw : []).map((id) => Number(id)));
   const clientLive = clientRef.current;
-  const agoraRemotes = phase === 'inRoom' && clientLive ? clientLive.remoteUsers : [];
-  const remoteByUid = new Map(agoraRemotes.map((u) => [Number(u.uid), u]));
+  const remoteByUid = new Map();
+  if (phase === 'inRoom' && clientLive) {
+    if (clientLive.kind === 'livekit') {
+      for (const rp of clientLive.getRemoteParticipants?.() || []) {
+        const uid = clientLive.identityToUid(rp.identity);
+        if (uid != null) remoteByUid.set(uid, rp);
+      }
+    }
+  }
   const participantPanelRows = participants.map((p) => {
     const ru = remoteByUid.get(Number(p.id));
+    let hasVideo = false;
+    let hasAudio = false;
+    if (ru) {
+      const camPub = ru.getTrackPublication?.(Track.Source.Camera);
+      const micPub = ru.getTrackPublication?.(Track.Source.Microphone);
+      hasVideo = Boolean(camPub?.track && !camPub.isMuted);
+      hasAudio = Boolean(micPub && !micPub.isMuted);
+    }
     return {
       id: p.id,
       name: p.name,
       email: p.email,
       role: p.role,
       handRaised: handsSet.has(Number(p.id)),
-      agoraVideo: Boolean(ru?.hasVideo),
-      agoraAudio: Boolean(ru?.hasAudio),
+      hasVideo,
+      hasAudio,
     };
   });
 
@@ -1518,12 +1110,6 @@ export default function LiveClassroomPage({ token }) {
         onClick={toggleMic}
         aria-pressed={micOn}
         aria-label={micOn ? 'Mute microphone' : 'Unmute microphone'}
-        disabled={screenSharePublishedAudio}
-        title={
-          screenSharePublishedAudio
-            ? 'Microphone is replaced by shared tab/system audio while screen sharing'
-            : undefined
-        }
       >
         {micOn ? (
           <LiveSvg>
@@ -1746,7 +1332,7 @@ export default function LiveClassroomPage({ token }) {
                 roomState?.recordingConfigured === false ? (
                   <span
                     className="liveStatusChip liveStatusChipMuted"
-                    title="Server is missing Agora Cloud Recording or Spaces env. Trainers see a banner after join."
+                    title="Server is missing LiveKit egress or Spaces env. Trainers see a banner after join."
                   >
                     Recording unavailable
                   </span>
@@ -1951,11 +1537,11 @@ export default function LiveClassroomPage({ token }) {
                         </div>
                         <div className="liveParticipantPanelMeta">
                           {row.role ? <span className="liveParticipantRole">{row.role}</span> : null}
-                          <span className={row.agoraVideo ? 'livePresenceOn' : 'livePresenceOff'} title="Camera (Agora)">
-                            Cam {row.agoraVideo ? 'on' : 'off'}
+                          <span className={row.hasVideo ? 'livePresenceOn' : 'livePresenceOff'} title="Camera">
+                            Cam {row.hasVideo ? 'on' : 'off'}
                           </span>
-                          <span className={row.agoraAudio ? 'livePresenceOn' : 'livePresenceOff'} title="Microphone (Agora)">
-                            Mic {row.agoraAudio ? 'on' : 'off'}
+                          <span className={row.hasAudio ? 'livePresenceOn' : 'livePresenceOff'} title="Microphone">
+                            Mic {row.hasAudio ? 'on' : 'off'}
                           </span>
                         </div>
                       </li>
@@ -1973,25 +1559,6 @@ export default function LiveClassroomPage({ token }) {
               {isPublisher && phase === 'inRoom' ? (
                 <>
                   {micCamControlButtons}
-                  <button
-                    type="button"
-                    className={`liveIconBtn${screenSharing ? ' liveIconBtn--screenOn' : ''}`}
-                    onClick={() => void (screenSharing ? stopScreenShare() : startScreenShare())}
-                    disabled={screenShareBusy || phase === 'leaving'}
-                    aria-pressed={screenSharing}
-                    aria-label={screenSharing ? 'Stop sharing screen' : 'Share screen'}
-                    title={
-                      screenSharePrefIncludeAudio
-                        ? 'Next share includes tab/system audio when the browser offers it'
-                        : 'Screen only (no tab/system audio)'
-                    }
-                  >
-                    <LiveSvg>
-                      <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-                      <line x1="8" y1="21" x2="16" y2="21" />
-                      <line x1="12" y1="17" x2="12" y2="21" />
-                    </LiveSvg>
-                  </button>
                 </>
               ) : null}
             </div>
@@ -2010,7 +1577,7 @@ export default function LiveClassroomPage({ token }) {
                   }
                   title={
                     roomState?.recordingConfigured === false
-                      ? 'Configure AGORA_CUSTOMER_ID, AGORA_CUSTOMER_SECRET, and SPACES_* on the API server.'
+                      ? 'Configure LIVEKIT_* and SPACES_* on the API server.'
                       : joinMeta?.canEndSession && roomState?.recordingFailureHint
                         ? roomState.recordingFailureHint
                         : roomState?.recordingActive
@@ -2187,21 +1754,6 @@ export default function LiveClassroomPage({ token }) {
                           onClick={() => void tryPictureInPicture()}
                         >
                           Picture-in-picture
-                        </button>
-                      ) : null}
-                      {isPublisher && phase === 'inRoom' ? (
-                        <button
-                          type="button"
-                          className={`liveOverflowItem${screenSharePrefIncludeAudio ? ' liveOverflowItem--on' : ''}`}
-                          role="menuitemcheckbox"
-                          aria-checked={screenSharePrefIncludeAudio}
-                          onClick={() => {
-                            setScreenSharePrefIncludeAudio((v) => !v);
-                            setMenuOpen(false);
-                          }}
-                        >
-                          {screenSharePrefIncludeAudio ? '✓ ' : ''}
-                          Include tab/system audio (next screen share)
                         </button>
                       ) : null}
                       <button

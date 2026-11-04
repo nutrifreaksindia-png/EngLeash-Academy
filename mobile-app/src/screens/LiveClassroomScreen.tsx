@@ -12,7 +12,6 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   TextInput,
   TouchableOpacity,
@@ -28,31 +27,11 @@ import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { allowLandscapeForMedia, lockAppPortrait, lockLandscapeForLive } from '../utils/appScreenOrientation';
-import {
-  AudioScenarioType,
-  ChannelMediaOptions,
-  ChannelProfileType,
-  ClientRoleType,
-  createAgoraRtcEngine,
-  RemoteVideoState,
-  RtcSurfaceView,
-  RtcTextureView,
-  ScreenCaptureParameters2,
-  ScreenVideoParameters,
-  VideoEncoderConfiguration,
-  VideoSourceType,
-} from 'react-native-agora';
+import { VideoView } from '@livekit/react-native';
+import { connectLiveKitRoom, LiveKitClient } from '../live/connectLiveKitRoom';
 
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
-
-/** react-native-agora uses `if (canvas.uid)` when sourceType is omitted — uid 0 is falsy and wrongly calls setupLocalVideo for a remote user. */
-const LOCAL_VIDEO_CANVAS = { sourceType: VideoSourceType.VideoSourceCamera };
-const LOCAL_SCREEN_CANVAS = { sourceType: VideoSourceType.VideoSourceScreenPrimary };
-
-function remoteVideoCanvas(uid: number) {
-  return { uid, sourceType: VideoSourceType.VideoSourceRemote };
-}
 
 type JoinPayload = {
   liveSessionId: number;
@@ -61,13 +40,13 @@ type JoinPayload = {
   uid: number;
   role: 'publisher' | 'subscriber';
   sessionType: 'group' | 'one_to_one';
-  appId: string | null;
-  token: string | null;
-  tokenExpiresAt: string | null;
-  agoraReady: boolean;
+  livekitUrl?: string | null;
+  livekitToken?: string | null;
+  livekitReady?: boolean;
+  roomName?: string | null;
   warning: string | null;
   canEndSession?: boolean;
-  /** False when AGORA_CUSTOMER_* or SPACES_* is missing — cloud recording cannot start */
+  /** False when recording storage/credentials are missing — cloud recording cannot start */
   recordingConfigured?: boolean;
 };
 
@@ -124,14 +103,9 @@ const REACTION_EMOJI: Record<string, string> = {
   think: '🤔',
 };
 
-function buildBroadcasterJoinMediaOptions(): ChannelMediaOptions {
-  const o = new ChannelMediaOptions();
-  o.clientRoleType = ClientRoleType.ClientRoleBroadcaster;
-  o.publishCameraTrack = true;
-  o.publishMicrophoneTrack = true;
-  o.autoSubscribeAudio = true;
-  o.autoSubscribeVideo = true;
-  return o;
+function joinRtcReady(data: JoinPayload | null): boolean {
+  if (!data) return false;
+  return Boolean(data.livekitReady && data.livekitUrl && data.livekitToken);
 }
 
 function LiveClassroomScreenContent({ route, navigation }: any) {
@@ -148,15 +122,15 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
   const [sessionMeta, setSessionMeta] = useState<SessionMeta | null>(null);
   const [payload, setPayload] = useState<JoinPayload | null>(null);
   const [joined, setJoined] = useState(false);
-  const [agoraAvailable, setAgoraAvailable] = useState(true);
+  const [rtcAvailable, setRtcAvailable] = useState(true);
   const [remoteUids, setRemoteUids] = useState<number[]>([]);
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
-  /** True only after engine.initialize + preview; avoids mounting Rtc* views before native engine exists (prevents crashes). */
+  /** True after permissions are granted and LiveKit client can be initialized. */
   const [engineReady, setEngineReady] = useState(false);
-  /** Lobby = no payload yet; preview = engine + local preview only; active = joined Agora channel. */
+  /** Lobby = no payload yet; preview = local preview only; active = joined LiveKit room. */
   const [liveStage, setLiveStage] = useState<'preview' | 'active'>('preview');
   const liveStageRef = useRef(liveStage);
   const [activeSpeakerUid, setActiveSpeakerUid] = useState<number | null>(null);
@@ -168,20 +142,17 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
   const [chatSending, setChatSending] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [videoTier, setVideoTier] = useState<'hd' | 'sd' | 'low'>('hd');
-  const [screenSharing, setScreenSharing] = useState(false);
-  /** When true, next screen share requests system/tab audio capture (Android 10+; device-dependent). */
-  const [screenShareWithSystemAudioPref, setScreenShareWithSystemAudioPref] = useState(false);
-  const [screenShareBusy, setScreenShareBusy] = useState(false);
   const [flashBanner, setFlashBanner] = useState<string | null>(null);
 
   const insets = useSafeAreaInsets();
   const lastChatPollIdRef = useRef(0);
   const lastReactPollIdRef = useRef(0);
 
-  const engineRef = useRef<any>(null);
+  const livekitClientRef = useRef<LiveKitClient | null>(null);
   const payloadRef = useRef<JoinPayload | null>(null);
   const joinUidRef = useRef<number | null>(null);
-  const agoraInitKeyRef = useRef<string | null>(null);
+  const livekitInitKeyRef = useRef<string | null>(null);
+  const [livekitPresenceTick, setLivekitPresenceTick] = useState(0);
   const joinDispatchedRef = useRef(false);
   const joinedRef = useRef(false);
   const exitLiveRef = useRef<() => Promise<void>>(async () => {});
@@ -254,12 +225,13 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
       joinDispatchedRef.current = false;
       setPayload(data);
       if (data.canEndSession && data.recordingConfigured === false) {
-        showFlash('Recording unavailable: server missing Agora Customer ID/secret or Spaces.');
+        showFlash('Recording unavailable: server missing LiveKit egress or storage configuration.');
       }
-      if (!data?.agoraReady) {
+      if (!joinRtcReady(data)) {
         Alert.alert(
-          'Agora not fully configured',
-          data?.warning || 'Set AGORA_APP_ID and AGORA_APP_CERTIFICATE in backend to issue tokens.'
+          'LiveKit not fully configured',
+          data?.warning ||
+            'Set LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET on the API server.'
         );
       }
     } catch (e: any) {
@@ -271,25 +243,24 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
 
   const exitLiveToSessions = useCallback(async () => {
     try {
-      if (engineRef.current) {
+      if (livekitClientRef.current) {
         try {
-          engineRef.current.stopScreenCapture();
+          await Promise.race([
+            livekitClientRef.current.disconnect(),
+            new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+          ]);
         } catch (_) {
-          // ignore if not sharing
+          // ignore
         }
-        engineRef.current.leaveChannel();
-        engineRef.current.removeAllListeners();
-        engineRef.current.release();
-        engineRef.current = null;
+        livekitClientRef.current = null;
       }
     } catch (_) {
       // ignore rtc cleanup errors
     }
-    agoraInitKeyRef.current = null;
+    livekitInitKeyRef.current = null;
     joinDispatchedRef.current = false;
     setJoined(false);
     setEngineReady(false);
-    setScreenSharing(false);
     setRemoteUids([]);
     setActiveSpeakerUid(null);
     setPeopleOpen(false);
@@ -350,160 +321,33 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
     }, [navigation, restoreTabBarStyle])
   );
 
-  const bootstrapAgoraEngine = useCallback(
-    async (joinPayload: JoinPayload) => {
-      if (!joinPayload.agoraReady || !joinPayload.appId || !joinPayload.token) return;
-      try {
-        if (Platform.OS === 'android') {
-          await PermissionsAndroid.requestMultiple([
-            PermissionsAndroid.PERMISSIONS.CAMERA,
-            PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-          ]);
-        }
-        const engine = createAgoraRtcEngine();
-        engineRef.current = engine;
-        engine.initialize({ appId: joinPayload.appId });
-        engine.enableVideo();
-        engine.setChannelProfile(ChannelProfileType.ChannelProfileCommunication);
-        engine.startPreview();
-        const enc = new VideoEncoderConfiguration();
-        if (videoTier === 'hd') {
-          enc.dimensions = { width: 1280, height: 720 };
-          enc.frameRate = 15;
-        } else if (videoTier === 'sd') {
-          enc.dimensions = { width: 640, height: 480 };
-          enc.frameRate = 15;
-        } else {
-          enc.dimensions = { width: 640, height: 360 };
-          enc.frameRate = 15;
-        }
-        try {
-          engine.setVideoEncoderConfiguration(enc);
-        } catch (_) {
-          // ignore encoder preset errors on older SDK builds
-        }
-        joinUidRef.current = joinPayload.uid;
-
-        engine.addListener('onJoinChannelSuccess', () => {
-          setJoined(true);
-          try {
-            engine.muteAllRemoteVideoStreams(false);
-            engine.muteAllRemoteAudioStreams(false);
-          } catch (_) {
-            // ignore
-          }
-          try {
-            engine.enableAudioVolumeIndication(400, 3, false);
-          } catch (_) {
-            // ignore if not supported
-          }
-        });
-        engine.addListener('onAudioVolumeIndication', (_connection: any, speakers: { uid?: number; volume?: number }[]) => {
-          const self = Number(joinUidRef.current ?? NaN);
-          let best: number | null = null;
-          let bestV = 0;
-          for (const s of speakers || []) {
-            const uid = s.uid;
-            const v = s.volume ?? 0;
-            if (uid == null || uid <= 0) continue;
-            if (Number.isFinite(self) && uid === self) continue;
-            if (v > bestV) {
-              bestV = v;
-              best = uid;
-            }
-          }
-          const threshold = 28;
-          setActiveSpeakerUid(bestV >= threshold ? best : null);
-        });
-        engine.addListener('onUserJoined', (_connection: any, uid: number) => {
-          setRemoteUids((prev) => (prev.includes(uid) ? prev : [...prev, uid]));
-        });
-        engine.addListener(
-          'onRemoteVideoStateChanged',
-          (_connection: any, uid: number, state: RemoteVideoState) => {
-            if (uid == null || uid <= 0) return;
-            if (state === RemoteVideoState.RemoteVideoStateDecoding || state === RemoteVideoState.RemoteVideoStateStarting) {
-              setRemoteUids((prev) => (prev.includes(uid) ? prev : [...prev, uid]));
-            }
-          }
-        );
-        engine.addListener('onUserOffline', (_connection: any, uid: number) => {
-          setRemoteUids((prev) => prev.filter((id) => id !== uid));
-          setActiveSpeakerUid((a) => (a === uid ? null : a));
-        });
-        engine.addListener('onTokenPrivilegeWillExpire', async () => {
-          try {
-            const tokenData = await api.post(`/live/sessions/${liveSessionId}/token`);
-            if (tokenData?.token) {
-              engine.renewToken(tokenData.token);
-            }
-          } catch (_) {
-            // Keep session alive with old token if renewal fails.
-          }
-        });
-
-        /** If user already chose "Join" while permissions/engine were starting, join here so we never miss the channel. */
-        if (liveStageRef.current === 'active' && !joinDispatchedRef.current) {
-          const uidNum = Number(joinPayload.uid);
-          if (joinPayload.token && joinPayload.channelName && Number.isFinite(uidNum)) {
-            joinDispatchedRef.current = true;
-            try {
-              const ret = engine.joinChannel(
-                joinPayload.token,
-                joinPayload.channelName,
-                uidNum,
-                buildBroadcasterJoinMediaOptions()
-              );
-              if (ret !== 0) {
-                joinDispatchedRef.current = false;
-                console.warn('Agora joinChannel returned', ret);
-              }
-            } catch (e) {
-              joinDispatchedRef.current = false;
-              console.warn('Agora joinChannel failed', e);
-            }
-          }
-        }
-
-        setEngineReady(true);
-      } catch (e) {
-        console.log('agora init error', e);
-        setEngineReady(false);
-        setAgoraAvailable(false);
-        Alert.alert(
-          'Agora native module unavailable',
-          'Use Expo Dev Client build (not Expo Go) to run live video in-app.'
-        );
+  const bootstrapLiveKitPermissions = useCallback(async (joinPayload: JoinPayload) => {
+    if (!joinRtcReady(joinPayload)) return;
+    try {
+      if (Platform.OS === 'android') {
+        await PermissionsAndroid.requestMultiple([
+          PermissionsAndroid.PERMISSIONS.CAMERA,
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+        ]);
       }
-    },
-    [liveSessionId, videoTier]
-  );
+      joinUidRef.current = joinPayload.uid;
+      setEngineReady(true);
+      setRtcAvailable(true);
+    } catch (e) {
+      console.log('livekit permissions error', e);
+      setEngineReady(false);
+      setRtcAvailable(false);
+      Alert.alert(
+        'LiveKit unavailable',
+        'Use Expo Dev Client build (not Expo Go) and allow camera/microphone to run live video in-app.'
+      );
+    }
+  }, []);
 
   const confirmJoinSession = useCallback(async () => {
     await lockLandscapeForLive();
     setLiveStage('active');
   }, []);
-
-  useEffect(() => {
-    const eng = engineRef.current;
-    if (!eng || !joined) return;
-    const enc = new VideoEncoderConfiguration();
-    if (videoTier === 'hd') {
-      enc.dimensions = { width: 1280, height: 720 };
-      enc.frameRate = 15;
-    } else if (videoTier === 'sd') {
-      enc.dimensions = { width: 640, height: 480 };
-      enc.frameRate = 15;
-    } else {
-      enc.dimensions = { width: 640, height: 360 };
-      enc.frameRate = 15;
-    }
-    try {
-      eng.setVideoEncoderConfiguration(enc);
-    } catch (_) {
-      // ignore
-    }
-  }, [videoTier, joined]);
 
   useEffect(() => {
     void loadSessionMeta();
@@ -585,53 +429,80 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
   useEffect(() => {
     const p = payload;
     const uidNum = p?.uid != null ? Number(p.uid) : NaN;
-    if (!p?.agoraReady || !p.channelName || !Number.isFinite(uidNum)) return undefined;
-    const key = `${liveSessionId}|${p.channelName}|${uidNum}`;
-    if (agoraInitKeyRef.current === key) return undefined;
-    agoraInitKeyRef.current = key;
+    if (!p || !joinRtcReady(p) || !p.channelName || !Number.isFinite(uidNum)) return undefined;
+    const key = `${liveSessionId}|livekit|${p.channelName}|${uidNum}`;
+
+    if (livekitInitKeyRef.current === key) return undefined;
+    livekitInitKeyRef.current = key;
     joinDispatchedRef.current = false;
-    void bootstrapAgoraEngine({ ...p, uid: uidNum });
+    void bootstrapLiveKitPermissions({ ...p, uid: uidNum });
     return () => {
-      try {
+      void (async () => {
         try {
-          engineRef.current?.stopScreenCapture();
+          await livekitClientRef.current?.disconnect();
         } catch (_) {
           // ignore
         }
-        engineRef.current?.leaveChannel();
-        engineRef.current?.removeAllListeners();
-        engineRef.current?.release();
-      } catch (_) {}
-      engineRef.current = null;
-      agoraInitKeyRef.current = null;
+        livekitClientRef.current = null;
+      })();
+      livekitInitKeyRef.current = null;
       joinDispatchedRef.current = false;
       joinUidRef.current = null;
       setJoined(false);
       setEngineReady(false);
-      setScreenSharing(false);
     };
-  }, [liveSessionId, payload, bootstrapAgoraEngine]);
+  }, [liveSessionId, payload, bootstrapLiveKitPermissions]);
 
   useEffect(() => {
     if (liveStage !== 'active') return undefined;
     if (!engineReady || joined) return undefined;
-    const eng = engineRef.current;
     const p = payloadRef.current;
     const uidNum = p?.uid != null ? Number(p.uid) : NaN;
-    if (!eng || !p?.agoraReady || !p.token || !p.channelName || !Number.isFinite(uidNum)) return undefined;
+    if (!p || !joinRtcReady(p) || !p.channelName || !Number.isFinite(uidNum)) return undefined;
     if (joinDispatchedRef.current) return undefined;
+    if (!p.livekitUrl || !p.livekitToken) return undefined;
+
     joinDispatchedRef.current = true;
-    try {
-      const ret = eng.joinChannel(p.token, p.channelName, uidNum, buildBroadcasterJoinMediaOptions());
-      if (ret !== 0) {
+    void (async () => {
+      try {
+        const client = await connectLiveKitRoom({
+          url: p.livekitUrl!,
+          token: p.livekitToken!,
+          roomName: p.roomName || p.channelName,
+          onRemotePresence: () => {
+            const remotes = livekitClientRef.current?.getRemoteParticipants() || [];
+            const uids = remotes
+              .map((rp) => livekitClientRef.current?.identityToUid(rp.identity))
+              .filter((n): n is number => n != null);
+            setRemoteUids(uids);
+            setLivekitPresenceTick((x) => x + 1);
+          },
+          onActiveSpeaker: (uid) => setActiveSpeakerUid(uid),
+          onJoined: () => setJoined(true),
+        });
+        livekitClientRef.current = client;
+        const remotes = client.getRemoteParticipants();
+        setRemoteUids(
+          remotes
+            .map((rp) => client.identityToUid(rp.identity))
+            .filter((n): n is number => n != null)
+        );
+        setJoined(true);
+        try {
+          await client.setMicEnabled(!muted);
+          await client.setCamEnabled(!cameraOff);
+        } catch (_) {
+          // ignore
+        }
+      } catch (e) {
         joinDispatchedRef.current = false;
-        console.warn('Agora joinChannel returned', ret);
+        console.warn('LiveKit connect failed', e);
+        setRtcAvailable(false);
+        Alert.alert('Join failed', e instanceof Error ? e.message : 'Could not connect to LiveKit room');
       }
-    } catch (_) {
-      joinDispatchedRef.current = false;
-    }
+    })();
     return undefined;
-  }, [liveStage, engineReady, joined, payload]);
+  }, [liveStage, engineReady, joined, payload, cameraOff, muted]);
 
   useEffect(() => {
     if (!payload) return undefined;
@@ -663,13 +534,12 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
 
   useEffect(() => {
     const onApp = async (next: AppStateStatus) => {
-      if (next !== 'active' || !engineRef.current || !payloadRef.current?.agoraReady) return;
+      if (next !== 'active' || !payloadRef.current || !joinRtcReady(payloadRef.current)) return;
       setReconnecting(true);
       try {
         const tokenData = await api.post(`/live/sessions/${liveSessionId}/token`);
-        if (tokenData?.token) {
-          engineRef.current.renewToken(tokenData.token);
-        }
+        const next = tokenData?.livekitToken || tokenData?.token;
+        if (next) await livekitClientRef.current?.renewToken(next);
       } catch (_) {
         // ignore
       } finally {
@@ -719,88 +589,6 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
     }
   };
 
-  const stopMobileScreenShare = useCallback(() => {
-    const engine = engineRef.current;
-    if (!engine) {
-      setScreenSharing(false);
-      return;
-    }
-    setScreenShareBusy(true);
-    try {
-      try {
-        engine.stopScreenCapture();
-      } catch (_) {
-        // ignore
-      }
-      const opts = new ChannelMediaOptions();
-      opts.publishScreenCaptureVideo = false;
-      opts.publishScreenCaptureAudio = false;
-      opts.publishCameraTrack = true;
-      opts.publishMicrophoneTrack = true;
-      engine.updateChannelMediaOptions(opts);
-      try {
-        engine.setAudioScenario(AudioScenarioType.AudioScenarioDefault);
-      } catch (_) {
-        // ignore
-      }
-      setScreenSharing(false);
-    } finally {
-      setScreenShareBusy(false);
-    }
-  }, []);
-
-  const startMobileScreenShare = useCallback(() => {
-    const engine = engineRef.current;
-    if (!joined || !engine || payloadRef.current?.role !== 'publisher') return;
-    setScreenShareBusy(true);
-    try {
-      const withAudio = screenShareWithSystemAudioPref;
-      if (withAudio) {
-        try {
-          engine.setAudioScenario(AudioScenarioType.AudioScenarioGameStreaming);
-        } catch (_) {
-          // ignore
-        }
-      }
-      const cap = new ScreenCaptureParameters2();
-      cap.captureVideo = true;
-      cap.captureAudio = withAudio;
-      const vp = new ScreenVideoParameters();
-      vp.dimensions = { width: 1280, height: 720 };
-      vp.frameRate = 15;
-      cap.videoParams = vp;
-      const code = engine.startScreenCapture(cap);
-      if (code !== 0) {
-        Alert.alert(
-          'Screen share',
-          `Could not start screen capture (code ${code}). On iOS you may need a Broadcast Upload Extension in the native project; on Android, allow screen capture when prompted.`
-        );
-        try {
-          engine.setAudioScenario(AudioScenarioType.AudioScenarioDefault);
-        } catch (_) {
-          // ignore
-        }
-        return;
-      }
-      const opts = new ChannelMediaOptions();
-      opts.publishCameraTrack = false;
-      opts.publishScreenCaptureVideo = true;
-      opts.publishScreenCaptureAudio = withAudio;
-      opts.publishMicrophoneTrack = !withAudio;
-      engine.updateChannelMediaOptions(opts);
-      setScreenSharing(true);
-    } catch (e: any) {
-      Alert.alert('Screen share', e?.message || 'Failed to start');
-      try {
-        engine.setAudioScenario(AudioScenarioType.AudioScenarioDefault);
-      } catch (_) {
-        // ignore
-      }
-    } finally {
-      setScreenShareBusy(false);
-    }
-  }, [joined, screenShareWithSystemAudioPref]);
-
   const videoPages = useMemo(() => {
     type Slot = { key: string; kind: 'local' } | { key: string; kind: 'remote'; uid: number };
     const slots: Slot[] =
@@ -811,6 +599,8 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
     for (let i = 0; i < slots.length; i += 2) pages.push(slots.slice(i, i + 2));
     return pages;
   }, [joined, remoteUids]);
+
+  const rtcVideoReady = payload ? joinRtcReady(payload) && rtcAvailable : false;
 
   if (!Number.isFinite(liveSessionId) || liveSessionId <= 0) {
     return (
@@ -925,54 +715,42 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
     payload.sessionType === 'group' && (user?.role === 'Student' || user?.role === 'Lab');
 
   const toggleMute = () => {
-    if (!engineRef.current) return;
     const next = !muted;
     setMuted(next);
-    engineRef.current.muteLocalAudioStream(next);
+    if (livekitClientRef.current) {
+      void livekitClientRef.current.setMicEnabled(!next);
+    }
   };
 
   const toggleCamera = () => {
-    if (!engineRef.current || screenSharing) return;
     const next = !cameraOff;
     setCameraOff(next);
-    engineRef.current.muteLocalVideoStream(next);
+    if (livekitClientRef.current) {
+      void livekitClientRef.current.setCamEnabled(!next);
+    }
   };
 
   const renderMediaControls = () => (
     <View style={styles.liveDockWrap}>
       <View style={[styles.controlsRow, styles.controlsRowCompact]}>
         <TouchableOpacity
-          style={[styles.ctrlBtn, styles.ctrlBtnIconOnly, muted && styles.ctrlBtnWarn, screenShareWithSystemAudioPref && screenSharing && styles.ctrlBtnWarn]}
+          style={[styles.ctrlBtn, styles.ctrlBtnIconOnly, muted && styles.ctrlBtnWarn]}
           onPress={toggleMute}
           accessibilityRole="button"
           accessibilityLabel={muted ? 'Unmute microphone' : 'Mute microphone'}
-          disabled={screenShareWithSystemAudioPref && screenSharing}
           hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
         >
           <Ionicons name={muted ? 'mic-off' : 'mic'} size={26} color="#fff" />
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.ctrlBtn, styles.ctrlBtnIconOnly, cameraOff && styles.ctrlBtnWarn, screenSharing && styles.ctrlBtnDim]}
+          style={[styles.ctrlBtn, styles.ctrlBtnIconOnly, cameraOff && styles.ctrlBtnWarn]}
           onPress={toggleCamera}
           accessibilityRole="button"
           accessibilityLabel={cameraOff ? 'Turn camera on' : 'Turn camera off'}
-          disabled={screenSharing}
           hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
         >
           <Ionicons name={cameraOff ? 'videocam-off' : 'videocam'} size={26} color="#fff" />
         </TouchableOpacity>
-        {payload?.role === 'publisher' && joined ? (
-          <TouchableOpacity
-            style={[styles.ctrlBtn, styles.ctrlBtnIconOnly, screenSharing ? styles.ctrlBtnScreenOn : null]}
-            onPress={() => (screenSharing ? stopMobileScreenShare() : startMobileScreenShare())}
-            disabled={screenShareBusy}
-            accessibilityRole="button"
-            accessibilityLabel={screenSharing ? 'Stop sharing screen' : 'Share screen'}
-            hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
-          >
-            <Ionicons name="desktop-outline" size={26} color="#fff" />
-          </TouchableOpacity>
-        ) : null}
       </View>
       {joined && engineReady ? (
         <View style={[styles.controlsRow, styles.sessionToolsRow]}>
@@ -1132,23 +910,6 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
             <Text style={styles.settingsHint}>
               Applies to your uplink while publishing. Choose a lower tier on slower networks.
             </Text>
-            {payload?.role === 'publisher' ? (
-              <View style={styles.settingsSwitchRow}>
-                <View style={{ flex: 1, paddingRight: 12 }}>
-                  <Text style={styles.label}>Screen share: system audio</Text>
-                  <Text style={styles.settingsHint}>
-                    Off by default. When on, the next screen share tries to capture device audio (Android 10+; not all
-                    devices). Your microphone uplink is paused while system audio is shared.
-                  </Text>
-                </View>
-                <Switch
-                  value={screenShareWithSystemAudioPref}
-                  onValueChange={setScreenShareWithSystemAudioPref}
-                  trackColor={{ false: '#475569', true: '#22c55e' }}
-                  thumbColor="#f8fafc"
-                />
-              </View>
-            ) : null}
           </View>
         </View>
       </View>
@@ -1157,23 +918,17 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
 
   const renderMeetVideoSlot = (slot: { key: string; kind: 'local' } | { key: string; kind: 'remote'; uid: number }) => {
     if (slot.kind === 'local') {
+      const localTrack =
+        livekitClientRef.current && !cameraOff ? livekitClientRef.current.getLocalVideoTrack() : null;
       return (
         <View style={styles.meetCellWrap}>
-          <View style={[styles.meetCellAspect, screenSharing ? styles.cellScreenShare : null]}>
-            {Platform.OS === 'android' ? (
-              <View style={styles.meetCellShell}>
-                <RtcTextureView
-                  key={screenSharing ? 'local-screen' : 'local-cam'}
-                  style={styles.remoteTextureFill}
-                  canvas={screenSharing ? LOCAL_SCREEN_CANVAS : LOCAL_VIDEO_CANVAS}
-                />
-              </View>
+          <View style={styles.meetCellAspect}>
+            {localTrack ? (
+              <VideoView style={styles.remoteTextureFill} videoTrack={localTrack} mirror />
             ) : (
-              <RtcSurfaceView
-                key={screenSharing ? 'local-screen' : 'local-cam'}
-                style={styles.remoteTextureFill}
-                canvas={screenSharing ? LOCAL_SCREEN_CANVAS : LOCAL_VIDEO_CANVAS}
-              />
+              <View style={[styles.remoteTextureFill, styles.videoPlaceholder]}>
+                <Text style={styles.videoPlaceholderText}>Camera off</Text>
+              </View>
             )}
           </View>
           {handRaisedSelf ? (
@@ -1186,17 +941,18 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
       );
     }
     const uid = slot.uid;
-    const canvas = remoteVideoCanvas(uid);
     const speakH = activeSpeakerUid === uid;
+    const remoteTrack = livekitClientRef.current ? livekitClientRef.current.getRemoteVideoTrack(uid) : null;
+    void livekitPresenceTick;
     return (
       <View style={styles.meetCellWrap}>
         <View style={[styles.meetCellAspect, speakH && styles.remoteTileSpeaking]}>
-          {Platform.OS === 'android' ? (
-            <View style={styles.meetCellShell}>
-              <RtcTextureView style={styles.remoteTextureFill} canvas={canvas} />
-            </View>
+          {remoteTrack ? (
+            <VideoView style={styles.remoteTextureFill} videoTrack={remoteTrack} />
           ) : (
-            <RtcSurfaceView style={styles.remoteTextureFill} canvas={canvas} />
+            <View style={[styles.remoteTextureFill, styles.videoPlaceholder]}>
+              <Text style={styles.videoPlaceholderText}>Camera off</Text>
+            </View>
           )}
         </View>
       </View>
@@ -1204,7 +960,7 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
   };
 
   const videoMain =
-    payload.agoraReady && agoraAvailable && engineReady ? (
+    payload && rtcVideoReady && engineReady ? (
       <View style={[styles.videoContainer, styles.videoContainerRel, styles.videoContainerLandscape]}>
         <FlatList
           data={videoPages}
@@ -1212,7 +968,7 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
           horizontal
           pagingEnabled
           removeClippedSubviews={false}
-          extraData={`${joined}:${remoteUids.join(',')}:${activeSpeakerUid ?? ''}:${screenSharing ? 1 : 0}`}
+          extraData={`${joined}:${remoteUids.join(',')}:${activeSpeakerUid ?? ''}:${livekitPresenceTick}`}
           showsHorizontalScrollIndicator={false}
           style={styles.meetPager}
           renderItem={({ item: page }) => (
@@ -1227,7 +983,7 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
           )}
         />
       </View>
-    ) : payload.agoraReady && agoraAvailable && !engineReady ? (
+    ) : payload && rtcVideoReady && !engineReady ? (
       <View style={[styles.videoContainer, styles.videoContainerLandscape, styles.videoPlaceholder]}>
         <ActivityIndicator size="large" color="#fff" />
         <Text style={styles.videoPlaceholderText}>Starting camera…</Text>
@@ -1860,13 +1616,13 @@ const styles = StyleSheet.create({
     width: '100%',
     backgroundColor: '#000',
   },
-  /** Outer chrome for Android local preview (background lives here, not on RtcTextureView). */
+  /** Outer chrome for Android local preview. */
   localVideoShell: {
     width: '100%',
     backgroundColor: '#000',
     overflow: 'hidden',
   },
-  /** Layout only — never set backgroundColor on RtcTextureView (Android / Fabric crash). */
+  /** Layout only for local video fill. */
   localTextureFill: {
     width: '100%',
     height: '100%',

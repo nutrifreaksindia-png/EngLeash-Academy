@@ -102,7 +102,7 @@ const sessionRows = [
   },
 ];
 const insertLiveSession = db.prepare(`
-  INSERT INTO live_sessions (batch_id, title, agora_channel, starts_at, ends_at, status, created_by)
+  INSERT INTO live_sessions (batch_id, title, room_name, starts_at, ends_at, status, created_by)
   VALUES (?, ?, ?, ?, ?, 'scheduled', ?)
 `);
 sessionRows.forEach((s) => {
@@ -119,7 +119,7 @@ sessionRows.forEach((s) => {
 // Admin sees all sessions; Trainer/Student see sessions for their batches (seeded above).
 db.prepare("DELETE FROM live_sessions WHERE title LIKE 'TEST:%'").run();
 const insertTestSession = db.prepare(`
-  INSERT INTO live_sessions (batch_id, title, agora_channel, starts_at, ends_at, status, created_by)
+  INSERT INTO live_sessions (batch_id, title, room_name, starts_at, ends_at, status, created_by)
   VALUES (?, ?, ?, ?, ?, ?, ?)
 `);
 const mkChannel = () => `live_test_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;

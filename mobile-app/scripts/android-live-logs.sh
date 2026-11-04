@@ -15,10 +15,10 @@ fi
 echo "== adb devices =="
 "$ADB" devices -l
 echo ""
-echo "== Recent log lines (errors / RN / your app / Agora) =="
+echo "== Recent log lines (errors / RN / your app / LiveKit) =="
 # -d dump and exit; last ~1200 lines then filter (logcat -t is line count from tail)
 "$ADB" logcat -d -t 1200 2>/dev/null | grep -iE \
-  "AndroidRuntime|ReactNativeJS|ReactNative|FATAL|engleash|expo\.|ExpoModules|Invariant Violation|TypeError|ReferenceError|agora|RtcEngine|iris_|SoLoader|UnsatisfiedLinkError|JNI" \
+  "AndroidRuntime|ReactNativeJS|ReactNative|FATAL|engleash|expo\.|ExpoModules|Invariant Violation|TypeError|ReferenceError|livekit|webrtc|SoLoader|UnsatisfiedLinkError|JNI" \
   | tail -150 || true
 echo ""
 echo "Tip: reproduce the crash, then run this script again (or use: $ADB logcat -c && $ADB logcat -v time)"

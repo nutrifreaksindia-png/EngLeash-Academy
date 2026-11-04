@@ -472,8 +472,6 @@ function ensureV1Tables(db) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
       batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
-      agora_resource_id TEXT,
-      agora_sid TEXT,
       recording_uid TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'starting' CHECK(status IN ('starting', 'recording', 'stopping', 'stopped', 'failed', 'expired')),
       storage_prefix TEXT,
@@ -489,6 +487,11 @@ function ensureV1Tables(db) {
     CREATE INDEX IF NOT EXISTS idx_live_recording_session_status ON live_session_recordings(live_session_id, status);
     CREATE INDEX IF NOT EXISTS idx_live_recording_batch ON live_session_recordings(batch_id, started_at);
     CREATE INDEX IF NOT EXISTS idx_live_recording_expires ON live_session_recordings(expires_at);
+  `);
+  safeAlter(db, "ALTER TABLE live_session_recordings ADD COLUMN rtc_provider TEXT DEFAULT 'livekit'");
+  safeAlter(db, 'ALTER TABLE live_session_recordings ADD COLUMN livekit_egress_id TEXT');
+  safeAlter(db, 'ALTER TABLE live_sessions RENAME COLUMN agora_channel TO room_name');
+  db.exec(`
 
     CREATE TABLE IF NOT EXISTS video_categories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1066,6 +1069,7 @@ function migratePaymentRecordsForApply(db) {
   } finally {
     db.pragma('foreign_keys = ON');
   }
+
 }
 
 /** Expand users.role CHECK to allow Creator (SQLite cannot ALTER CHECK). */

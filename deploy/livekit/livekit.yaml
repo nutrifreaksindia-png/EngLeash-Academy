@@ -1,0 +1,16 @@
+# Replace API key/secret after: docker run --rm livekit/livekit-server:latest generate-keys
+port: 7880
+bind_addresses:
+  - 127.0.0.1
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  # Public VPS IP — avoids advertising Docker bridge addresses as ICE candidates.
+  node_ip: 72.61.224.223
+redis:
+  address: 127.0.0.1:6380
+keys:
+  API_KEY_PLACEHOLDER: API_SECRET_PLACEHOLDER
+logging:
+  level: info
