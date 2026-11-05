@@ -133,10 +133,12 @@ const videoRoutes = require('./routes/videos');
 const studyMaterialRoutes = require('./routes/studyMaterials');
 const worksheetRoutes = require('./routes/worksheets');
 const assignmentRoutes = require('./routes/assignments');
+const libraryOwnershipRoutes = require('./routes/libraryOwnership');
 const { router: paymentRoutes, razorpayWebhookHandler } = require('./routes/payments');
 const billingPackageRoutes = require('./routes/billingPackages');
 const subscriptionRoutes = require('./routes/subscriptions');
 const { runApplyOverdueEnforcementSweep } = require('./services/applyDueEnforcement');
+const { runBatchCompletionSweep } = require('./services/batchCompletion');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -164,6 +166,7 @@ app.use('/api/videos', videoRoutes);
 app.use('/api/study-materials', studyMaterialRoutes);
 app.use('/api/worksheets', worksheetRoutes);
 app.use('/api/assignments', assignmentRoutes);
+app.use('/api/library/ownership', libraryOwnershipRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/billing', billingPackageRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
@@ -186,6 +189,7 @@ app.get('/api/health/details', (req, res) => {
 
 const LISTEN_HOST = process.env.BIND_HOST || '0.0.0.0';
 const APPLY_OVERDUE_SWEEP_MS = Math.max(60_000, Number(process.env.APPLY_OVERDUE_SWEEP_MS || 5 * 60 * 1000));
+const BATCH_COMPLETION_SWEEP_MS = Math.max(60_000, Number(process.env.BATCH_COMPLETION_SWEEP_MS || 60 * 60 * 1000));
 
 function logLanAddresses() {
   const nets = os.networkInterfaces();
@@ -216,3 +220,17 @@ setInterval(() => {
     console.error('[apply-overdue] sweep failed', error);
   }
 }, APPLY_OVERDUE_SWEEP_MS);
+
+function sweepCompletedBatches() {
+  try {
+    const summary = runBatchCompletionSweep();
+    if (summary.completed > 0) {
+      console.log('[batch-completion] sweep', summary);
+    }
+  } catch (error) {
+    console.error('[batch-completion] sweep failed', error);
+  }
+}
+
+sweepCompletedBatches();
+setInterval(sweepCompletedBatches, BATCH_COMPLETION_SWEEP_MS);

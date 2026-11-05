@@ -24,15 +24,22 @@ function validateCoursePackageKind(course, kind) {
 }
 
 router.get('/combos', auth, requireRole('Admin'), (req, res) => {
-  const combos = db.prepare('SELECT * FROM course_combos ORDER BY id DESC').all();
-  const membersStmt = db.prepare('SELECT course_id FROM course_combo_members WHERE combo_id = ? ORDER BY id');
-  res.json(
-    combos.map((c) => ({
-      ...c,
-      is_active: !!c.is_active,
-      courseIds: membersStmt.all(c.id).map((m) => m.course_id),
-    }))
-  );
+  try {
+    const combos = db.prepare('SELECT * FROM course_combos ORDER BY id DESC').all();
+    const membersStmt = db.prepare(
+      'SELECT course_id FROM course_combo_members WHERE combo_id = ? ORDER BY rowid',
+    );
+    res.json(
+      combos.map((c) => ({
+        ...c,
+        is_active: !!c.is_active,
+        courseIds: membersStmt.all(c.id).map((m) => m.course_id),
+      })),
+    );
+  } catch (e) {
+    console.error('[billing] GET /combos', e);
+    res.status(500).json({ error: e.message || 'Could not load combos' });
+  }
 });
 
 router.post('/combos', auth, requireRole('Admin'), (req, res) => {
@@ -278,7 +285,7 @@ router.get('/public/combo/:comboId', (req, res) => {
   const combo = db.prepare('SELECT id, name, is_active FROM course_combos WHERE id = ?').get(comboId);
   if (!combo || !combo.is_active) return res.status(404).json({ error: 'Combo not found' });
   const members = db
-    .prepare('SELECT course_id FROM course_combo_members WHERE combo_id = ? ORDER BY id')
+    .prepare('SELECT course_id FROM course_combo_members WHERE combo_id = ? ORDER BY rowid')
     .all(comboId)
     .map((m) => m.course_id);
 

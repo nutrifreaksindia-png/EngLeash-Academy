@@ -75,6 +75,7 @@ export default function LandingHomeScreen({ navigation, route }: any) {
   const [courses, setCourses] = useState<PublicCourse[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [enrollingId, setEnrollingId] = useState<number | null>(null);
   const [authNavId, setAuthNavId] = useState<number | null>(null);
   const [applyNavId, setApplyNavId] = useState<number | null>(null);
@@ -82,17 +83,28 @@ export default function LandingHomeScreen({ navigation, route }: any) {
   const subscribeResumeKeyRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
+    setLoadError(null);
     try {
-      const data = user?.id ? await api.get('/courses/catalog') : await api.publicGet('/courses/public');
-      setCourses(Array.isArray(data) ? data : []);
+      const published = await api.publicGet('/courses/public');
+      const list = Array.isArray(published) ? published : [];
       if (user?.id) {
-        setApplyEnquiries(await fetchActiveApplyEnquiryMap());
+        try {
+          const catalog = await api.get('/courses/catalog');
+          const extras = new Map((Array.isArray(catalog) ? catalog : []).map((c: PublicCourse) => [c.id, c]));
+          setCourses(list.map((c) => (extras.get(c.id) ? { ...c, ...extras.get(c.id) } : c)));
+          setApplyEnquiries(await fetchActiveApplyEnquiryMap());
+        } catch {
+          setCourses(list);
+          setApplyEnquiries({});
+        }
       } else {
+        setCourses(list);
         setApplyEnquiries({});
       }
-    } catch {
+    } catch (e: any) {
       setCourses([]);
       setApplyEnquiries({});
+      setLoadError(e?.message || 'Could not load courses. Pull to retry.');
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -272,7 +284,9 @@ export default function LandingHomeScreen({ navigation, route }: any) {
         keyExtractor={(item) => String(item.id)}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
         contentContainerStyle={styles.listContent}
-        ListEmptyComponent={<Text style={styles.empty}>No published courses yet.</Text>}
+        ListEmptyComponent={
+          <Text style={styles.empty}>{loadError || 'No published courses yet.'}</Text>
+        }
         renderItem={({ item }) => {
           const fee = item.fee_inr ?? 0;
           const disc = item.discount_inr ?? 0;

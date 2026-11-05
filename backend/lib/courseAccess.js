@@ -223,6 +223,55 @@ function learnerHasCourseAccess(userId, courseId, nowMs = Date.now()) {
   return entitlementFromGrantsOrBatchMembership(uid, cid, nowMs);
 }
 
+/**
+ * All course IDs a lesson belongs to (legacy `lessons` rows + `course_lessons` / lesson_library maps).
+ * Do not prefer one table over the other by shared numeric id alone — callers should check access on any match.
+ */
+function courseIdsForLesson(lessonId) {
+  const lid = Number(lessonId);
+  if (!Number.isFinite(lid)) return [];
+  const ids = [];
+  const legacy = db.prepare('SELECT course_id FROM lessons WHERE id = ?').get(lid);
+  if (legacy?.course_id != null) ids.push(Number(legacy.course_id));
+  const mapped = db.prepare('SELECT DISTINCT course_id FROM course_lessons WHERE lesson_id = ?').all(lid);
+  for (const r of mapped) {
+    if (r.course_id != null) ids.push(Number(r.course_id));
+  }
+  return [...new Set(ids.filter((x) => Number.isFinite(x)))];
+}
+
+/**
+ * Whether a user may access lesson-scoped content (quizzes, uploads, etc.).
+ * Optional preferredCourseId is the course the learner opened (avoids picking the wrong map when a lesson
+ * is shared across courses, or when a legacy `lessons.id` collides with a `lesson_library.id`).
+ */
+function learnerCanAccessLesson(userId, role, lessonId, preferredCourseId = null, nowMs = Date.now()) {
+  const lid = Number(lessonId);
+  if (!Number.isFinite(lid)) return false;
+
+  const { isLessonDenied, isLessonGranted } = require('./lessonAccess');
+  if (role !== 'Admin' && isLessonDenied(userId, lid)) return false;
+  if (isLessonGranted(userId, lid)) return true;
+
+  if (role === 'Admin') {
+    if (db.prepare('SELECT 1 FROM lessons WHERE id = ?').get(lid)) return true;
+    if (db.prepare('SELECT 1 FROM lesson_library WHERE id = ?').get(lid)) return true;
+    if (db.prepare('SELECT 1 FROM course_lessons WHERE lesson_id = ? LIMIT 1').get(lid)) return true;
+    return false;
+  }
+
+  const preferred = preferredCourseId != null ? Number(preferredCourseId) : NaN;
+  if (Number.isFinite(preferred)) {
+    const belongs =
+      db.prepare('SELECT 1 FROM lessons WHERE id = ? AND course_id = ?').get(lid, preferred) ||
+      db.prepare('SELECT 1 FROM course_lessons WHERE lesson_id = ? AND course_id = ?').get(lid, preferred);
+    if (belongs && learnerHasCourseAccess(userId, preferred, nowMs)) return true;
+  }
+
+  const courseIds = courseIdsForLesson(lid);
+  return courseIds.some((cid) => learnerHasCourseAccess(userId, cid, nowMs));
+}
+
 function userHasCourseAccess(userId, courseId, nowMs = Date.now()) {
   const rows = db
     .prepare(
@@ -421,7 +470,10 @@ function loadBillingPackage(id) {
 }
 
 function loadComboCourses(comboId) {
-  return db.prepare('SELECT course_id FROM course_combo_members WHERE combo_id = ? ORDER BY id').all(comboId).map((r) => Number(r.course_id));
+  return db
+    .prepare('SELECT course_id FROM course_combo_members WHERE combo_id = ? ORDER BY rowid')
+    .all(comboId)
+    .map((r) => Number(r.course_id));
 }
 
 /** True once the batch has a real cohort start (sessions generated). Subscribe/Apply access is anchored here, not at batch creation. */
@@ -672,6 +724,8 @@ module.exports = {
   packageDurationMs,
   packageAmountPaise,
   learnerHasCourseAccess,
+  learnerCanAccessLesson,
+  courseIdsForLesson,
   entitlementFromGrantsOrBatchMembership,
   clearStaleEnrollmentIfNoAccess,
   revokeAccessGrantById,

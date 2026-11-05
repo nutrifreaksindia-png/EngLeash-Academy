@@ -144,10 +144,10 @@ function invoiceBundleForAdmin(req) {
   const bundle = getInvoiceBundleByPaymentId(paymentId);
   if (!bundle) return null;
   if (req.user) {
-    return ['Admin', 'Creator', 'Trainer'].includes(String(req.user.role || '')) ? bundle : null;
+    return String(req.user.role || '') === 'Admin' ? bundle : null;
   }
   if (req.invoiceToken) {
-    return ['Admin', 'Creator', 'Trainer'].includes(String(req.invoiceToken.role || '')) ? bundle : null;
+    return String(req.invoiceToken.role || '') === 'Admin' ? bundle : null;
   }
   return null;
 }
@@ -457,7 +457,7 @@ router.get('/apply/my', auth, requireRole('Student', 'Lab', 'Trainer', 'Admin'),
   res.json(listApplyBillingProfilesForUser(req.user.id));
 });
 
-router.get('/admin/apply-billing', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
+router.get('/admin/apply-billing', auth, requireRole('Admin'), (req, res) => {
   res.json(
     listApplyBillingProfilesForAdmin({
       search: req.query?.search || '',
@@ -632,11 +632,11 @@ router.patch('/apply/enquiries/:id', auth, requireRole('Student', 'Lab'), (req, 
   res.json({ ok: true, enquiry: result.enquiry });
 });
 
-router.get('/admin/apply-enquiries', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+router.get('/admin/apply-enquiries', auth, requireRole('Admin'), (req, res) => {
   res.json(listApplyEnquiriesForAdmin({ search: req.query?.search || '' }));
 });
 
-router.patch('/admin/apply-enquiries/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+router.patch('/admin/apply-enquiries/:id', auth, requireRole('Admin'), (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
   const result = updateApplyEnquiryStatus(id, req.body?.status);
@@ -644,7 +644,7 @@ router.patch('/admin/apply-enquiries/:id', auth, requireRole('Admin', 'Trainer',
   res.json({ ok: true });
 });
 
-router.delete('/admin/apply-enquiries/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+router.delete('/admin/apply-enquiries/:id', auth, requireRole('Admin'), (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
   const result = deleteApplyEnquiry(id);
@@ -784,7 +784,7 @@ router.post('/apply/:profileId(\\d+)/parts', auth, requireRole('Student', 'Lab')
   }
 });
 
-router.patch('/admin/apply-billing/:profileId(\\d+)/parts', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
+router.patch('/admin/apply-billing/:profileId(\\d+)/parts', auth, requireRole('Admin'), (req, res) => {
   const profileId = Number(req.params.profileId);
   try {
     preparePartSchedule(profileId, { parts: req.body?.parts, requireStartedBatch: true });
@@ -796,7 +796,7 @@ router.patch('/admin/apply-billing/:profileId(\\d+)/parts', auth, requireRole('A
   }
 });
 
-router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
+router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin'), (req, res) => {
   const dueItemId = Number(req.params.dueItemId);
   const dueRow = loadDueItemWithProfile(dueItemId);
   if (!dueRow) return res.status(404).json({ error: 'Due item not found' });
@@ -897,7 +897,7 @@ router.get('/my/:paymentId(\\d+)/invoice', authOrInvoiceToken('my'), (req, res) 
   streamInvoicePdf(res, bundle);
 });
 
-router.get('/admin', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
+router.get('/admin', auth, requireRole('Admin'), (req, res) => {
   res.json(
     listPaymentRecordsForAdmin({
       search: req.query?.search || '',
@@ -906,13 +906,13 @@ router.get('/admin', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res
   );
 });
 
-router.get('/admin/:paymentId(\\d+)', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
+router.get('/admin/:paymentId(\\d+)', auth, requireRole('Admin'), (req, res) => {
   const payment = getPaymentRecordById(Number(req.params.paymentId));
   if (!payment) return res.status(404).json({ error: 'Payment not found' });
   res.json(payment);
 });
 
-router.get('/admin/:paymentId(\\d+)/invoice-link', auth, requireRole('Admin', 'Creator', 'Trainer'), (req, res) => {
+router.get('/admin/:paymentId(\\d+)/invoice-link', auth, requireRole('Admin'), (req, res) => {
   const payment = getPaymentRecordById(Number(req.params.paymentId));
   if (!payment || !payment.hasInvoice) return res.status(404).json({ error: 'Invoice not found' });
   const token = signInvoiceAccessToken({

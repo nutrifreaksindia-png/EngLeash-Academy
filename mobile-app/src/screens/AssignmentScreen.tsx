@@ -101,6 +101,14 @@ export default function AssignmentScreen({ route }: any) {
                 <Text style={styles.submissionLine}>
                   {s.student_name || s.student_email} - {new Date(s.submitted_at).toLocaleString()}
                 </Text>
+                {s.review_status === 'reviewed' ? (
+                  <Text style={styles.feedbackLine}>
+                    Score: {s.score}/{s.max_score ?? 10}
+                    {s.feedback ? `\n${s.feedback}` : ''}
+                  </Text>
+                ) : (
+                  <Text style={styles.pendingLine}>Awaiting trainer review</Text>
+                )}
               </TouchableOpacity>
             ))}
           </View>
@@ -133,4 +141,6 @@ const styles = StyleSheet.create({
   viewBtn: { backgroundColor: BRAND_BLUE, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10 },
   viewText: { color: '#fff', fontWeight: '700' },
   submissionLine: { marginTop: 8, color: BRAND_BLUE, textDecorationLine: 'underline' },
+  feedbackLine: { marginTop: 4, color: '#1b5e20', fontSize: 13, lineHeight: 18 },
+  pendingLine: { marginTop: 4, color: '#666', fontSize: 12 },
 });

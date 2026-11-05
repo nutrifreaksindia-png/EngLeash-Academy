@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import SectionCard from '../components/SectionCard';
 import RichTextField from '../components/RichTextField';
+import TransferOwnerControl from '../components/TransferOwnerControl';
 
 function snippet(text, max = 96) {
   const t = String(text || '')
@@ -28,6 +29,8 @@ export default function AssignmentsPage({
   createAssignment,
   updateAssignment,
   deleteAssignment,
+  staffUsers = [],
+  onTransferOwner,
 }) {
   const [q, setQ] = useState('');
   const [viewingId, setViewingId] = useState(null);
@@ -232,6 +235,14 @@ export default function AssignmentsPage({
                               Delete
                             </button>
                           </>
+                        ) : null}
+                        {onTransferOwner ? (
+                          <TransferOwnerControl
+                            itemType="assignment"
+                            itemId={a.id}
+                            staffUsers={staffUsers}
+                            onTransfer={onTransferOwner}
+                          />
                         ) : null}
                       </div>
                     </td>

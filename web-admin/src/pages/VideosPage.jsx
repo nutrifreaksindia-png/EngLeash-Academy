@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import SectionCard from '../components/SectionCard';
 import ActionMenu from '../components/ActionMenu';
+import TransferOwnerControl from '../components/TransferOwnerControl';
 
 export default function VideosPage({
   videos,
@@ -9,10 +10,13 @@ export default function VideosPage({
   courses,
   showCreatedBy = false,
   libraryCanMutate = () => true,
+  canMapToCourse = true,
   onCreateVideo,
   onUpdateVideo,
   onDeleteVideo,
   onAssignVideo,
+  staffUsers = [],
+  onTransferOwner,
 }) {
   const fileInputRef = React.useRef(null);
   const [q, setQ] = useState('');
@@ -239,38 +243,50 @@ export default function VideosPage({
                     </>
                   ) : null}
                 </ActionMenu>
+                {onTransferOwner ? (
+                  <TransferOwnerControl
+                    itemType="video"
+                    itemId={v.id}
+                    staffUsers={staffUsers}
+                    onTransfer={onTransferOwner}
+                  />
+                ) : null}
               </div>
             </article>
           ))}
         </div>
       </SectionCard>
 
-      <SectionCard title="Link Video to Lesson/Course" subtitle="Works like quiz assignments">
-        <form className="formGrid" onSubmit={assign}>
-          <select value={assignVideoId} onChange={(e) => setAssignVideoId(e.target.value)} required>
-            <option value="">Select video</option>
-            {(videos || []).map((v) => <option key={v.id} value={v.id}>{v.title}</option>)}
-          </select>
-          <select value={scopeType} onChange={(e) => { setScopeType(e.target.value); setScopeId(''); }}>
-            <option value="lesson">Lesson</option>
-            <option value="course">Course</option>
-          </select>
-          <select value={scopeId} onChange={(e) => setScopeId(e.target.value)} required>
-            <option value="">Select {scopeType}</option>
-            {scopeOptions.map((o) => <option key={`${scopeType}-${o.id}`} value={o.id}>{o.label}</option>)}
-          </select>
-          <button
-            type="submit"
-            disabled={
-              busy
-              || !assignVideoId
-              || !libraryCanMutate((videos || []).find((x) => Number(x.id) === Number(assignVideoId)))
-            }
-          >
-            Link Video
-          </button>
-        </form>
-      </SectionCard>
+      {canMapToCourse ? (
+        <SectionCard title="Link Video to Lesson/Course" subtitle="Works like quiz assignments">
+          <form className="formGrid" onSubmit={assign}>
+            <select value={assignVideoId} onChange={(e) => setAssignVideoId(e.target.value)} required>
+              <option value="">Select video</option>
+              {(videos || []).map((v) => <option key={v.id} value={v.id}>{v.title}</option>)}
+            </select>
+            <select value={scopeType} onChange={(e) => { setScopeType(e.target.value); setScopeId(''); }}>
+              <option value="lesson">Lesson</option>
+              <option value="course">Course</option>
+            </select>
+            <select value={scopeId} onChange={(e) => setScopeId(e.target.value)} required>
+              <option value="">Select {scopeType}</option>
+              {scopeOptions.map((o) => <option key={`${scopeType}-${o.id}`} value={o.id}>{o.label}</option>)}
+            </select>
+            <button
+              type="submit"
+              disabled={
+                busy
+                || !assignVideoId
+                || !libraryCanMutate((videos || []).find((x) => Number(x.id) === Number(assignVideoId)))
+              }
+            >
+              Link Video
+            </button>
+          </form>
+        </SectionCard>
+      ) : (
+        <p className="muted">Admins link videos to lessons and courses. Videos you upload stay in the library for them to use.</p>
+      )}
     </div>
   );
 }

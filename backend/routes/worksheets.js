@@ -7,10 +7,12 @@ const { isSpacesConfigured, uploadToSpaces, deleteObjectsUnderPrefix } = require
 const {
   canMutateLibraryByCreatedBy,
   canViewWorksheet,
+  hideOthersDrafts,
   stripCreatorFields,
   stripRows,
   stripWorksheetAnswerKeyIfNeeded,
 } = require('../lib/libraryScope');
+const { filterLibraryRowsForTrainer, trainerCanViewLibraryItem } = require('../lib/trainerScope');
 
 const router = express.Router();
 
@@ -70,9 +72,7 @@ router.get('/', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => 
     GROUP BY m.id
     ORDER BY m.updated_at DESC, m.id DESC
   `).all();
-  if (req.user.role === 'Creator') {
-    rows = rows.filter((m) => Number(m.is_draft) !== 1 || Number(m.created_by) === Number(req.user.id));
-  }
+  rows = filterLibraryRowsForTrainer(req.user, 'worksheet', hideOthersDrafts(req.user, rows));
   const stripped = stripRows(req.user, rows).map((r) => stripWorksheetAnswerKeyIfNeeded(req.user, r));
   res.json(stripped);
 });
@@ -117,7 +117,7 @@ router.get('/:id', auth, (req, res) => {
     'SELECT m.*, cu.name AS creator_name FROM worksheet_library m LEFT JOIN users cu ON cu.id = m.created_by WHERE m.id = ?'
   ).get(id);
   if (!row) return res.status(404).json({ error: 'Worksheet not found' });
-  if (!canViewWorksheet(req.user, row)) {
+  if (!canViewWorksheet(req.user, row) || !trainerCanViewLibraryItem(req.user, 'worksheet', id)) {
     return res.status(404).json({ error: 'Worksheet not found' });
   }
   const assets = db.prepare('SELECT * FROM worksheet_assets WHERE worksheet_id = ? ORDER BY sort_order, id').all(id);
@@ -226,7 +226,7 @@ router.delete('/:id/assets/:assetId', auth, requireRole('Admin', 'Trainer', 'Cre
   res.status(204).end();
 });
 
-router.post('/:id/assignments', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+router.post('/:id/assignments', auth, requireRole('Admin', 'Creator'), (req, res) => {
   const id = Number(req.params.id);
   const worksheet = db.prepare('SELECT * FROM worksheet_library WHERE id = ?').get(id);
   if (!worksheet) return res.status(404).json({ error: 'Worksheet not found' });
@@ -254,12 +254,14 @@ router.get('/:id/assignments', auth, requireRole('Admin', 'Trainer', 'Creator'),
   const id = Number(req.params.id);
   const worksheet = db.prepare('SELECT * FROM worksheet_library WHERE id = ?').get(id);
   if (!worksheet) return res.status(404).json({ error: 'Worksheet not found' });
-  if (!canViewWorksheet(req.user, worksheet)) return res.status(404).json({ error: 'Worksheet not found' });
+  if (!canViewWorksheet(req.user, worksheet) || !trainerCanViewLibraryItem(req.user, 'worksheet', id)) {
+    return res.status(404).json({ error: 'Worksheet not found' });
+  }
   const rows = db.prepare('SELECT * FROM worksheet_assignments WHERE worksheet_id = ? ORDER BY created_at DESC').all(id);
   res.json(rows);
 });
 
-router.delete('/assignments/:assignmentId', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+router.delete('/assignments/:assignmentId', auth, requireRole('Admin', 'Creator'), (req, res) => {
   const assignmentId = Number(req.params.assignmentId);
   const ass = db.prepare(`
     SELECT m.created_by

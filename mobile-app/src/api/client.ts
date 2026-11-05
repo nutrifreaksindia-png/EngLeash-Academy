@@ -57,7 +57,8 @@ async function authFetch(path: string, options: RequestInit = {}): Promise<Respo
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   const res = await fetch(`${API_BASE}/api${path}`, { ...options, headers, signal: controller.signal }).finally(() => clearTimeout(timeout));
   if (res.status === 401) {
-    const data = await res.json().catch(() => ({}));
+    // Clone so callers can still read the body.
+    const data = await res.clone().json().catch(() => ({}));
     if (data?.code === 'SESSION_REPLACED') {
       await clearToken();
       onSessionReplaced?.();

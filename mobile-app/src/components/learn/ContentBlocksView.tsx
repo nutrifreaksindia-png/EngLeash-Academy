@@ -69,6 +69,53 @@ function stripHtml(html: string) {
   return String(html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+/** Captions may be a plain string or `{ html, align }`. */
+function captionHtml(caption: unknown): string | null {
+  if (caption == null) return null;
+  if (typeof caption === 'string') {
+    const t = caption.trim();
+    return t || null;
+  }
+  if (typeof caption === 'object') {
+    const html = (caption as { html?: unknown }).html;
+    if (typeof html === 'string' && html.trim()) return html;
+    const text = (caption as { text?: unknown }).text;
+    if (typeof text === 'string' && text.trim()) return text;
+  }
+  return null;
+}
+
+function captionPlain(caption: unknown): string | null {
+  const html = captionHtml(caption);
+  if (!html) return null;
+  const plain = stripHtml(html);
+  return plain || null;
+}
+
+function CaptionView({
+  caption,
+  horizontalInset,
+}: {
+  caption: unknown;
+  horizontalInset: number;
+}) {
+  const html = captionHtml(caption);
+  if (!html) return null;
+  if (/<[a-z][\s\S]*>/i.test(html)) {
+    return (
+      <HtmlContent
+        html={html}
+        horizontalInset={horizontalInset}
+        baseFontSize={14}
+        style={styles.captionHtml}
+      />
+    );
+  }
+  const plain = captionPlain(caption);
+  if (!plain) return null;
+  return <Text style={styles.caption}>{plain}</Text>;
+}
+
 function paragraphHasRenderableHtml(block: any): boolean {
   if (!block?.html || typeof block.html !== 'string') return false;
   return stripHtml(block.html).length > 0;
@@ -391,11 +438,7 @@ function ContentBlocksBody({
                   resizeMode={fitContain ? 'contain' : 'cover'}
                 />
               ) : null}
-              {b.caption?.html ? (
-                <HtmlContent html={b.caption.html} horizontalInset={horizontalInset + 16} baseFontSize={14} style={styles.captionHtml} />
-              ) : b.caption ? (
-                <Text style={styles.caption}>{b.caption}</Text>
-              ) : null}
+              <CaptionView caption={b.caption} horizontalInset={horizontalInset + 16} />
             </View>
             </View>
           );
@@ -414,7 +457,7 @@ function ContentBlocksBody({
                       resizeMode="contain"
                     />
                   ) : null}
-                  {item.caption ? <Text style={styles.caption}>{item.caption}</Text> : null}
+                  <CaptionView caption={item.caption} horizontalInset={horizontalInset + 16} />
                 </View>
               ))}
             </ScrollView>

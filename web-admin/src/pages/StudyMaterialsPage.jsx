@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import SectionCard from '../components/SectionCard';
 import RichTextField from '../components/RichTextField';
+import TransferOwnerControl from '../components/TransferOwnerControl';
 import Cropper from 'react-easy-crop';
 import 'react-easy-crop/react-easy-crop.css';
 
@@ -1465,6 +1466,8 @@ export default function StudyMaterialsPage({
   onUpdate,
   onDelete,
   onUploadAsset,
+  staffUsers = [],
+  onTransferOwner,
 }) {
   const [q, setQ] = useState('');
   const [title, setTitle] = useState('');
@@ -2124,6 +2127,14 @@ export default function StudyMaterialsPage({
                               Delete
                             </button>
                           </>
+                        ) : null}
+                        {onTransferOwner ? (
+                          <TransferOwnerControl
+                            itemType="study_material"
+                            itemId={m.id}
+                            staffUsers={staffUsers}
+                            onTransfer={onTransferOwner}
+                          />
                         ) : null}
                       </div>
                     </td>

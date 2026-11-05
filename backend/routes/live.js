@@ -676,12 +676,12 @@ router.post('/sessions/:id/hand/clear', auth, (req, res) => {
   res.json({ ok: true });
 });
 
-router.post('/batches', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.post('/batches', auth, requireRole('Admin'), (req, res) => {
   const { name, sessionType, trainerId, studentIds } = req.body;
   if (!name || !sessionType || !['group', 'one_to_one'].includes(sessionType)) {
     return res.status(400).json({ error: 'name and valid sessionType are required' });
   }
-  const effectiveTrainerId = req.user.role === 'Trainer' ? req.user.id : Number(trainerId || 0);
+  const effectiveTrainerId = Number(trainerId || 0);
   if (!effectiveTrainerId) return res.status(400).json({ error: 'trainerId is required' });
 
   const trainer = db.prepare("SELECT id, role FROM users WHERE id = ? AND role IN ('Trainer', 'Admin')").get(effectiveTrainerId);
@@ -709,7 +709,7 @@ router.post('/batches', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   res.status(201).json(batch);
 });
 
-router.post('/batches/:id/members', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.post('/batches/:id/members', auth, requireRole('Admin'), (req, res) => {
   const batchId = Number(req.params.id);
   const { studentId } = req.body;
   if (!studentId) return res.status(400).json({ error: 'studentId is required' });
@@ -721,9 +721,6 @@ router.post('/batches/:id/members', auth, requireRole('Admin', 'Trainer'), (req,
 
   const batch = db.prepare('SELECT id, trainer_id FROM batches WHERE id = ?').get(batchId);
   if (!batch) return res.status(404).json({ error: 'Batch not found' });
-  if (req.user.role === 'Trainer' && batch.trainer_id !== req.user.id) {
-    return res.status(403).json({ error: 'You can only manage your own batch' });
-  }
 
   const student = db.prepare("SELECT id FROM users WHERE id = ? AND role = 'Student'").get(studentId);
   if (!student) return res.status(404).json({ error: 'Student not found' });

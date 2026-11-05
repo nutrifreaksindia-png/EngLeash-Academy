@@ -15,6 +15,13 @@ const {
   refreshBatchLinkedAccessEnds,
 } = require('../lib/courseAccess');
 const { syncApplyBillingDatesForBatch } = require('../lib/applyBilling');
+const { academyToday } = require('../lib/academyDate');
+const { markBatchCompleted, reopenBatch } = require('../services/batchCompletion');
+
+/** Started or completed: sessions exist and the class schedule is fixed. */
+function batchHasRun(batch) {
+  return batch?.batch_status === 'started' || batch?.batch_status === 'completed';
+}
 
 function normalizeBatchCoursesInput(body) {
   const rows = [];
@@ -125,20 +132,6 @@ function parseJsonArray(value, fallback = []) {
   }
 }
 
-/** Admin UI may set batches.trainer_id to a non-trainer (e.g. creator); lead is then first row in batch_trainers. */
-function trainerCanEditRestrictedBatchFields(batchId, batch, userId) {
-  const primary = db.prepare('SELECT role FROM users WHERE id = ?').get(batch.trainer_id);
-  const primaryIsTrainer = primary && primary.role === 'Trainer';
-  if (primaryIsTrainer && batch.trainer_id === userId) return true;
-  if (!primaryIsTrainer) {
-    const first = db
-      .prepare('SELECT trainer_id FROM batch_trainers WHERE batch_id = ? ORDER BY id ASC LIMIT 1')
-      .get(batchId);
-    if (first && first.trainer_id === userId) return true;
-  }
-  return false;
-}
-
 function assertBatchStaffAccess(req, batchId, batch) {
   if (req.user.role === 'Admin') return;
   if (req.user.role === 'Trainer') {
@@ -155,6 +148,29 @@ function assertBatchStaffAccess(req, batchId, batch) {
   const e = new Error('Forbidden');
   e.statusCode = 403;
   throw e;
+}
+
+function loadBatchOr403(req, batchId) {
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  if (!batch) {
+    const e = new Error('Batch not found');
+    e.statusCode = 404;
+    throw e;
+  }
+  assertBatchStaffAccess(req, batchId, batch);
+  return batch;
+}
+
+function batchCourseIds(batchId, batch) {
+  const fromJoin = db.prepare('SELECT course_id AS id FROM batch_courses WHERE batch_id = ?').all(batchId);
+  if (fromJoin.length) return fromJoin.map((r) => Number(r.id)).filter(Number.isFinite);
+  if (batch?.course_id) return [Number(batch.course_id)];
+  return [];
+}
+
+function inList(ids) {
+  const nums = (ids || []).map(Number).filter(Number.isFinite);
+  return nums.length ? nums.map(() => '?').join(',') : null;
 }
 
 function isHoliday(dateText) {
@@ -418,6 +434,88 @@ router.get('/course/:courseId/subscribe-packages', auth, requireRole('Admin', 'T
   });
 });
 
+router.get('/my/today', auth, (req, res) => {
+  const today = academyToday();
+  const rows = db.prepare(`
+    SELECT bs.*, b.title AS batch_title, b.name AS batch_name, b.id AS batch_id,
+           ls.id AS live_session_id,
+           ls.status AS live_status,
+           ls.starts_at AS live_starts_at,
+           ls.ends_at AS live_ends_at
+    FROM batch_sessions bs
+    JOIN batches b ON b.id = bs.batch_id
+    LEFT JOIN live_sessions ls ON ls.batch_session_id = bs.id
+    WHERE bs.session_date = ?
+      AND COALESCE(b.batch_status, 'draft') <> 'completed'
+      AND (
+        ? = 'Admin'
+        OR (? IN ('Student','Lab') AND EXISTS (SELECT 1 FROM batch_members bm WHERE bm.batch_id = b.id AND bm.student_id = ?))
+        OR (? = 'Trainer' AND (b.trainer_id = ? OR EXISTS (SELECT 1 FROM batch_trainers bt WHERE bt.batch_id = b.id AND bt.trainer_id = ?)))
+      )
+    ORDER BY bs.starts_at
+  `).all(today, req.user.role, req.user.role, req.user.id, req.user.role, req.user.id, req.user.id);
+  res.json(rows);
+});
+
+router.get('/my/sessions', auth, (req, res) => {
+  const from = String(req.query.from || '').trim();
+  const to = String(req.query.to || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+    return res.status(400).json({ error: 'from and to (YYYY-MM-DD) are required' });
+  }
+  const rows = db.prepare(`
+    SELECT bs.*, b.title AS batch_title, b.name AS batch_name, b.id AS batch_id,
+           ls.id AS live_session_id,
+           ls.status AS live_status,
+           ls.starts_at AS live_starts_at,
+           ls.ends_at AS live_ends_at
+    FROM batch_sessions bs
+    JOIN batches b ON b.id = bs.batch_id
+    LEFT JOIN live_sessions ls ON ls.batch_session_id = bs.id
+    WHERE bs.session_date >= ? AND bs.session_date <= ?
+      AND (
+        ? = 'Admin'
+        OR (? IN ('Student','Lab') AND EXISTS (SELECT 1 FROM batch_members bm WHERE bm.batch_id = b.id AND bm.student_id = ?))
+        OR (? = 'Trainer' AND (b.trainer_id = ? OR EXISTS (SELECT 1 FROM batch_trainers bt WHERE bt.batch_id = b.id AND bt.trainer_id = ?)))
+      )
+    ORDER BY bs.session_date, bs.starts_at
+  `).all(from, to, req.user.role, req.user.role, req.user.id, req.user.role, req.user.id, req.user.id);
+  res.json(rows);
+});
+
+router.get('/my/review-queue', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+  const status = String(req.query.status || 'pending').trim() || 'pending';
+  if (!['pending', 'reviewed', 'all'].includes(status)) {
+    return res.status(400).json({ error: 'status must be pending, reviewed, or all' });
+  }
+  const statusClause =
+    status === 'all' ? '1=1' : "COALESCE(s.review_status, 'pending') = ?";
+  const params = [];
+  if (status !== 'all') params.push(status);
+  params.push(req.user.role, req.user.id, req.user.id);
+  const rows = db
+    .prepare(
+      `SELECT s.id, s.student_id, s.file_url, s.submitted_at, s.score, s.feedback,
+              COALESCE(s.review_status, 'pending') AS review_status, s.reviewed_at, s.reviewed_by,
+              a.id AS assignment_id, a.title AS assignment_title, a.due_date, a.max_score,
+              b.id AS batch_id, b.title AS batch_title, b.name AS batch_name,
+              u.name AS student_name, u.email AS student_email
+       FROM assignment_submissions s
+       JOIN batch_assignments a ON a.id = s.assignment_id
+       JOIN batches b ON b.id = s.batch_id
+       JOIN users u ON u.id = s.student_id
+       WHERE ${statusClause}
+         AND COALESCE(b.batch_status, 'draft') <> 'completed'
+         AND (
+           ? = 'Admin'
+           OR (b.trainer_id = ? OR EXISTS (SELECT 1 FROM batch_trainers bt WHERE bt.batch_id = b.id AND bt.trainer_id = ?))
+         )
+       ORDER BY s.submitted_at DESC`,
+    )
+    .all(...params);
+  res.json(rows);
+});
+
 router.get('/:id(\\d+)', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab'), (req, res) => {
   const batchId = Number(req.params.id);
   const courseNameExpr =
@@ -465,36 +563,10 @@ router.get('/:id(\\d+)', auth, requireRole('Admin', 'Trainer', 'Student', 'Lab')
   res.json({ ...row, batchCourses });
 });
 
-router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.put('/:id(\\d+)', auth, requireRole('Admin'), (req, res) => {
   const batchId = Number(req.params.id);
   const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
   if (!batch) return res.status(404).json({ error: 'Batch not found' });
-  if (req.user.role === 'Trainer') {
-    const ok =
-      batch.trainer_id === req.user.id ||
-      db.prepare('SELECT 1 FROM batch_trainers WHERE batch_id = ? AND trainer_id = ?').get(batchId, req.user.id);
-    if (!ok) return res.status(403).json({ error: 'Forbidden' });
-  }
-
-  if (req.user.role === 'Trainer' && !trainerCanEditRestrictedBatchFields(batchId, batch, req.user.id)) {
-    const bt = req.body.title;
-    const bn = req.body.batchNumber;
-    let bodyCourseId = batch.course_id;
-    if ('courseId' in req.body) {
-      bodyCourseId =
-        req.body.courseId == null || req.body.courseId === '' ? null : Number(req.body.courseId);
-    }
-    const touchesRestricted =
-      (bt != null && String(bt).trim() && String(bt).trim() !== batch.title) ||
-      ('courseId' in req.body && bodyCourseId !== batch.course_id) ||
-      ('courses' in req.body && Array.isArray(req.body.courses)) ||
-      (bn != null && bn !== '' && Number(bn) !== batch.batch_number);
-    if (touchesRestricted) {
-      return res.status(403).json({
-        error: 'Only the lead trainer can change title, course, or batch number',
-      });
-    }
-  }
 
   const {
     title,
@@ -589,7 +661,7 @@ router.put('/:id(\\d+)', auth, requireRole('Admin', 'Trainer'), (req, res) => {
 
   let nextSchedule = batch.training_schedule_json;
   if (trainingSchedule !== undefined) {
-    if (batch.batch_status === 'started') {
+    if (batchHasRun(batch)) {
       return res.status(409).json({ error: 'Cannot change class schedule after the batch has started' });
     }
     nextSchedule = trainingSchedule ? JSON.stringify(trainingSchedule) : null;
@@ -684,7 +756,7 @@ router.delete('/:id(\\d+)', auth, requireRole('Admin'), async (req, res) => {
     req.query.full === 'true' ||
     String(req.body?.confirmFullDelete || '').toLowerCase() === 'true';
 
-  if (batch.batch_status === 'started' && !wantFull) {
+  if (batchHasRun(batch) && !wantFull) {
     return res.status(409).json({
       error:
         'Started batches need a full delete. In web admin choose “Delete batch completely”, or call DELETE /batch-manager/:id?full=1 (removes Spaces recordings and all related rows).',
@@ -735,7 +807,7 @@ router.delete('/:id(\\d+)', auth, requireRole('Admin'), async (req, res) => {
   }
 });
 
-router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.post('/', auth, requireRole('Admin'), (req, res) => {
   const {
     title,
     batchType,
@@ -774,8 +846,7 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const legacyCols = legacyBatchCourseColumnsFromRows(normalizedCourses.rows);
 
   const trainerCandidates = Array.isArray(trainers) ? trainers.map(Number).filter((x) => Number.isFinite(x)) : [];
-  const trainerId =
-    req.user.role === 'Trainer' ? req.user.id : trainerCandidates[0] || req.user.id;
+  const trainerId = trainerCandidates[0] || req.user.id;
 
   const durationDaysNum =
     durationDays != null && durationDays !== '' ? Number(durationDays) : null;
@@ -859,10 +930,13 @@ router.post('/', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   res.status(201).json({ ...created, batchCourses: batchCoursesCreated });
 });
 
-router.post('/:id/start', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.post('/:id/start', auth, requireRole('Admin'), (req, res) => {
   const batchId = Number(req.params.id);
   const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
   if (!batch) return res.status(404).json({ error: 'Batch not found' });
+  if (batch.batch_status === 'completed') {
+    return res.status(409).json({ error: 'This batch is completed. Reopen it before changing its sessions.' });
+  }
   const raw = String(req.body.startDate || '').trim();
   if (!raw) {
     return res.status(400).json({ error: 'startDate is required (YYYY-MM-DD)' });
@@ -871,12 +945,6 @@ router.post('/:id/start', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     return res.status(400).json({ error: 'startDate must be YYYY-MM-DD' });
   }
   const startDate = raw;
-  if (req.user.role === 'Trainer') {
-    const ok =
-      batch.trainer_id === req.user.id ||
-      db.prepare('SELECT 1 FROM batch_trainers WHERE batch_id = ? AND trainer_id = ?').get(batchId, req.user.id);
-    if (!ok) return res.status(403).json({ error: 'Forbidden' });
-  }
   try {
     const sessions = generateSessionsForBatch(batchId, startDate, req.user.id);
     let liveSummary = { created: 0, updated: 0, total: 0 };
@@ -896,8 +964,43 @@ router.post('/:id/start', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   }
 });
 
-router.get('/:id/sessions', auth, (req, res) => {
+router.post('/:id/complete', auth, requireRole('Admin'), (req, res) => {
   const batchId = Number(req.params.id);
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
+  if (batch.batch_status === 'completed') return res.status(409).json({ error: 'Batch is already completed' });
+  if (batch.batch_status !== 'started') {
+    return res.status(409).json({ error: 'Only a started batch can be marked complete' });
+  }
+  markBatchCompleted(batchId);
+  res.json(db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId));
+});
+
+router.post('/:id/reopen', auth, requireRole('Admin'), (req, res) => {
+  const batchId = Number(req.params.id);
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
+  if (batch.batch_status !== 'completed') return res.status(409).json({ error: 'Batch is not completed' });
+  reopenBatch(batchId);
+  res.json(db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId));
+});
+
+router.get('/:id(\\d+)/sessions', auth, (req, res) => {
+  const batchId = Number(req.params.id);
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
+  if (req.user.role === 'Student' || req.user.role === 'Lab') {
+    const member = db
+      .prepare('SELECT 1 FROM batch_members WHERE batch_id = ? AND student_id = ?')
+      .get(batchId, req.user.id);
+    if (!member) return res.status(403).json({ error: 'Forbidden' });
+  } else {
+    try {
+      assertBatchStaffAccess(req, batchId, batch);
+    } catch (e) {
+      return res.status(e.statusCode || 403).json({ error: 'Forbidden' });
+    }
+  }
   const sessions = db
     .prepare(
       `
@@ -963,6 +1066,13 @@ router.get('/:id/sessions', auth, (req, res) => {
 
 router.get('/:id/sessions/audit', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const batchId = Number(req.params.id);
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
+  try {
+    assertBatchStaffAccess(req, batchId, batch);
+  } catch (e) {
+    return res.status(e.statusCode || 403).json({ error: 'Forbidden' });
+  }
   const rows = db.prepare(`
     SELECT
       bs.id,
@@ -1084,6 +1194,13 @@ router.put('/:id/sessions/:sessionId/attendance', auth, requireRole('Admin', 'Tr
 
 router.get('/:id/members', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const batchId = Number(req.params.id);
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
+  try {
+    assertBatchStaffAccess(req, batchId, batch);
+  } catch (e) {
+    return res.status(e.statusCode || 403).json({ error: 'Forbidden' });
+  }
   const members = db.prepare(`
     SELECT bm.student_id AS user_id, u.name, u.email, u.role
     FROM batch_members bm
@@ -1094,7 +1211,7 @@ router.get('/:id/members', auth, requireRole('Admin', 'Trainer'), (req, res) => 
   res.json(members);
 });
 
-router.post('/:id/members', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.post('/:id/members', auth, requireRole('Admin'), (req, res) => {
   const batchId = Number(req.params.id);
   const studentId = Number(req.body.studentId);
   if (!studentId) return res.status(400).json({ error: 'studentId is required' });
@@ -1114,7 +1231,7 @@ router.post('/:id/members', auth, requireRole('Admin', 'Trainer'), (req, res) =>
   res.status(201).json({ ok: true });
 });
 
-router.delete('/:id/members/:studentId', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.delete('/:id/members/:studentId', auth, requireRole('Admin'), (req, res) => {
   const batchId = Number(req.params.id);
   const studentId = Number(req.params.studentId);
   try {
@@ -1128,6 +1245,13 @@ router.delete('/:id/members/:studentId', auth, requireRole('Admin', 'Trainer'), 
 
 router.get('/:id/trainers', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const batchId = Number(req.params.id);
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
+  try {
+    assertBatchStaffAccess(req, batchId, batch);
+  } catch (e) {
+    return res.status(e.statusCode || 403).json({ error: 'Forbidden' });
+  }
   const trainers = db.prepare(`
     SELECT bt.trainer_id AS user_id, u.name, u.email, u.role
     FROM batch_trainers bt
@@ -1138,7 +1262,7 @@ router.get('/:id/trainers', auth, requireRole('Admin', 'Trainer'), (req, res) =>
   res.json(trainers);
 });
 
-router.post('/:id/trainers', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.post('/:id/trainers', auth, requireRole('Admin'), (req, res) => {
   const batchId = Number(req.params.id);
   const trainerId = Number(req.body.trainerId);
   if (!trainerId) return res.status(400).json({ error: 'trainerId is required' });
@@ -1149,33 +1273,11 @@ router.post('/:id/trainers', auth, requireRole('Admin', 'Trainer'), (req, res) =
   res.status(201).json({ ok: true });
 });
 
-router.delete('/:id/trainers/:trainerId', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.delete('/:id/trainers/:trainerId', auth, requireRole('Admin'), (req, res) => {
   const batchId = Number(req.params.id);
   const trainerId = Number(req.params.trainerId);
   db.prepare('DELETE FROM batch_trainers WHERE batch_id = ? AND trainer_id = ?').run(batchId, trainerId);
   res.status(204).end();
-});
-
-router.get('/my/today', auth, (req, res) => {
-  const today = new Date().toISOString().slice(0, 10);
-  const rows = db.prepare(`
-    SELECT bs.*, b.title AS batch_title, b.name AS batch_name, b.id AS batch_id,
-           ls.id AS live_session_id,
-           ls.status AS live_status,
-           ls.starts_at AS live_starts_at,
-           ls.ends_at AS live_ends_at
-    FROM batch_sessions bs
-    JOIN batches b ON b.id = bs.batch_id
-    LEFT JOIN live_sessions ls ON ls.batch_session_id = bs.id
-    WHERE bs.session_date = ?
-      AND (
-        ? = 'Admin'
-        OR (? IN ('Student','Lab') AND EXISTS (SELECT 1 FROM batch_members bm WHERE bm.batch_id = b.id AND bm.student_id = ?))
-        OR (? = 'Trainer' AND (b.trainer_id = ? OR EXISTS (SELECT 1 FROM batch_trainers bt WHERE bt.batch_id = b.id AND bt.trainer_id = ?)))
-      )
-    ORDER BY bs.starts_at
-  `).all(today, req.user.role, req.user.role, req.user.id, req.user.role, req.user.id, req.user.id);
-  res.json(rows);
 });
 
 router.post('/:id/sessions/:sessionId/cancel', auth, requireRole('Admin', 'Trainer'), (req, res) => {
@@ -1187,6 +1289,11 @@ router.post('/:id/sessions/:sessionId/cancel', auth, requireRole('Admin', 'Train
   const session = db.prepare('SELECT * FROM batch_sessions WHERE id = ? AND batch_id = ?').get(sessionId, batchId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
   const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  try {
+    assertBatchStaffAccess(req, batchId, batch);
+  } catch (e) {
+    return res.status(e.statusCode || 403).json({ error: 'Forbidden' });
+  }
   const schedule = batch?.training_schedule_json ? JSON.parse(batch.training_schedule_json) : {};
   const daysOfWeek = Array.isArray(schedule.daysOfWeek) && schedule.daysOfWeek.length
     ? schedule.daysOfWeek
@@ -1253,12 +1360,21 @@ router.post('/:id/sessions/:sessionId/cancel', auth, requireRole('Admin', 'Train
 
 router.post('/:id/assignments', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   const batchId = Number(req.params.id);
-  const { title, description, dueDate } = req.body;
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
+  try {
+    assertBatchStaffAccess(req, batchId, batch);
+  } catch (e) {
+    return res.status(e.statusCode || 403).json({ error: 'Forbidden' });
+  }
+  const { title, description, dueDate, maxScore } = req.body;
   if (!title) return res.status(400).json({ error: 'title is required' });
+  const max = maxScore != null && maxScore !== '' ? Number(maxScore) : 10;
+  if (!Number.isFinite(max) || max <= 0) return res.status(400).json({ error: 'maxScore must be a positive number' });
   const result = db.prepare(`
-    INSERT INTO batch_assignments (batch_id, title, description, due_date, created_by)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(batchId, title.trim(), description || null, dueDate || null, req.user.id);
+    INSERT INTO batch_assignments (batch_id, title, description, due_date, max_score, created_by)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(batchId, title.trim(), description || null, dueDate || null, max, req.user.id);
   res.status(201).json(db.prepare('SELECT * FROM batch_assignments WHERE id = ?').get(result.lastInsertRowid));
 });
 
@@ -1303,9 +1419,17 @@ router.post('/:id/assignments/:assignmentId/submit', auth, requireRole('Student'
   });
 
   db.prepare(`
-    INSERT INTO assignment_submissions (assignment_id, batch_id, student_id, file_key, file_url)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(assignment_id, student_id) DO UPDATE SET file_key = excluded.file_key, file_url = excluded.file_url, submitted_at = datetime('now')
+    INSERT INTO assignment_submissions (assignment_id, batch_id, student_id, file_key, file_url, review_status, score, feedback, reviewed_by, reviewed_at)
+    VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL)
+    ON CONFLICT(assignment_id, student_id) DO UPDATE SET
+      file_key = excluded.file_key,
+      file_url = excluded.file_url,
+      submitted_at = datetime('now'),
+      review_status = 'pending',
+      score = NULL,
+      feedback = NULL,
+      reviewed_by = NULL,
+      reviewed_at = NULL
   `).run(assignmentId, batchId, req.user.id, uploaded.key, uploaded.publicUrl);
 
   res.status(201).json({ ok: true, fileUrl: uploaded.publicUrl });
@@ -1325,9 +1449,11 @@ router.get('/:id/assignments/:assignmentId/submissions', auth, (req, res) => {
     const rows = db
       .prepare(
         `
-      SELECT s.id, s.student_id, u.name AS student_name, u.email AS student_email, s.file_url, s.submitted_at
+      SELECT s.id, s.student_id, u.name AS student_name, u.email AS student_email, s.file_url, s.submitted_at,
+             s.score, s.feedback, COALESCE(s.review_status, 'pending') AS review_status, s.reviewed_at, a.max_score
       FROM assignment_submissions s
       JOIN users u ON u.id = s.student_id
+      JOIN batch_assignments a ON a.id = s.assignment_id
       WHERE s.batch_id = ? AND s.assignment_id = ? AND s.student_id = ?
       ORDER BY s.submitted_at DESC
     `
@@ -1347,13 +1473,278 @@ router.get('/:id/assignments/:assignmentId/submissions', auth, (req, res) => {
   }
 
   const submissions = db.prepare(`
-    SELECT s.id, s.student_id, u.name AS student_name, u.email AS student_email, s.file_url, s.submitted_at
+    SELECT s.id, s.student_id, u.name AS student_name, u.email AS student_email, s.file_url, s.submitted_at,
+           s.score, s.feedback, COALESCE(s.review_status, 'pending') AS review_status, s.reviewed_at, s.reviewed_by, a.max_score
     FROM assignment_submissions s
     JOIN users u ON u.id = s.student_id
+    JOIN batch_assignments a ON a.id = s.assignment_id
     WHERE s.batch_id = ? AND s.assignment_id = ?
     ORDER BY s.submitted_at DESC
   `).all(batchId, assignmentId);
   res.json(submissions);
+});
+
+router.put('/:id/assignments/:assignmentId/submissions/:submissionId/review', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+  const batchId = Number(req.params.id);
+  const assignmentId = Number(req.params.assignmentId);
+  const submissionId = Number(req.params.submissionId);
+  try {
+    loadBatchOr403(req, batchId);
+  } catch (e) {
+    return res.status(e.statusCode || 403).json({ error: e.message || 'Forbidden' });
+  }
+  const assignment = db.prepare('SELECT * FROM batch_assignments WHERE id = ? AND batch_id = ?').get(assignmentId, batchId);
+  if (!assignment) return res.status(404).json({ error: 'Assignment not found' });
+  const submission = db
+    .prepare('SELECT * FROM assignment_submissions WHERE id = ? AND assignment_id = ? AND batch_id = ?')
+    .get(submissionId, assignmentId, batchId);
+  if (!submission) return res.status(404).json({ error: 'Submission not found' });
+  const maxScore = Number(assignment.max_score != null ? assignment.max_score : 10);
+  const score = Number(req.body?.score);
+  if (!Number.isFinite(score) || score < 0 || score > maxScore) {
+    return res.status(400).json({ error: `score must be between 0 and ${maxScore}` });
+  }
+  const feedback = req.body?.feedback != null ? String(req.body.feedback).trim() : '';
+  db.prepare(
+    `UPDATE assignment_submissions
+     SET score = ?, feedback = ?, review_status = 'reviewed', reviewed_by = ?, reviewed_at = datetime('now')
+     WHERE id = ?`,
+  ).run(score, feedback || null, req.user.id, submissionId);
+  const updated = db.prepare(`
+    SELECT s.id, s.student_id, u.name AS student_name, u.email AS student_email, s.file_url, s.submitted_at,
+           s.score, s.feedback, s.review_status, s.reviewed_at, s.reviewed_by, a.max_score
+    FROM assignment_submissions s
+    JOIN users u ON u.id = s.student_id
+    JOIN batch_assignments a ON a.id = s.assignment_id
+    WHERE s.id = ?
+  `).get(submissionId);
+  res.json(updated);
+});
+
+router.get('/:id/quiz-attempts', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+  const batchId = Number(req.params.id);
+  let batch;
+  try {
+    batch = loadBatchOr403(req, batchId);
+  } catch (e) {
+    return res.status(e.statusCode || 403).json({ error: e.message || 'Forbidden' });
+  }
+  const courseIds = batchCourseIds(batchId, batch);
+  const lessonPlaceholders = inList(courseIds);
+  const lessonIds = lessonPlaceholders
+    ? db
+        .prepare(`SELECT lesson_id AS id FROM course_lessons WHERE course_id IN (${lessonPlaceholders}) AND lesson_id IS NOT NULL`)
+        .all(...courseIds)
+        .map((r) => Number(r.id))
+    : [];
+  const memberIds = db.prepare('SELECT student_id AS id FROM batch_members WHERE batch_id = ?').all(batchId).map((r) => Number(r.id));
+  if (!memberIds.length || (!courseIds.length && !lessonIds.length)) return res.json([]);
+
+  const memberList = inList(memberIds);
+  const courseList = inList(courseIds);
+  const lessonList = inList(lessonIds);
+  const scopeClauses = [];
+  const params = [];
+  if (courseList) {
+    scopeClauses.push(`(qas.scope_type = 'course' AND qas.scope_id IN (${courseList}))`);
+    params.push(...courseIds);
+  }
+  if (lessonList) {
+    scopeClauses.push(`(qas.scope_type = 'lesson' AND qas.scope_id IN (${lessonList}))`);
+    params.push(...lessonIds);
+  }
+  if (!scopeClauses.length) return res.json([]);
+  const rows = db
+    .prepare(
+      `SELECT qa.id, qa.user_id, u.name AS student_name, qa.score, qa.max_score, qa.status, qa.submitted_at, qa.attempt_no,
+              qb.id AS quiz_bank_id, qb.title AS quiz_title
+       FROM quiz_attempts_v2 qa
+       JOIN quiz_assignments qas ON qas.id = qa.assignment_id
+       JOIN quiz_versions qv ON qv.id = qas.quiz_version_id
+       JOIN quiz_bank qb ON qb.id = qv.quiz_bank_id
+       JOIN users u ON u.id = qa.user_id
+       WHERE qa.user_id IN (${memberList})
+         AND (${scopeClauses.join(' OR ')})
+       ORDER BY qa.submitted_at DESC, qa.id DESC`,
+    )
+    .all(...memberIds, ...params);
+  res.json(rows);
+});
+
+router.get('/:id/students/:studentId/progress', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+  const batchId = Number(req.params.id);
+  const studentId = Number(req.params.studentId);
+  try {
+    loadBatchOr403(req, batchId);
+  } catch (e) {
+    return res.status(e.statusCode || 403).json({ error: e.message || 'Forbidden' });
+  }
+  const member = db.prepare('SELECT 1 FROM batch_members WHERE batch_id = ? AND student_id = ?').get(batchId, studentId);
+  if (!member) return res.status(404).json({ error: 'Student is not in this batch' });
+  const student = db.prepare('SELECT id, name, email, role FROM users WHERE id = ?').get(studentId);
+  if (!student) return res.status(404).json({ error: 'Student not found' });
+
+  const sessions = db
+    .prepare(
+      `SELECT id, session_day, session_date, lesson_title, status
+       FROM batch_sessions WHERE batch_id = ? AND status <> 'cancelled' ORDER BY session_day`,
+    )
+    .all(batchId);
+  const marks = db
+    .prepare(
+      `SELECT a.batch_session_id, a.status
+       FROM batch_session_attendance a
+       JOIN batch_sessions s ON s.id = a.batch_session_id
+       WHERE s.batch_id = ? AND a.student_id = ?`,
+    )
+    .all(batchId, studentId);
+  const markBySession = Object.fromEntries(marks.map((m) => [m.batch_session_id, m.status]));
+  const attendanceHistory = sessions.map((s) => ({
+    sessionId: s.id,
+    sessionDay: s.session_day,
+    sessionDate: s.session_date,
+    lessonTitle: s.lesson_title,
+    status: markBySession[s.id] || null,
+  }));
+  const counted = attendanceHistory.filter((r) => r.status);
+  const presentish = counted.filter((r) => r.status === 'present' || r.status === 'late').length;
+  const attendanceRate = sessions.length ? presentish / sessions.length : 0;
+
+  const assignments = db
+    .prepare(
+      `SELECT a.id, a.title, a.due_date, a.max_score,
+              s.id AS submission_id, s.file_url, s.submitted_at, s.score, s.feedback,
+              COALESCE(s.review_status, CASE WHEN s.id IS NULL THEN NULL ELSE 'pending' END) AS review_status
+       FROM batch_assignments a
+       LEFT JOIN assignment_submissions s ON s.assignment_id = a.id AND s.student_id = ?
+       WHERE a.batch_id = ?
+       ORDER BY a.id DESC`,
+    )
+    .all(studentId, batchId);
+
+  let quizAttempts = [];
+  try {
+    const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+    const courseIds = batchCourseIds(batchId, batch);
+    const lessonPlaceholders = inList(courseIds);
+    const lessonIds = lessonPlaceholders
+      ? db
+          .prepare(`SELECT lesson_id AS id FROM course_lessons WHERE course_id IN (${lessonPlaceholders}) AND lesson_id IS NOT NULL`)
+          .all(...courseIds)
+          .map((r) => Number(r.id))
+      : [];
+    const courseList = inList(courseIds);
+    const lessonList = inList(lessonIds);
+    const scopeClauses = [];
+    const params = [studentId];
+    if (courseList) {
+      scopeClauses.push(`(qas.scope_type = 'course' AND qas.scope_id IN (${courseList}))`);
+      params.push(...courseIds);
+    }
+    if (lessonList) {
+      scopeClauses.push(`(qas.scope_type = 'lesson' AND qas.scope_id IN (${lessonList}))`);
+      params.push(...lessonIds);
+    }
+    if (scopeClauses.length) {
+      quizAttempts = db
+        .prepare(
+          `SELECT qa.id, qa.score, qa.max_score, qa.status, qa.submitted_at, qa.attempt_no, qb.title AS quiz_title
+           FROM quiz_attempts_v2 qa
+           JOIN quiz_assignments qas ON qas.id = qa.assignment_id
+           JOIN quiz_versions qv ON qv.id = qas.quiz_version_id
+           JOIN quiz_bank qb ON qb.id = qv.quiz_bank_id
+           WHERE qa.user_id = ? AND (${scopeClauses.join(' OR ')})
+           ORDER BY qa.submitted_at DESC`,
+        )
+        .all(...params);
+    }
+  } catch (_) {
+    quizAttempts = [];
+  }
+
+  const notes = db
+    .prepare(
+      `SELECT n.id, n.note, n.created_at, n.author_id, u.name AS author_name
+       FROM trainer_student_notes n
+       JOIN users u ON u.id = n.author_id
+       WHERE n.batch_id = ? AND n.student_id = ?
+       ORDER BY n.id DESC`,
+    )
+    .all(batchId, studentId);
+
+  res.json({
+    student,
+    attendanceRate,
+    sessionsCounted: sessions.length,
+    presentOrLate: presentish,
+    attendanceHistory,
+    assignments,
+    quizAttempts,
+    notes,
+  });
+});
+
+router.get('/:id/students/:studentId/notes', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+  const batchId = Number(req.params.id);
+  const studentId = Number(req.params.studentId);
+  try {
+    loadBatchOr403(req, batchId);
+  } catch (e) {
+    return res.status(e.statusCode || 403).json({ error: e.message || 'Forbidden' });
+  }
+  const member = db.prepare('SELECT 1 FROM batch_members WHERE batch_id = ? AND student_id = ?').get(batchId, studentId);
+  if (!member) return res.status(404).json({ error: 'Student is not in this batch' });
+  const notes = db
+    .prepare(
+      `SELECT n.id, n.note, n.created_at, n.author_id, u.name AS author_name
+       FROM trainer_student_notes n
+       JOIN users u ON u.id = n.author_id
+       WHERE n.batch_id = ? AND n.student_id = ?
+       ORDER BY n.id DESC`,
+    )
+    .all(batchId, studentId);
+  res.json(notes);
+});
+
+router.post('/:id/students/:studentId/notes', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+  const batchId = Number(req.params.id);
+  const studentId = Number(req.params.studentId);
+  try {
+    loadBatchOr403(req, batchId);
+  } catch (e) {
+    return res.status(e.statusCode || 403).json({ error: e.message || 'Forbidden' });
+  }
+  const member = db.prepare('SELECT 1 FROM batch_members WHERE batch_id = ? AND student_id = ?').get(batchId, studentId);
+  if (!member) return res.status(404).json({ error: 'Student is not in this batch' });
+  const note = String(req.body?.note || '').trim();
+  if (!note) return res.status(400).json({ error: 'note is required' });
+  const result = db
+    .prepare('INSERT INTO trainer_student_notes (batch_id, student_id, author_id, note) VALUES (?, ?, ?, ?)')
+    .run(batchId, studentId, req.user.id, note);
+  const created = db
+    .prepare(
+      `SELECT n.id, n.note, n.created_at, n.author_id, u.name AS author_name
+       FROM trainer_student_notes n JOIN users u ON u.id = n.author_id WHERE n.id = ?`,
+    )
+    .get(result.lastInsertRowid);
+  res.status(201).json(created);
+});
+
+router.delete('/:id/notes/:noteId', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+  const batchId = Number(req.params.id);
+  const noteId = Number(req.params.noteId);
+  try {
+    loadBatchOr403(req, batchId);
+  } catch (e) {
+    return res.status(e.statusCode || 403).json({ error: e.message || 'Forbidden' });
+  }
+  const row = db.prepare('SELECT * FROM trainer_student_notes WHERE id = ? AND batch_id = ?').get(noteId, batchId);
+  if (!row) return res.status(404).json({ error: 'Note not found' });
+  if (req.user.role !== 'Admin' && Number(row.author_id) !== Number(req.user.id)) {
+    return res.status(403).json({ error: 'You can delete only your own notes' });
+  }
+  db.prepare('DELETE FROM trainer_student_notes WHERE id = ?').run(noteId);
+  res.status(204).end();
 });
 
 router.get('/holidays/list', auth, requireRole('Admin', 'Trainer'), (req, res) => {

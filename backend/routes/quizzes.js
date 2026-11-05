@@ -4,22 +4,28 @@ const { auth, requireRole } = require('../middleware/auth');
 const {
   canMutateLibraryByCreatedBy,
   canViewQuizBank,
+  hideOthersDrafts,
   stripCreatorFields,
   stripRows,
 } = require('../lib/libraryScope');
-const { learnerHasCourseAccess } = require('../lib/courseAccess');
+const { learnerHasCourseAccess, learnerCanAccessLesson } = require('../lib/courseAccess');
+const {
+  filterLibraryRowsForTrainer,
+  trainerCanViewLibraryItem,
+  trainerHasCourse,
+  trainerHasLesson,
+} = require('../lib/trainerScope');
 
 const router = express.Router();
 
-function canAccessLesson(database, userId, role, lessonId) {
-  const lesson = database.prepare('SELECT course_id FROM lessons WHERE id = ?').get(lessonId);
-  if (!lesson) return false;
-  if (role === 'Admin') return true;
-  return learnerHasCourseAccess(userId, lesson.course_id);
+function canAccessLesson(_database, userId, role, lessonId, preferredCourseId = null) {
+  if (role === 'Trainer') return trainerHasLesson(userId, lessonId);
+  return learnerCanAccessLesson(userId, role, lessonId, preferredCourseId);
 }
 
-function canAccessCourse(database, userId, role, courseId) {
+function canAccessCourse(_database, userId, role, courseId) {
   if (role === 'Admin') return true;
+  if (role === 'Trainer') return trainerHasCourse(userId, courseId);
   return learnerHasCourseAccess(userId, courseId);
 }
 
@@ -180,7 +186,7 @@ function saveQuestionsForVersion(versionId, questions) {
   });
 }
 
-function getAssignmentForLearner(assignmentId, user) {
+function getAssignmentForLearner(assignmentId, user, preferredCourseId = null) {
   const assignment = db.prepare(
     `SELECT a.*, v.quiz_bank_id, v.title AS version_title, v.time_limit_sec, v.shuffle_questions, v.passing_pct,
             b.title AS quiz_title, b.description AS quiz_description
@@ -194,9 +200,9 @@ function getAssignmentForLearner(assignmentId, user) {
   if (assignment.scope_type === 'course') {
     if (!canAccessCourse(db, user.id, user.role, assignment.scope_id)) return { error: 'Access denied' };
   } else if (assignment.scope_type === 'lesson') {
-    const lesson = db.prepare('SELECT course_id FROM lessons WHERE id = ?').get(assignment.scope_id)
-      || db.prepare('SELECT course_id FROM course_lessons WHERE lesson_id = ? LIMIT 1').get(assignment.scope_id);
-    if (!lesson || !canAccessCourse(db, user.id, user.role, lesson.course_id)) return { error: 'Access denied' };
+    if (!canAccessLesson(db, user.id, user.role, assignment.scope_id, preferredCourseId)) {
+      return { error: 'Access denied' };
+    }
   }
   return assignment;
 }
@@ -219,7 +225,11 @@ function gradeQuestion(question, response) {
     return { isCorrect: ok, earned: ok ? maxPoints : 0 };
   }
   if (question.type === 'matching') {
-    const map = response?.matches && typeof response.matches === 'object' ? response.matches : {};
+    const rawMap = response?.matches && typeof response.matches === 'object' ? response.matches : {};
+    const map = {};
+    Object.entries(rawMap).forEach(([k, v]) => {
+      map[normalizeTextInsensitive(k)] = v;
+    });
     const expected = (question.pairs || []).reduce((acc, p) => {
       acc[normalizeTextInsensitive(p.left_text)] = normalizeTextInsensitive(p.right_text);
       return acc;
@@ -243,6 +253,98 @@ function gradeQuestion(question, response) {
   return { isCorrect: ok, earned: ok ? maxPoints : 0 };
 }
 
+function optionLabel(options, selected) {
+  const list = Array.isArray(options) ? options : [];
+  const n = Number(selected);
+  if (!Number.isFinite(n) || n < 0) return null;
+  const byOrder = list.find((o) => Number(o.sort_order) === n);
+  if (byOrder) return String(byOrder.option_text || '').trim() || null;
+  if (n < list.length) return String(list[n].option_text || '').trim() || null;
+  return null;
+}
+
+function formatYourAnswer(question, response) {
+  if (!response) return 'No answer';
+  if (question.type === 'mcq_single') {
+    return optionLabel(question.options, response.selectedIndex) || 'No answer';
+  }
+  if (question.type === 'mcq_multi') {
+    const selected = Array.isArray(response.selectedIndices) ? response.selectedIndices : [];
+    const labels = selected.map((i) => optionLabel(question.options, i)).filter(Boolean);
+    return labels.length ? labels.join(', ') : 'No answer';
+  }
+  if (question.type === 'matching') {
+    const matches = response.matches && typeof response.matches === 'object' ? response.matches : {};
+    const lines = Object.entries(matches).map(([left, right]) => `${left} → ${right}`);
+    return lines.length ? lines.join('\n') : 'No answer';
+  }
+  const blanks = Array.isArray(response.blanks) ? response.blanks : [];
+  const lines = blanks
+    .map((b) => `${String(b.blank_key || '').trim()}: ${String(b.answer_text || '').trim()}`)
+    .filter((s) => s !== ':');
+  return lines.length ? lines.join('\n') : 'No answer';
+}
+
+function formatCorrectAnswer(question) {
+  if (question.type === 'mcq_single' || question.type === 'mcq_multi') {
+    const labels = (question.options || [])
+      .filter((o) => Number(o.is_correct) === 1)
+      .map((o) => String(o.option_text || '').trim())
+      .filter(Boolean);
+    return labels.length ? labels.join(', ') : '—';
+  }
+  if (question.type === 'matching') {
+    return (question.pairs || [])
+      .map((p) => `${p.left_text} → ${p.right_text}`)
+      .join('\n') || '—';
+  }
+  return (question.solutions || [])
+    .map((s) => `${s.blank_key}: ${s.answer_text}`)
+    .join('\n') || '—';
+}
+
+function formatExplanationText(raw) {
+  if (raw == null) return null;
+  let value = raw;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        value = JSON.parse(trimmed);
+      } catch {
+        return trimmed;
+      }
+    } else {
+      return trimmed;
+    }
+  }
+  if (typeof value === 'object' && value !== null) {
+    const nested = value.feedback ?? value.explanation ?? value.text ?? value.message ?? value.why ?? null;
+    if (typeof nested === 'string' && nested.trim()) return nested.trim();
+    if (nested != null && typeof nested === 'object') return formatExplanationText(nested);
+  }
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  return null;
+}
+
+function buildReviewRows(questions, graded) {
+  return (questions || []).map((q, idx) => {
+    const g = (graded || []).find((row) => Number(row.questionId) === Number(q.id)) || {};
+    return {
+      questionId: q.id,
+      index: idx,
+      prompt: String(q.prompt || q.question_text || `Question ${idx + 1}`),
+      type: q.type || 'mcq_single',
+      isCorrect: Boolean(g.isCorrect),
+      earned: Number(g.earned || 0),
+      explanation: formatExplanationText(q.explanation),
+      yourAnswer: formatYourAnswer(q, g.response ?? null),
+      correctAnswer: formatCorrectAnswer(q),
+    };
+  });
+}
+
 // v2 authoring APIs
 router.get('/v2', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
   const sql = `
@@ -255,9 +357,8 @@ router.get('/v2', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) =
      GROUP BY b.id
      ORDER BY b.updated_at DESC, b.id DESC`;
   let rows = db.prepare(sql).all();
-  if (req.user.role === 'Creator') {
-    rows = rows.filter((b) => b.status !== 'draft' || Number(b.created_by) === Number(req.user.id));
-  }
+  rows = hideOthersDrafts(req.user, rows, (b) => b.status === 'draft');
+  rows = filterLibraryRowsForTrainer(req.user, 'quiz', rows);
   res.json(stripRows(req.user, rows));
 });
 
@@ -278,7 +379,7 @@ router.get('/v2/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, re
     `SELECT b.*, u.name AS creator_name FROM quiz_bank b LEFT JOIN users u ON u.id = b.created_by WHERE b.id = ?`
   ).get(id);
   if (!bank) return res.status(404).json({ error: 'Quiz not found' });
-  if (!canViewQuizBank(req.user, bank)) {
+  if (!canViewQuizBank(req.user, bank) || !trainerCanViewLibraryItem(req.user, 'quiz', id)) {
     return res.status(404).json({ error: 'Quiz not found' });
   }
   const versions = db.prepare(
@@ -377,7 +478,7 @@ router.post('/v2/:id/questions', auth, requireRole('Admin', 'Trainer', 'Creator'
   res.json({ ...version, questions: hydrateQuestions(version.id) });
 });
 
-router.post('/v2/:id/assignments', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+router.post('/v2/:id/assignments', auth, requireRole('Admin', 'Creator'), (req, res) => {
   const quizBankId = Number(req.params.id);
   const bank = db.prepare('SELECT * FROM quiz_bank WHERE id = ?').get(quizBankId);
   if (!bank) return res.status(404).json({ error: 'Quiz not found' });
@@ -444,7 +545,7 @@ router.get('/v2/assignments', auth, (req, res) => {
     if (a.availability_start && String(a.availability_start) > nowIso) return false;
     if (a.availability_end && String(a.availability_end) < nowIso) return false;
     if (a.scope_type === 'course') return canAccessCourse(db, req.user.id, req.user.role, a.scope_id);
-    return canAccessLesson(db, req.user.id, req.user.role, a.scope_id);
+    return canAccessLesson(db, req.user.id, req.user.role, a.scope_id, courseId);
   }).map((a) => {
     const latest = db.prepare(
       `SELECT id, attempt_no, score, max_score, submitted_at
@@ -461,7 +562,8 @@ router.get('/v2/assignments', auth, (req, res) => {
 
 router.get('/v2/assignment/:assignmentId', auth, (req, res) => {
   const assignmentId = Number(req.params.assignmentId);
-  const assignment = getAssignmentForLearner(assignmentId, req.user);
+  const preferredCourseId = req.query.courseId != null ? Number(req.query.courseId) : null;
+  const assignment = getAssignmentForLearner(assignmentId, req.user, preferredCourseId);
   if (!assignment) return res.status(404).json({ error: 'Assignment not found' });
   if (assignment.error) return res.status(403).json({ error: assignment.error });
   const questions = hydrateQuestions(assignment.quiz_version_id).map((q) => {
@@ -500,7 +602,9 @@ router.get('/v2/assignment/:assignmentId', auth, (req, res) => {
 
 router.post('/v2/assignment/:assignmentId/submit', auth, (req, res) => {
   const assignmentId = Number(req.params.assignmentId);
-  const assignment = getAssignmentForLearner(assignmentId, req.user);
+  const preferredCourseId =
+    req.body?.courseId != null ? Number(req.body.courseId) : req.query.courseId != null ? Number(req.query.courseId) : null;
+  const assignment = getAssignmentForLearner(assignmentId, req.user, preferredCourseId);
   if (!assignment) return res.status(404).json({ error: 'Assignment not found' });
   if (assignment.error) return res.status(403).json({ error: assignment.error });
   const nowIso = new Date().toISOString();
@@ -554,12 +658,14 @@ router.post('/v2/assignment/:assignmentId/submit', auth, (req, res) => {
     pct,
     attemptNo: nextAttemptNo,
     passed: maxScore > 0 ? pct >= passingPct : false,
+    review: buildReviewRows(questions, graded),
   });
 });
 
 router.get('/v2/assignment/:assignmentId/attempts/latest', auth, (req, res) => {
   const assignmentId = Number(req.params.assignmentId);
-  const assignment = getAssignmentForLearner(assignmentId, req.user);
+  const preferredCourseId = req.query.courseId != null ? Number(req.query.courseId) : null;
+  const assignment = getAssignmentForLearner(assignmentId, req.user, preferredCourseId);
   if (!assignment) return res.status(404).json({ error: 'Assignment not found' });
   if (assignment.error) return res.status(403).json({ error: assignment.error });
 
@@ -576,13 +682,24 @@ router.get('/v2/assignment/:assignmentId/attempts/latest', auth, (req, res) => {
      FROM quiz_attempt_responses
      WHERE attempt_id = ?
      ORDER BY id`
-  ).all(latest.id).map((r) => ({ ...r, response: parseJsonSafe(r.response_json, null) }));
-  res.json({ ...latest, responses });
+  ).all(latest.id).map((r) => ({
+    questionId: r.question_id,
+    response: parseJsonSafe(r.response_json, null),
+    isCorrect: Number(r.is_correct) === 1,
+    earned: Number(r.earned_points || 0),
+  }));
+  const questions = hydrateQuestions(assignment.quiz_version_id);
+  res.json({
+    ...latest,
+    responses,
+    review: buildReviewRows(questions, responses),
+  });
 });
 
 router.get('/lesson/:lessonId', auth, (req, res) => {
   const { lessonId } = req.params;
-  if (!canAccessLesson(db, req.user.id, req.user.role, lessonId)) {
+  const preferredCourseId = req.query.courseId != null ? Number(req.query.courseId) : null;
+  if (!canAccessLesson(db, req.user.id, req.user.role, lessonId, preferredCourseId)) {
     return res.status(403).json({ error: 'Access denied' });
   }
   const quiz = db.prepare('SELECT id, lesson_id, title FROM quizzes WHERE lesson_id = ?').get(lessonId);
@@ -601,26 +718,85 @@ router.get('/lesson/:lessonId', auth, (req, res) => {
   });
 });
 
+function buildLegacyLessonReview(questions, answerMap) {
+  let score = 0;
+  const review = (questions || []).map((q, i) => {
+    const userAnswer = answerMap[i] ?? answerMap.find?.((a) => a && a.questionId === q.id)?.selectedIndex;
+    const isCorrect = Number(userAnswer) === Number(q.correct_index);
+    if (isCorrect) score++;
+    const opts = parseJsonSafe(q.options, []);
+    const selected = Number(userAnswer);
+    const yourLabel =
+      Number.isFinite(selected) && selected >= 0 && selected < opts.length
+        ? String(typeof opts[selected] === 'string' ? opts[selected] : opts[selected]?.option_text || '').trim()
+        : 'No answer';
+    const correctIdx = Number(q.correct_index);
+    const correctLabel =
+      Number.isFinite(correctIdx) && correctIdx >= 0 && correctIdx < opts.length
+        ? String(typeof opts[correctIdx] === 'string' ? opts[correctIdx] : opts[correctIdx]?.option_text || '').trim()
+        : '—';
+    return {
+      questionId: q.id,
+      index: i,
+      prompt: String(q.question_text || `Question ${i + 1}`),
+      type: 'mcq_single',
+      isCorrect,
+      earned: isCorrect ? 1 : 0,
+      explanation: null,
+      yourAnswer: yourLabel || 'No answer',
+      correctAnswer: correctLabel || '—',
+    };
+  });
+  return { score, total: (questions || []).length, review };
+}
+
 router.post('/lesson/:lessonId/submit', auth, (req, res) => {
   const { lessonId } = req.params;
-  const { answers } = req.body;
-  if (!canAccessLesson(db, req.user.id, req.user.role, lessonId)) {
+  const { answers } = req.body || {};
+  const preferredCourseId = req.body?.courseId != null ? Number(req.body.courseId) : null;
+  if (!canAccessLesson(db, req.user.id, req.user.role, lessonId, preferredCourseId)) {
     return res.status(403).json({ error: 'Access denied' });
   }
   const quiz = db.prepare('SELECT id FROM quizzes WHERE lesson_id = ?').get(lessonId);
   if (!quiz) return res.status(404).json({ error: 'Quiz not found' });
-  const questions = db.prepare('SELECT id, correct_index FROM quiz_questions WHERE quiz_id = ? ORDER BY sort_order').all(quiz.id);
+  const questions = db.prepare(
+    'SELECT id, question_text, options, correct_index FROM quiz_questions WHERE quiz_id = ? ORDER BY sort_order'
+  ).all(quiz.id);
   const answerMap = Array.isArray(answers) ? answers : (answers && answers.answers ? answers.answers : []);
-  let score = 0;
-  questions.forEach((q, i) => {
-    const userAnswer = answerMap[i] ?? answerMap.find(a => a.questionId === q.id)?.selectedIndex;
-    if (Number(userAnswer) === q.correct_index) score++;
-  });
-  const total = questions.length;
+  const { score, total, review } = buildLegacyLessonReview(questions, answerMap);
   db.prepare(
     'INSERT INTO quiz_attempts (user_id, quiz_id, score, total, answers) VALUES (?, ?, ?, ?, ?)'
   ).run(req.user.id, quiz.id, score, total, JSON.stringify(answerMap));
-  res.json({ score, total, passed: total > 0 && score === total });
+  res.json({ score, total, passed: total > 0 && score === total, review });
+});
+
+/** Latest legacy lesson-quiz attempt with rebuilt review (for results reopen). */
+router.get('/lesson/:lessonId/attempts/latest', auth, (req, res) => {
+  const { lessonId } = req.params;
+  const preferredCourseId = req.query.courseId != null ? Number(req.query.courseId) : null;
+  if (!canAccessLesson(db, req.user.id, req.user.role, lessonId, preferredCourseId)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  const quiz = db.prepare('SELECT id FROM quizzes WHERE lesson_id = ?').get(lessonId);
+  if (!quiz) return res.json(null);
+  const latest = db.prepare(
+    `SELECT id, quiz_id, score, total, answers, attempted_at
+     FROM quiz_attempts
+     WHERE user_id = ? AND quiz_id = ?
+     ORDER BY id DESC
+     LIMIT 1`
+  ).get(req.user.id, quiz.id);
+  if (!latest) return res.json(null);
+  const questions = db.prepare(
+    'SELECT id, question_text, options, correct_index FROM quiz_questions WHERE quiz_id = ? ORDER BY sort_order'
+  ).all(quiz.id);
+  const answerMap = parseJsonSafe(latest.answers, []);
+  const { review } = buildLegacyLessonReview(questions, Array.isArray(answerMap) ? answerMap : []);
+  res.json({
+    score: Number(latest.score || 0),
+    total: Number(latest.total || questions.length),
+    review,
+  });
 });
 
 module.exports = router;

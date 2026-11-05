@@ -749,6 +749,56 @@ function ensureV1Tables(db) {
   migratePaymentRecordsForApply(db);
   migrateBackfillCourseAccessGrants(db);
   migrateApplyCourseEnquiriesCallback(db);
+  migrateTrainerPanel(db);
+}
+
+/** Trainer panel: batch completion, grading, ownership log, private notes. */
+function migrateTrainerPanel(db) {
+  safeAlter(db, 'ALTER TABLE batches ADD COLUMN completed_at TEXT');
+  /** Academy date (YYYY-MM-DD) of the last admin reopen; auto-complete waits for a session on or after it. */
+  safeAlter(db, 'ALTER TABLE batches ADD COLUMN reopened_on TEXT');
+  safeAlter(db, 'ALTER TABLE batch_assignments ADD COLUMN max_score REAL DEFAULT 10');
+  safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN score REAL');
+  safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN feedback TEXT');
+  safeAlter(db, "ALTER TABLE assignment_submissions ADD COLUMN review_status TEXT DEFAULT 'pending'");
+  safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN reviewed_by INTEGER REFERENCES users(id)');
+  safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN reviewed_at TEXT');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS library_ownership_transfers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_type TEXT NOT NULL,
+      item_id INTEGER NOT NULL,
+      from_user_id INTEGER REFERENCES users(id),
+      to_user_id INTEGER NOT NULL REFERENCES users(id),
+      transferred_by INTEGER NOT NULL REFERENCES users(id),
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_library_ownership_item ON library_ownership_transfers (item_type, item_id, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_library_ownership_from ON library_ownership_transfers (from_user_id, id DESC);
+
+    CREATE TABLE IF NOT EXISTS trainer_student_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+      student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      author_id INTEGER NOT NULL REFERENCES users(id),
+      note TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_trainer_student_notes_batch_student ON trainer_student_notes (batch_id, student_id, id DESC);
+
+    CREATE TABLE IF NOT EXISTS lesson_access_overrides (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lesson_id INTEGER NOT NULL REFERENCES lesson_library(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      effect TEXT NOT NULL CHECK(effect IN ('grant','deny')),
+      created_by INTEGER REFERENCES users(id),
+      created_at TEXT DEFAULT (datetime('now')),
+      revoked_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_lesson_access_lesson_user ON lesson_access_overrides (lesson_id, user_id, id DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_lesson_access_active
+      ON lesson_access_overrides (lesson_id, user_id) WHERE revoked_at IS NULL;
+  `);
 }
 
 /** Nullable batch + callback fields for apply enquiries (SQLite cannot relax NOT NULL in place). */

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import SectionCard from '../components/SectionCard';
 import RichTextField from '../components/RichTextField';
+import TransferOwnerControl from '../components/TransferOwnerControl';
 import Cropper from 'react-easy-crop';
 import 'react-easy-crop/react-easy-crop.css';
 
@@ -1474,6 +1475,8 @@ export default function WorksheetsPage({
   onUpdate,
   onDelete,
   onUploadAsset,
+  staffUsers = [],
+  onTransferOwner,
 }) {
   const [q, setQ] = useState('');
   const [title, setTitle] = useState('');
@@ -2216,6 +2219,14 @@ export default function WorksheetsPage({
                               Delete
                             </button>
                           </>
+                        ) : null}
+                        {onTransferOwner ? (
+                          <TransferOwnerControl
+                            itemType="worksheet"
+                            itemId={m.id}
+                            staffUsers={staffUsers}
+                            onTransfer={onTransferOwner}
+                          />
                         ) : null}
                       </div>
                     </td>

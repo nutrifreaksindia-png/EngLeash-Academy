@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useLayoutEffect, useMemo } from 'react';
+import { Pressable } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { getFocusedRouteNameFromRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -6,6 +7,16 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuth } from '../context/AuthContext';
 import { appStackScreenOptions } from './stackHeaderOptions';
+
+const HIDDEN_TAB_BAR_STYLE = {
+  display: 'none' as const,
+  height: 0,
+  overflow: 'hidden' as const,
+  opacity: 0,
+  borderTopWidth: 0,
+  elevation: 0,
+  position: 'absolute' as const,
+};
 
 import LandingHomeScreen from '../screens/LandingHomeScreen';
 import PublicCourseDetailScreen from '../screens/PublicCourseDetailScreen';
@@ -85,7 +96,26 @@ function HomeStackNavigator() {
   );
 }
 
-function CoursesStackNavigator() {
+function CoursesStackNavigator({ navigation, route }: { navigation: any; route: any }) {
+  const insets = useSafeAreaInsets();
+  const visibleTabBarStyle = useMemo(
+    () => ({
+      paddingTop: 4,
+      paddingBottom: Math.max(insets.bottom, 8),
+      height: 58 + Math.max(insets.bottom, 8),
+    }),
+    [insets.bottom],
+  );
+
+  // Hide from the stack parent so Android doesn't leave a white tab-bar gap under LearnMode
+  // (fullScreenModal alone is not enough on Android).
+  useLayoutEffect(() => {
+    const focused = getFocusedRouteNameFromRoute(route) ?? 'MyCoursesList';
+    navigation.setOptions({
+      tabBarStyle: focused === 'LearnMode' ? HIDDEN_TAB_BAR_STYLE : visibleTabBarStyle,
+    });
+  }, [navigation, route, visibleTabBarStyle]);
+
   return (
     <CoursesStack.Navigator screenOptions={stackOpts} initialRouteName="MyCoursesList">
       <CoursesStack.Screen name="MyCoursesList" component={MyCoursesScreen} options={{ title: '', headerShown: false }} />
@@ -103,7 +133,11 @@ function CoursesStackNavigator() {
       <CoursesStack.Screen
         name="LearnMode"
         component={LearnModeScreen}
-        options={{ headerShown: false, presentation: 'fullScreenModal' }}
+        options={{
+          headerShown: false,
+          animation: 'slide_from_right',
+          contentStyle: { backgroundColor: '#e8eef9' },
+        }}
       />
       <CoursesStack.Screen name="VideoPlayer" component={VideoPlayerScreen} options={{ title: 'Video', headerShown: false }} />
       <CoursesStack.Screen name="ClassNotes" component={ClassNotesScreen} options={{ title: 'Class notes' }} />
@@ -167,12 +201,27 @@ function tabBarIcon(filled: keyof typeof Ionicons.glyphMap, outline: keyof typeo
   );
 }
 
+function lockedTabButton(enabled: boolean) {
+  return ({ href: _href, ...props }: { href?: string; style?: object; onPress?: (...args: any[]) => void; [key: string]: any }) => (
+    <Pressable
+      {...props}
+      disabled={!enabled}
+      onPress={enabled ? props.onPress : undefined}
+      accessibilityState={{ ...(props.accessibilityState || {}), disabled: !enabled }}
+      style={[props.style, !enabled ? { opacity: 0.38 } : null]}
+    />
+  );
+}
+
 export default function MainTabNavigator() {
   const { user } = useAuth();
   const insets = useSafeAreaInsets();
+  const signedIn = Boolean(user);
+  const lockedTint = '#b0b4bc';
 
   return (
     <Tab.Navigator
+      sceneContainerStyle={{ backgroundColor: '#e8eef9' }}
       screenOptions={{
         headerShown: false,
         popToTopOnBlur: true,
@@ -202,23 +251,21 @@ export default function MainTabNavigator() {
           return {
             tabBarLabel: 'My Courses',
             tabBarIcon: tabBarIcon('school', 'school-outline'),
-            tabBarStyle: immersive
-              ? { display: 'none' }
-              : {
-                  paddingTop: 4,
-                  paddingBottom: Math.max(insets.bottom, 8),
-                  height: 58 + Math.max(insets.bottom, 8),
-                },
+            tabBarActiveTintColor: signedIn ? '#c41e3a' : lockedTint,
+            tabBarInactiveTintColor: signedIn ? '#666' : lockedTint,
+            tabBarButton: lockedTabButton(signedIn),
+            tabBarStyle: immersive ? HIDDEN_TAB_BAR_STYLE : {
+              paddingTop: 4,
+              paddingBottom: Math.max(insets.bottom, 8),
+              height: 58 + Math.max(insets.bottom, 8),
+            },
           };
         }}
-        listeners={({ navigation }) => ({
+        listeners={{
           tabPress: (e) => {
-            if (!user) {
-              e.preventDefault();
-              navigation.navigate('Account');
-            }
+            if (!signedIn) e.preventDefault();
           },
-        })}
+        }}
       />
       <Tab.Screen
         name="MySessions"
@@ -226,15 +273,15 @@ export default function MainTabNavigator() {
         options={{
           tabBarLabel: 'My Sessions',
           tabBarIcon: tabBarIcon('videocam', 'videocam-outline'),
+          tabBarActiveTintColor: signedIn ? '#c41e3a' : lockedTint,
+          tabBarInactiveTintColor: signedIn ? '#666' : lockedTint,
+          tabBarButton: lockedTabButton(signedIn),
         }}
-        listeners={({ navigation }) => ({
+        listeners={{
           tabPress: (e) => {
-            if (!user) {
-              e.preventDefault();
-              navigation.navigate('Account');
-            }
+            if (!signedIn) e.preventDefault();
           },
-        })}
+        }}
       />
       <Tab.Screen
         name="MyAssignments"
@@ -242,15 +289,15 @@ export default function MainTabNavigator() {
         options={{
           tabBarLabel: 'My Assignments',
           tabBarIcon: tabBarIcon('clipboard', 'clipboard-outline'),
+          tabBarActiveTintColor: signedIn ? '#c41e3a' : lockedTint,
+          tabBarInactiveTintColor: signedIn ? '#666' : lockedTint,
+          tabBarButton: lockedTabButton(signedIn),
         }}
-        listeners={({ navigation }) => ({
+        listeners={{
           tabPress: (e) => {
-            if (!user) {
-              e.preventDefault();
-              navigation.navigate('Account');
-            }
+            if (!signedIn) e.preventDefault();
           },
-        })}
+        }}
       />
       <Tab.Screen
         name="Account"

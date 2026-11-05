@@ -225,6 +225,7 @@ export default function CoursesPage({
   fetchCourseSchedule,
   updateCourseScheduleSlot,
   pushToast = () => {},
+  readOnly = false,
 }) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
@@ -497,11 +498,15 @@ export default function CoursesPage({
     <div className="stack">
       <SectionCard
         title="Courses"
-        subtitle="Lesson schedule has one slot per day from the course duration; assign a lesson template per day."
+        subtitle={
+          readOnly
+            ? 'Courses taught in your active batches. Admins manage course details and lesson schedules.'
+            : 'Lesson schedule has one slot per day from the course duration; assign a lesson template per day.'
+        }
         actions={
           <>
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search courses" />
-            <button onClick={newCourse}>+ New Course</button>
+            {!readOnly ? <button onClick={newCourse}>+ New Course</button> : null}
           </>
         }
       >
@@ -544,13 +549,15 @@ export default function CoursesPage({
                       <button className="secondaryBtn courseQuickAction" type="button" onClick={() => openLessonSchedule(c)}>
                         Lesson schedule
                       </button>
-                      <button
-                        className="dangerBtn courseQuickAction"
-                        type="button"
-                        onClick={() => void handleRowDeleteCourse(c)}
-                      >
-                        Delete
-                      </button>
+                      {!readOnly ? (
+                        <button
+                          className="dangerBtn courseQuickAction"
+                          type="button"
+                          onClick={() => void handleRowDeleteCourse(c)}
+                        >
+                          Delete
+                        </button>
+                      ) : null}
                     </div>
                   </td>
                 </tr>
@@ -571,19 +578,21 @@ export default function CoursesPage({
       >
         {viewCourse ? (
           <div className="courseViewReadonly">
-            <header className="courseViewHeader">
-              <div className="courseViewActions">
-                <button className="secondaryBtn" type="button" onClick={handleViewEdit}>
-                  Edit
-                </button>
-                <button className="secondaryBtn" type="button" onClick={() => void handleViewDuplicate()}>
-                  Duplicate
-                </button>
-                <button className="dangerBtn" type="button" onClick={() => void handleViewDelete()}>
-                  Delete
-                </button>
-              </div>
-            </header>
+            {!readOnly ? (
+              <header className="courseViewHeader">
+                <div className="courseViewActions">
+                  <button className="secondaryBtn" type="button" onClick={handleViewEdit}>
+                    Edit
+                  </button>
+                  <button className="secondaryBtn" type="button" onClick={() => void handleViewDuplicate()}>
+                    Duplicate
+                  </button>
+                  <button className="dangerBtn" type="button" onClick={() => void handleViewDelete()}>
+                    Delete
+                  </button>
+                </div>
+              </header>
+            ) : null}
 
             <section className="courseViewBlock">
               <h3 className="courseViewLabel">Description</h3>
@@ -686,11 +695,18 @@ export default function CoursesPage({
         variant="modal"
       >
         <div className="lessonSchedulePanel">
-          <p className="lessonScheduleHint muted">
-            Slots match <strong>Duration (days)</strong> on the course ({scheduleCourse?.duration_days || 1} days). Change
-            duration in course edit to add or remove days.
-          </p>
-          {!libraryLessons.length ? (
+          {readOnly ? (
+            <p className="lessonScheduleHint muted">
+              The lesson taught on each day of this course ({scheduleCourse?.duration_days || 1} days). Admins set this
+              schedule.
+            </p>
+          ) : (
+            <p className="lessonScheduleHint muted">
+              Slots match <strong>Duration (days)</strong> on the course ({scheduleCourse?.duration_days || 1} days). Change
+              duration in course edit to add or remove days.
+            </p>
+          )}
+          {!readOnly && !libraryLessons.length ? (
             <p className="muted">Create lesson templates under Lessons to assign them here.</p>
           ) : null}
           {scheduleLoading ? (
@@ -725,7 +741,11 @@ export default function CoursesPage({
                         <tr key={row.mapId}>
                           <td className="lessonScheduleDayCol">{row.dayNumber}</td>
                           <td className="lessonScheduleLessonCol">
-                            {!rowLessonOptions.length ? (
+                            {readOnly ? (
+                              <span className={row.lessonTitle ? undefined : 'muted'}>
+                                {row.lessonTitle || 'Not assigned'}
+                              </span>
+                            ) : !rowLessonOptions.length ? (
                               <span className="muted">{row.lessonTitle || 'Not assigned — add lessons under Lessons first.'}</span>
                             ) : (
                               <select

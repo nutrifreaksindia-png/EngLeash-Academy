@@ -542,7 +542,12 @@ function recomputeProfileStatus(profileId) {
   let nextStatus = profile.status;
   if (!initialPaid) {
     nextStatus = 'awaiting_initial_payment';
-  } else if (String(profile.enrollment_status || '').toLowerCase() === 'rejected') {
+  } else if (
+    String(profile.enrollment_status || '').toLowerCase() === 'rejected' &&
+    remainingBalancePaise > 0
+  ) {
+    // Only keep rejected when money is still owed. A fully paid plan must not stay rejected
+    // just because an older overdue sweep cleared the shared enrollment row.
     nextStatus = 'rejected';
   } else {
     nextStatus = batchHasStarted(profile) ? 'active' : 'approved_pending_access';
@@ -715,15 +720,44 @@ function settleDueItem({ dueItemId, amountPaise, paidAtIso = new Date().toISOStr
     ).run(nextPaidAmountPaise, fullyPaid ? 'paid' : 'scheduled', fullyPaid ? paidAtIso : null, stringifyJson(nextMeta), dueItemId);
 
     let enrollmentId = due.enrollment_id ? Number(due.enrollment_id) : null;
-    if (Number(due.is_initial_due || 0) === 1 && !enrollmentId) {
-      enrollmentId = ensurePendingApplyEnrollment({
-        userId: due.user_id,
-        courseId: due.course_id,
-        batchId: due.batch_id,
-      });
+    if (Number(due.is_initial_due || 0) === 1) {
+      // Paying (or finishing) an initial due means this plan supersedes older unpaid apply dues
+      // for the same user/course — otherwise overdue sweep on the old installment removes them again.
       db.prepare(
-        'UPDATE apply_course_billing_profiles SET enrollment_id = ?, updated_at = datetime(\'now\') WHERE id = ?',
-      ).run(enrollmentId, due.billing_profile_id);
+        `UPDATE apply_course_due_items
+         SET due_status = 'cancelled', updated_at = datetime('now')
+         WHERE due_status IN ('scheduled', 'overdue')
+           AND billing_profile_id IN (
+             SELECT id FROM apply_course_billing_profiles
+             WHERE user_id = ? AND course_id = ? AND id != ?
+           )`,
+      ).run(due.user_id, due.course_id, due.billing_profile_id);
+      db.prepare(
+        `UPDATE apply_course_billing_profiles
+         SET status = CASE WHEN status IN ('active', 'approved_pending_access', 'awaiting_initial_payment', 'pending_approval')
+                           THEN 'cancelled' ELSE status END,
+             updated_at = datetime('now')
+         WHERE user_id = ? AND course_id = ? AND id != ?
+           AND status NOT IN ('cancelled', 'removed_overdue')`,
+      ).run(due.user_id, due.course_id, due.billing_profile_id);
+
+      if (!enrollmentId) {
+        enrollmentId = ensurePendingApplyEnrollment({
+          userId: due.user_id,
+          courseId: due.course_id,
+          batchId: due.batch_id,
+        });
+        db.prepare(
+          'UPDATE apply_course_billing_profiles SET enrollment_id = ?, updated_at = datetime(\'now\') WHERE id = ?',
+        ).run(enrollmentId, due.billing_profile_id);
+      } else {
+        // Re-approve shared enrollment if an older overdue sweep had rejected it.
+        ensurePendingApplyEnrollment({
+          userId: due.user_id,
+          courseId: due.course_id,
+          batchId: due.batch_id,
+        });
+      }
     }
 
     const profile = recomputeProfileStatus(due.billing_profile_id);
@@ -1299,7 +1333,19 @@ function listOverdueDueItems(nowMs = Date.now()) {
      JOIN apply_course_billing_profiles ap ON ap.id = di.billing_profile_id
      WHERE di.due_status IN ('scheduled','overdue')
        AND di.grace_end_date IS NOT NULL
-       AND di.grace_end_date < ?`,
+       AND di.grace_end_date < ?
+       -- Do not re-punish closed profiles, and never clobber a newer paid/active apply plan.
+       AND LOWER(COALESCE(ap.status, '')) NOT IN ('cancelled', 'removed_overdue', 'rejected')
+       AND NOT EXISTS (
+         SELECT 1 FROM apply_course_billing_profiles newer
+         WHERE newer.user_id = ap.user_id
+           AND newer.course_id = ap.course_id
+           AND newer.id != ap.id
+           AND newer.id > ap.id
+           AND LOWER(COALESCE(newer.status, '')) IN (
+             'active', 'approved_pending_access', 'awaiting_initial_payment', 'pending_approval'
+           )
+       )`,
   ).all(todayYmd);
 }
 

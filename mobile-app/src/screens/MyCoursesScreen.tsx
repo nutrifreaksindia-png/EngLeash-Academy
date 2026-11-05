@@ -13,12 +13,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api } from '../api/client';
 import { BrandedTopBar } from '../components/BrandedTopBar';
 import { useAuth } from '../context/AuthContext';
-import {
-  allLessonsCompleted,
-  computeCourseProgressPercent,
-  getLessonProgress,
-  resolveLessonAction,
-} from '../lib/learnProgress';
+import { computeCourseProgressPercent } from '../lib/learnProgress';
 
 const BRAND_RED = '#c41e3a';
 const BRAND_BLUE = '#1a237e';
@@ -29,14 +24,17 @@ type Course = {
   description?: string;
   my_schedule_hint?: string | null;
 };
-type LessonRow = { id: number; title?: string; sort_order?: number };
+type LessonRow = {
+  id: number;
+  title?: string;
+  sort_order?: number;
+  contentSummary?: { type: string; id: number; title?: string; orderIndex?: number; quizAssignmentId?: number | null }[];
+};
 
 type CourseEnriched = Course & {
   lessonIds: number[];
   progressPercent: number;
-  primaryLessonId: number | null;
-  primaryLessonTitle: string;
-  lessonAction: 'start' | 'resume' | 'restart';
+  hasLessons: boolean;
 };
 
 function fallbackEnriched(c: Course): CourseEnriched {
@@ -44,9 +42,7 @@ function fallbackEnriched(c: Course): CourseEnriched {
     ...c,
     lessonIds: [],
     progressPercent: 0,
-    primaryLessonId: null,
-    primaryLessonTitle: '',
-    lessonAction: 'start',
+    hasLessons: false,
   };
 }
 
@@ -63,53 +59,13 @@ async function enrichCourse(userId: number, c: Course): Promise<CourseEnriched> 
     (a, b) => Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0),
   );
   const lessonIds = sorted.map((l) => l.id);
-
   const progressPercent = await computeCourseProgressPercent(userId, c.id, sorted);
-
-  let primaryLessonId: number | null = sorted[0]?.id ?? null;
-  let primaryLessonTitle = sorted[0]?.title?.trim() || 'Current lesson';
-
-  let lessonAction: 'start' | 'resume' | 'restart' = 'start';
-
-  if (!sorted.length) {
-    return {
-      ...c,
-      lessonIds,
-      progressPercent: 0,
-      primaryLessonId: null,
-      primaryLessonTitle: '',
-      lessonAction: 'start',
-    };
-  }
-
-  let foundIncomplete = false;
-  for (const L of sorted) {
-    const p = await getLessonProgress(userId, c.id, L.id);
-    if (!p?.completed) {
-      foundIncomplete = true;
-      primaryLessonId = L.id;
-      primaryLessonTitle = L.title?.trim() || 'Lesson';
-      lessonAction = await resolveLessonAction(userId, c.id, L.id);
-      break;
-    }
-  }
-
-  const allDone =
-    lessonIds.length > 0 ? await allLessonsCompleted(userId, c.id, lessonIds) : false;
-
-  if (!foundIncomplete || allDone) {
-    primaryLessonId = sorted[0]!.id;
-    primaryLessonTitle = sorted[0]!.title?.trim() || 'Lesson';
-    lessonAction = allDone ? 'restart' : 'start';
-  }
 
   return {
     ...c,
     lessonIds,
     progressPercent,
-    primaryLessonId,
-    primaryLessonTitle,
-    lessonAction,
+    hasLessons: lessonIds.length > 0,
   };
 }
 
@@ -232,26 +188,14 @@ export default function MyCoursesScreen({ navigation, route }: any) {
           </Text>
         }
         renderItem={({ item }) => {
-          const ctaLabel =
-            item.lessonAction === 'resume'
-              ? 'Resume'
-              : item.lessonAction === 'restart'
-                ? 'Restart'
-                : 'Start';
-          const canLearn = Boolean(item.primaryLessonId);
+          const canLearn = item.hasLessons;
           const barW = Math.min(100, Math.max(0, item.progressPercent));
           return (
             <View style={styles.card}>
               <Text style={styles.cardTitle}>{item.name}</Text>
-              {canLearn ? (
-                <Text style={styles.lessonCue} numberOfLines={2}>
-                  {item.lessonAction === 'restart'
-                    ? 'Course complete · start again from the first lesson'
-                    : `Continue: ${item.primaryLessonTitle}`}
-                </Text>
-              ) : (
+              {!canLearn ? (
                 <Text style={styles.lessonCueMuted}>No lessons available yet.</Text>
-              )}
+              ) : null}
               {item.my_schedule_hint ? (
                 <Text style={styles.scheduleHint}>{item.my_schedule_hint}</Text>
               ) : null}
@@ -271,28 +215,13 @@ export default function MyCoursesScreen({ navigation, route }: any) {
                 style={[styles.cta, !canLearn && styles.ctaDisabled]}
                 disabled={!canLearn}
                 onPress={() => {
-                  if (!item.primaryLessonId) return;
-                  navigation.navigate('LearnMode', {
-                    courseId: item.id,
-                    lessonId: item.primaryLessonId,
-                    lessonTitle: item.primaryLessonTitle,
-                    restart: item.lessonAction === 'restart',
-                    courseLessonIds: item.lessonIds,
-                  });
-                }}
-              >
-                <Text style={styles.ctaText}>{canLearn ? ctaLabel : 'Unavailable'}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.outlineBtn}
-                onPress={() =>
                   navigation.navigate('CourseDetail', {
                     courseId: item.id,
                     courseName: item.name,
-                  })
-                }
+                  });
+                }}
               >
-                <Text style={styles.outlineBtnText}>Course outline</Text>
+                <Text style={styles.ctaText}>{canLearn ? 'Lessons' : 'Unavailable'}</Text>
               </TouchableOpacity>
             </View>
           );
@@ -375,7 +304,6 @@ const styles = StyleSheet.create({
     letterSpacing: -0.3,
     marginBottom: 6,
   },
-  lessonCue: { fontSize: 14, color: BRAND_BLUE, fontWeight: '600', marginBottom: 8 },
   lessonCueMuted: { fontSize: 14, color: '#94a3b8', marginBottom: 8 },
   scheduleHint: { fontSize: 13, color: BRAND_RED, marginBottom: 10, fontWeight: '700' },
   cardDesc: { fontSize: 14, color: '#64748b', lineHeight: 20, marginBottom: 14 },
@@ -392,7 +320,7 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: '#e7ecf7',
     overflow: 'hidden',
-    marginBottom: 16,
+    marginBottom: 18,
   },
   fill: {
     height: '100%',
@@ -410,7 +338,6 @@ const styles = StyleSheet.create({
     shadowRadius: 14,
     shadowOffset: { width: 0, height: 5 },
     elevation: 5,
-    marginBottom: 10,
   },
   ctaDisabled: {
     opacity: 0.5,
@@ -424,15 +351,6 @@ const styles = StyleSheet.create({
     letterSpacing: 0.4,
     textTransform: 'uppercase',
   },
-  outlineBtn: {
-    alignItems: 'center',
-    paddingVertical: 8,
-    borderRadius: 10,
-    borderWidth: 1.5,
-    borderColor: '#c7cff0',
-    backgroundColor: '#f8fafc',
-  },
-  outlineBtnText: { color: BRAND_BLUE, fontWeight: '600', fontSize: 14 },
   scheduleBtn: {
     position: 'absolute',
     left: 18,

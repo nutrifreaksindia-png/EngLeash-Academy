@@ -31,6 +31,20 @@ function isBatchStarted(b) {
   return (b?.batch_status || 'draft') === 'started';
 }
 
+function isBatchCompleted(b) {
+  return (b?.batch_status || 'draft') === 'completed';
+}
+
+function batchStatusLabel(b) {
+  if (isBatchCompleted(b)) return 'Completed';
+  if (isBatchStarted(b)) return 'Started';
+  return 'Draft';
+}
+
+function batchHasRun(b) {
+  return isBatchStarted(b) || isBatchCompleted(b);
+}
+
 function isBatchOpenForApply(b) {
   return (b?.enrollment_open_status || 'closed') === 'open';
 }
@@ -131,6 +145,9 @@ export default function BatchesPage({
   saveSessionAttendance,
   onRefreshUsers,
   onDeleteBatch,
+  onCompleteBatch,
+  onReopenBatch,
+  trainerMode = false,
 }) {
   const navigate = useNavigate();
   const [expandedId, setExpandedId] = React.useState(null);
@@ -703,12 +720,18 @@ export default function BatchesPage({
   return (
     <div className="stack">
       <SectionCard
-        title="Batches"
-        subtitle="Batch numbers must be unique per type. Set Sessions (weekdays + times). Optionally link a course — if not, set session count in Course & duration before starting."
+        title={trainerMode ? 'My batches' : 'Batches'}
+        subtitle={
+          trainerMode
+            ? 'Batches you teach. Admins create batches, manage rosters, and start them.'
+            : 'Batch numbers must be unique per type. Set Sessions (weekdays + times). Optionally link a course — if not, set session count in Course & duration before starting.'
+        }
         actions={
-          <button type="button" onClick={() => setCreateModalOpen(true)}>
-            Create batch
-          </button>
+          trainerMode ? null : (
+            <button type="button" onClick={() => setCreateModalOpen(true)}>
+              Create batch
+            </button>
+          )
         }
       >
         <div className="tableWrap batchListWrap">
@@ -737,8 +760,8 @@ export default function BatchesPage({
                     <td>{batchTypeLabel(b.session_type)}</td>
                     <td>{b.title || b.name}</td>
                     <td>
-                      <span className={`badge ${isBatchStarted(b) ? 'active' : 'inactive'}`}>
-                        {isBatchStarted(b) ? 'Started' : 'Draft'}
+                      <span className={`badge ${isBatchCompleted(b) ? 'inactive' : isBatchStarted(b) ? 'active' : 'inactive'}`}>
+                        {batchStatusLabel(b)}
                       </span>
                     </td>
                     <td>{b.course_name || <span className="muted">None</span>}</td>
@@ -747,21 +770,25 @@ export default function BatchesPage({
                       <button type="button" className="secondaryBtn batchRowActionBtn" onClick={() => openModal('batchView', b)}>
                         View
                       </button>
-                      <button type="button" className="secondaryBtn batchRowActionBtn" onClick={() => openModal('batchEdit', b)}>
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        className="dangerBtn batchRowActionBtn"
-                        title={
-                          isBatchStarted(b)
-                            ? 'Delete batch and all related classroom + cloud recording data'
-                            : 'Delete draft batch'
-                        }
-                        onClick={(e) => handleDeleteBatchFromRow(b, e)}
-                      >
-                        Delete
-                      </button>
+                      {!trainerMode ? (
+                        <>
+                          <button type="button" className="secondaryBtn batchRowActionBtn" onClick={() => openModal('batchEdit', b)}>
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            className="dangerBtn batchRowActionBtn"
+                            title={
+                              isBatchStarted(b)
+                                ? 'Delete batch and all related classroom + cloud recording data'
+                                : 'Delete draft batch'
+                            }
+                            onClick={(e) => handleDeleteBatchFromRow(b, e)}
+                          >
+                            Delete
+                          </button>
+                        </>
+                      ) : null}
                     </td>
                   </tr>
                   {expandedId === b.id ? (
@@ -774,27 +801,57 @@ export default function BatchesPage({
                           <button type="button" className="secondaryBtn" onClick={() => openModal('sessions', b)}>
                             Sessions
                           </button>
-                          <button type="button" className="secondaryBtn" onClick={() => openModal('course', b)}>
-                            Course
-                          </button>
-                          {!isBatchStarted(b) ? (
-                            <button type="button" onClick={(e) => openStartModal(b, e)}>
-                              Start batch
-                            </button>
+                          {!trainerMode ? (
+                            <>
+                              <button type="button" className="secondaryBtn" onClick={() => openModal('course', b)}>
+                                Course
+                              </button>
+                              {!isBatchStarted(b) && !isBatchCompleted(b) ? (
+                                <button type="button" onClick={(e) => openStartModal(b, e)}>
+                                  Start batch
+                                </button>
+                              ) : null}
+                              {isBatchStarted(b) && onCompleteBatch ? (
+                                <button
+                                  type="button"
+                                  className="secondaryBtn"
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    if (!window.confirm(`Mark “${b.title || b.name}” complete? Trainers will lose course library access.`)) return;
+                                    await onCompleteBatch(b.id);
+                                  }}
+                                >
+                                  Complete
+                                </button>
+                              ) : null}
+                              {isBatchCompleted(b) && onReopenBatch ? (
+                                <button
+                                  type="button"
+                                  className="secondaryBtn"
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    if (!window.confirm(`Reopen “${b.title || b.name}”?`)) return;
+                                    await onReopenBatch(b.id);
+                                  }}
+                                >
+                                  Reopen
+                                </button>
+                              ) : null}
+                              <button
+                                type="button"
+                                className={`secondaryBtn ${isBatchOpenForApply(b) ? 'toggleBtnOn' : ''}`}
+                                title="Allow students to apply for this batch from mobile app"
+                                onClick={async () => {
+                                  await onUpdateBatch(b.id, {
+                                    enrollmentOpenStatus: isBatchOpenForApply(b) ? 'closed' : 'open',
+                                  });
+                                }}
+                              >
+                                {isBatchOpenForApply(b) ? 'Applications: Open' : 'Applications: Closed'}
+                              </button>
+                            </>
                           ) : null}
-                          <button
-                            type="button"
-                            className={`secondaryBtn ${isBatchOpenForApply(b) ? 'toggleBtnOn' : ''}`}
-                            title="Allow students to apply for this batch from mobile app"
-                            onClick={async () => {
-                              await onUpdateBatch(b.id, {
-                                enrollmentOpenStatus: isBatchOpenForApply(b) ? 'closed' : 'open',
-                              });
-                            }}
-                          >
-                            {isBatchOpenForApply(b) ? 'Applications: Open' : 'Applications: Closed'}
-                          </button>
-                          {isBatchStarted(b) ? (
+                          {batchHasRun(b) ? (
                             <>
                               <button type="button" className="secondaryBtn" onClick={() => openModal('attendance', b)}>
                                 Attendance
@@ -834,32 +891,38 @@ export default function BatchesPage({
       <Modal open={!!modal && modal === 'students'} title={modalTitle} onClose={closeModal} variant="modal">
         {modalBatch ? (
           <div className="stack batchModalBody">
-            <div className="row">
-              <select value={newStudentId} onChange={(e) => setNewStudentId(e.target.value)}>
-                <option value="">Select student / lab</option>
-                {studentUsers.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name} ({u.email})
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => {
-                  onAddBatchMember(newStudentId, modalBatch.id);
-                  setNewStudentId('');
-                }}
-                disabled={!newStudentId}
-              >
-                Add
-              </button>
-            </div>
-            {studentUsers.length === 0 ? (
-              <p className="muted">
-                No Student/Lab accounts in the directory. Add them under <strong>Students</strong> in the sidebar, then use{' '}
-                <strong>Refresh</strong> or reopen this dialog.
-              </p>
-            ) : null}
+            {trainerMode ? (
+              <p className="muted">Admins add and remove students and trainers for this batch.</p>
+            ) : (
+              <>
+                <div className="row">
+                  <select value={newStudentId} onChange={(e) => setNewStudentId(e.target.value)}>
+                    <option value="">Select student / lab</option>
+                    {studentUsers.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.name} ({u.email})
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onAddBatchMember(newStudentId, modalBatch.id);
+                      setNewStudentId('');
+                    }}
+                    disabled={!newStudentId}
+                  >
+                    Add
+                  </button>
+                </div>
+                {studentUsers.length === 0 ? (
+                  <p className="muted">
+                    No Student/Lab accounts in the directory. Add them under <strong>Students</strong> in the sidebar, then use{' '}
+                    <strong>Refresh</strong> or reopen this dialog.
+                  </p>
+                ) : null}
+              </>
+            )}
             <div className="tableWrap">
               <table>
                 <thead>
@@ -867,7 +930,7 @@ export default function BatchesPage({
                     <th>Name</th>
                     <th>Email</th>
                     <th>Role</th>
-                    <th />
+                    {!trainerMode ? <th /> : null}
                   </tr>
                 </thead>
                 <tbody>
@@ -876,11 +939,13 @@ export default function BatchesPage({
                       <td>{m.name}</td>
                       <td>{m.email}</td>
                       <td>{m.role}</td>
-                      <td>
-                        <button type="button" className="dangerBtn" onClick={() => onRemoveBatchMember(m.user_id, modalBatch.id)}>
-                          Remove
-                        </button>
-                      </td>
+                      {!trainerMode ? (
+                        <td>
+                          <button type="button" className="dangerBtn" onClick={() => onRemoveBatchMember(m.user_id, modalBatch.id)}>
+                            Remove
+                          </button>
+                        </td>
+                      ) : null}
                     </tr>
                   ))}
                   {(!batchMembers || batchMembers.length === 0) && (
@@ -894,30 +959,34 @@ export default function BatchesPage({
               </table>
             </div>
             <h4 className="batchModalSubhead">Trainers</h4>
-            <div className="row">
-              <select value={newTrainerId} onChange={(e) => setNewTrainerId(e.target.value)}>
-                <option value="">Select trainer</option>
-                {trainerUsers.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name} ({u.email})
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => {
-                  onAddBatchTrainer(newTrainerId, modalBatch.id);
-                  setNewTrainerId('');
-                }}
-                disabled={!newTrainerId}
-              >
-                Add trainer
-              </button>
-            </div>
-            {trainerUsers.length === 0 ? (
-              <p className="muted">
-                No Trainer accounts in the directory. Add them under <strong>Trainers</strong>, then use <strong>Refresh</strong> or reopen this dialog.
-              </p>
+            {!trainerMode ? (
+              <>
+                <div className="row">
+                  <select value={newTrainerId} onChange={(e) => setNewTrainerId(e.target.value)}>
+                    <option value="">Select trainer</option>
+                    {trainerUsers.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.name} ({u.email})
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onAddBatchTrainer(newTrainerId, modalBatch.id);
+                      setNewTrainerId('');
+                    }}
+                    disabled={!newTrainerId}
+                  >
+                    Add trainer
+                  </button>
+                </div>
+                {trainerUsers.length === 0 ? (
+                  <p className="muted">
+                    No Trainer accounts in the directory. Add them under <strong>Trainers</strong>, then use <strong>Refresh</strong> or reopen this dialog.
+                  </p>
+                ) : null}
+              </>
             ) : null}
             <div className="tableWrap">
               <table>
@@ -925,7 +994,7 @@ export default function BatchesPage({
                   <tr>
                     <th>Name</th>
                     <th>Email</th>
-                    <th />
+                    {!trainerMode ? <th /> : null}
                   </tr>
                 </thead>
                 <tbody>
@@ -933,16 +1002,18 @@ export default function BatchesPage({
                     <tr key={t.user_id}>
                       <td>{t.name}</td>
                       <td>{t.email}</td>
-                      <td>
-                        <button type="button" className="dangerBtn" onClick={() => onRemoveBatchTrainer(t.user_id, modalBatch.id)}>
-                          Remove
-                        </button>
-                      </td>
+                      {!trainerMode ? (
+                        <td>
+                          <button type="button" className="dangerBtn" onClick={() => onRemoveBatchTrainer(t.user_id, modalBatch.id)}>
+                            Remove
+                          </button>
+                        </td>
+                      ) : null}
                     </tr>
                   ))}
                   {(!batchTrainers || batchTrainers.length === 0) && (
                     <tr>
-                      <td colSpan={3} className="muted">
+                      <td colSpan={trainerMode ? 2 : 3} className="muted">
                         No trainers yet.
                       </td>
                     </tr>
@@ -957,7 +1028,13 @@ export default function BatchesPage({
       <Modal open={!!modal && modal === 'sessions'} title={modalTitle} onClose={closeModal} variant="modal">
         {modalBatch ? (
           <div className="stack batchModalBody">
-            {!isBatchStarted(modalBatch) ? (
+            {!batchHasRun(modalBatch) && trainerMode ? (
+              <p className="muted">
+                The batch hasn&apos;t started yet, so there are no sessions. An admin sets the class schedule and starts the
+                batch.
+              </p>
+            ) : null}
+            {!batchHasRun(modalBatch) && !trainerMode ? (
               <>
                 <p className="muted">
                   The batch hasn&apos;t yet been started and there are no scheduled sessions.
@@ -994,7 +1071,7 @@ export default function BatchesPage({
                 </div>
               </>
             ) : null}
-            {isBatchStarted(modalBatch) ? (
+            {batchHasRun(modalBatch) ? (
               <div className="tableWrap">
                 <table>
                   <thead>
@@ -1071,7 +1148,7 @@ export default function BatchesPage({
               <strong>Title</strong> {modalBatch.title || modalBatch.name || '—'}
             </p>
             <p>
-              <strong>Status</strong> {isBatchStarted(modalBatch) ? 'Started' : 'Draft'}
+              <strong>Status</strong> {batchStatusLabel(modalBatch)}
             </p>
             <p>
               <strong>Course</strong> {modalBatch.course_name || <span className="muted">None</span>}
@@ -1467,7 +1544,7 @@ export default function BatchesPage({
         <div className="batchModalBody">
           {attendanceLoading ? (
             <p className="muted">Loading attendance…</p>
-          ) : !modalBatch || !isBatchStarted(modalBatch) ? (
+          ) : !modalBatch || !batchHasRun(modalBatch) ? (
             <p className="muted">Start the batch first to generate sessions, then mark attendance per day.</p>
           ) : !(attendanceData?.sessions || []).length ? (
             <p className="muted">No sessions yet. Start the batch from the list if you have not.</p>

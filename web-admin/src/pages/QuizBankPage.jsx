@@ -9,6 +9,7 @@ import {
   parseQuestionInput,
 } from '../utils/quizQuestionFormat';
 import { parseQuizPaste, QUIZ_PASTE_HEADER } from '../utils/parseQuizPaste';
+import TransferOwnerControl from '../components/TransferOwnerControl';
 
 const QUESTION_TYPES = [
   { value: 'mcq_single', label: 'Multiple choice (single)' },
@@ -428,12 +429,15 @@ export default function QuizBankPage({
   lessons,
   showCreatedBy = false,
   libraryCanMutate = () => true,
+  canMapToCourse = true,
   onCreateQuiz,
   onGetQuiz,
   onUpdateQuiz,
   onPublishVersion,
   onAssignQuiz,
   onDeleteQuiz = null,
+  staffUsers = [],
+  onTransferOwner,
 }) {
   const [librarySearch, setLibrarySearch] = useState('');
   const [editorOpen, setEditorOpen] = useState(false);
@@ -789,6 +793,14 @@ export default function QuizBankPage({
                           </button>
                         </>
                       ) : null}
+                      {onTransferOwner ? (
+                        <TransferOwnerControl
+                          itemType="quiz"
+                          itemId={q.id}
+                          staffUsers={staffUsers}
+                          onTransfer={onTransferOwner}
+                        />
+                      ) : null}
                     </div>
                   </td>
                 </tr>
@@ -976,53 +988,59 @@ export default function QuizBankPage({
 
                 <details className="quizBankDetails quizBankDetailsAssignments">
                   <summary>Assignments</summary>
-                  <div className="formGrid quizBankAssignForm">
-                    <fieldset disabled={!canMutateDetail} style={{ border: 'none', margin: 0, padding: 0 }}>
-                      <select
-                        value={assignVersionId}
-                        onChange={(e) => setAssignVersionId(e.target.value)}
-                      >
-                        <option value="">Version</option>
-                        {selectedVersions.map((v) => (
-                          <option key={v.id} value={v.id}>
-                            v{v.version_no} — {v.title || 'Untitled'}
-                          </option>
-                        ))}
-                      </select>
-                      <select
-                        value={assignScopeType}
-                        onChange={(e) => {
-                          setAssignScopeType(e.target.value);
-                          setAssignScopeId('');
-                        }}
-                      >
-                        <option value="course">Course</option>
-                        <option value="lesson">Lesson</option>
-                      </select>
-                      <select
-                        value={assignScopeId}
-                        onChange={(e) => setAssignScopeId(e.target.value)}
-                      >
-                        <option value="">{assignScopeType === 'course' ? 'Course' : 'Lesson'}</option>
-                        {scopeOptions.map((o) => (
-                          <option key={`${assignScopeType}-${o.id}`} value={o.id}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
-                      <label className="checkboxRow">
-                        <input
-                          type="checkbox"
-                          checked={assignRequired}
-                          onChange={(e) => setAssignRequired(e.target.checked)}
-                        />
-                        <span>Required</span>
-                      </label>
-                      <button type="button" disabled={busy || !canMutateDetail} onClick={assign}>
-                        Assign
-                      </button>
-                    </fieldset>
-                  </div>
+                  {canMapToCourse ? (
+                    <div className="formGrid quizBankAssignForm">
+                      <fieldset disabled={!canMutateDetail} style={{ border: 'none', margin: 0, padding: 0 }}>
+                        <select
+                          value={assignVersionId}
+                          onChange={(e) => setAssignVersionId(e.target.value)}
+                        >
+                          <option value="">Version</option>
+                          {selectedVersions.map((v) => (
+                            <option key={v.id} value={v.id}>
+                              v{v.version_no} — {v.title || 'Untitled'}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          value={assignScopeType}
+                          onChange={(e) => {
+                            setAssignScopeType(e.target.value);
+                            setAssignScopeId('');
+                          }}
+                        >
+                          <option value="course">Course</option>
+                          <option value="lesson">Lesson</option>
+                        </select>
+                        <select
+                          value={assignScopeId}
+                          onChange={(e) => setAssignScopeId(e.target.value)}
+                        >
+                          <option value="">{assignScopeType === 'course' ? 'Course' : 'Lesson'}</option>
+                          {scopeOptions.map((o) => (
+                            <option key={`${assignScopeType}-${o.id}`} value={o.id}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                        <label className="checkboxRow">
+                          <input
+                            type="checkbox"
+                            checked={assignRequired}
+                            onChange={(e) => setAssignRequired(e.target.checked)}
+                          />
+                          <span>Required</span>
+                        </label>
+                        <button type="button" disabled={busy || !canMutateDetail} onClick={assign}>
+                          Assign
+                        </button>
+                      </fieldset>
+                    </div>
+                  ) : (
+                    <p className="muted" style={{ marginTop: 8 }}>
+                      Admins assign quizzes to lessons and courses.
+                    </p>
+                  )}
                   {selectedAssignments.length > 0 ? (
                     <div className="tableWrap" style={{ marginTop: 10 }}>
                       <table>

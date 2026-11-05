@@ -4,6 +4,7 @@ const { auth, requireRole } = require('../middleware/auth');
 const upload = require('../upload');
 const { syncCourseLessonSlots } = require('../lib/syncCourseLessonSlots');
 const { learnerHasCourseAccess } = require('../lib/courseAccess');
+const { courseIdsForTrainer, trainerHasCourse } = require('../lib/trainerScope');
 const { myCourseScheduleHint } = require('../lib/dayWiseProgress');
 const { isSpacesConfigured, deleteObjectsUnderPrefix } = require('../services/spaces');
 
@@ -55,8 +56,8 @@ function normalizeApplyInstallmentAmounts(raw, count, netFeeInr) {
 
 router.get('/', auth, (req, res) => {
   const { role } = req.user;
-  if (role === 'Admin' || role === 'Creator') {
-    const courses = db.prepare(
+  if (role === 'Admin' || role === 'Creator' || role === 'Trainer') {
+    let courses = db.prepare(
       `SELECT id, name, description, image_url, sort_order, is_published, created_at,
               highlights, specifications_html, duration_days, lesson_schedule_json, modes_json, languages_json,
               fee_inr, discount_inr, course_status, enrollment_type, progression_type,
@@ -64,6 +65,10 @@ router.get('/', auth, (req, res) => {
               apply_installment_count, apply_installment_amounts_json, apply_installment_gap_days, apply_grace_days, apply_enquiry_enabled
        FROM courses ORDER BY sort_order, id`
     ).all();
+    if (role === 'Trainer') {
+      const visible = courseIdsForTrainer(req.user.id);
+      courses = courses.filter((c) => visible.has(Number(c.id)));
+    }
     return res.json(courses);
   }
   const uid = req.user.id;
@@ -216,7 +221,9 @@ router.get('/:id', auth, (req, res) => {
     FROM courses WHERE id = ?
   `).get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Course not found' });
-  if (req.user.role !== 'Admin') {
+  if (req.user.role === 'Trainer') {
+    if (!trainerHasCourse(req.user.id, c.id)) return res.status(403).json({ error: 'Not a course in your active batches' });
+  } else if (req.user.role !== 'Admin') {
     const access = learnerHasCourseAccess(req.user.id, c.id);
     if (!access) return res.status(403).json({ error: 'Not enrolled in this course' });
   }

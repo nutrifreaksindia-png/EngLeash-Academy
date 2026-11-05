@@ -5,17 +5,20 @@ function isAdmin(user) {
 function canMutateLibraryByCreatedBy(user, row) {
   if (!row) return false;
   if (user.role === 'Admin') return true;
-  if (user.role === 'Trainer') return true;
-  if (user.role === 'Creator') return Number(row.created_by) === Number(user.id);
+  if (user.role === 'Trainer' || user.role === 'Creator') return Number(row.created_by) === Number(user.id);
   return false;
 }
 
-/** Draft study materials: visible to Admin/Trainer or owning Creator; published to all authorized readers. */
+function isAuthorRole(user) {
+  return user?.role === 'Trainer' || user?.role === 'Creator';
+}
+
+/** Draft study materials: visible to Admin or the owning Trainer/Creator; published to all authorized readers. */
 function canViewStudyMaterial(user, row) {
   if (!row) return false;
   if (Number(row.is_draft) !== 1) return true;
-  if (user.role === 'Admin' || user.role === 'Trainer') return true;
-  if (user.role === 'Creator') return Number(row.created_by) === Number(user.id);
+  if (user.role === 'Admin') return true;
+  if (isAuthorRole(user)) return Number(row.created_by) === Number(user.id);
   return false;
 }
 
@@ -23,8 +26,8 @@ function canViewStudyMaterial(user, row) {
 function canViewAssignment(user, row) {
   if (!row) return false;
   if (Number(row.is_draft) !== 1) return true;
-  if (user.role === 'Admin' || user.role === 'Trainer') return true;
-  if (user.role === 'Creator') return Number(row.created_by) === Number(user.id);
+  if (user.role === 'Admin') return true;
+  if (isAuthorRole(user)) return Number(row.created_by) === Number(user.id);
   return false;
 }
 
@@ -32,18 +35,24 @@ function canViewAssignment(user, row) {
 function canViewWorksheet(user, row) {
   if (!row) return false;
   if (Number(row.is_draft) !== 1) return true;
-  if (user.role === 'Admin' || user.role === 'Trainer') return true;
-  if (user.role === 'Creator') return Number(row.created_by) === Number(user.id);
+  if (user.role === 'Admin') return true;
+  if (isAuthorRole(user)) return Number(row.created_by) === Number(user.id);
   return false;
 }
 
-/** Draft quiz bank rows: others' drafts hidden from Creators (Admin/Trainer see all). */
+/** Draft quiz bank rows: others' drafts hidden from Trainers and Creators. */
 function canViewQuizBank(user, bank) {
   if (!bank) return false;
   if (bank.status !== 'draft') return true;
-  if (user.role === 'Admin' || user.role === 'Trainer') return true;
-  if (user.role === 'Creator') return Number(bank.created_by) === Number(user.id);
+  if (user.role === 'Admin') return true;
+  if (isAuthorRole(user)) return Number(bank.created_by) === Number(user.id);
   return false;
+}
+
+/** List filter matching the can-view rules above, for rows with `is_draft` (or quiz `status`). */
+function hideOthersDrafts(user, rows, isDraft = (r) => Number(r.is_draft) === 1) {
+  if (!Array.isArray(rows) || !isAuthorRole(user)) return rows;
+  return rows.filter((r) => !isDraft(r) || Number(r.created_by) === Number(user.id));
 }
 
 /**
@@ -89,6 +98,7 @@ module.exports = {
   canViewAssignment,
   canViewWorksheet,
   canViewQuizBank,
+  hideOthersDrafts,
   stripCreatorFields,
   stripRows,
   mayViewWorksheetAnswerKey,

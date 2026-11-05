@@ -12,6 +12,19 @@ const {
 const { syncCourseLessonSlots } = require('../lib/syncCourseLessonSlots');
 const { learnerHasCourseAccess } = require('../lib/courseAccess');
 const { maxUnlockedLessonDay, lessonDayNumberForCourse } = require('../lib/dayWiseProgress');
+const {
+  isTrainer,
+  lessonIdsForTrainer,
+  legacyLessonIdsForTrainer,
+  trainerHasCourse,
+} = require('../lib/trainerScope');
+const {
+  listLessonAccess,
+  setLessonOverride,
+  restoreLessonOverride,
+  isLessonDenied,
+  userMayAccessLesson,
+} = require('../lib/lessonAccess');
 
 const router = express.Router();
 const baseUrl = process.env.STORAGE_URL || process.env.API_URL || '';
@@ -245,6 +258,7 @@ function buildOrderedContentForLearner(reqUser, lessonId) {
 
 function canAccessCourse(database, userId, role, courseId) {
   if (role === 'Admin') return true;
+  if (role === 'Trainer') return trainerHasCourse(userId, courseId);
   return learnerHasCourseAccess(userId, courseId);
 }
 
@@ -252,7 +266,9 @@ function canAccessCourse(database, userId, role, courseId) {
 router.get('/course/:courseId/schedule', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
   const courseId = Number(req.params.courseId);
   const course = db.prepare('SELECT id FROM courses WHERE id = ?').get(courseId);
-  if (!course) return res.status(404).json({ error: 'Course not found' });
+  if (!course || (isTrainer(req.user) && !trainerHasCourse(req.user.id, courseId))) {
+    return res.status(404).json({ error: 'Course not found' });
+  }
   syncCourseLessonSlots(courseId);
   const rows = db.prepare(`
     SELECT cl.id AS mapId, cl.day_number AS dayNumber, cl.sequence_in_day AS sequenceInDay,
@@ -290,18 +306,33 @@ router.get('/course/:courseId', auth, (req, res) => {
   if (maxDay != null && Number.isFinite(maxDay)) {
     rows = mapped.filter((m) => Number(m.sort_order) <= maxDay);
   }
+  if (req.user.role !== 'Admin') {
+    rows = rows.filter((m) => !isLessonDenied(req.user.id, m.lesson_id));
+  }
   const lessons = rows.length
-    ? rows.map((m) => ({
-        id: m.lesson_id,
-        map_id: m.id,
-        course_id: m.course_id,
-        title: m.title,
-        sort_order: m.sort_order,
-        video_url: m.video_url,
-      }))
+    ? rows.map((m) => {
+        const ordered = buildOrderedContentForLearner(req.user, m.lesson_id) || [];
+        const contentSummary = ordered.map((row) => ({
+          type: row.type,
+          id: row.id,
+          title: row.title || '',
+          orderIndex: row.orderIndex,
+          quizAssignmentId: row.quizAssignmentId ?? null,
+        }));
+        return {
+          id: m.lesson_id,
+          map_id: m.id,
+          course_id: m.course_id,
+          title: m.title,
+          sort_order: m.sort_order,
+          video_url: m.video_url,
+          contentSummary,
+        };
+      })
     : db
         .prepare('SELECT id, course_id, title, sort_order, video_url FROM lessons WHERE course_id = ? ORDER BY sort_order, id')
-        .all(cid);
+        .all(cid)
+        .map((m) => ({ ...m, contentSummary: [] }));
   res.json(lessons);
 });
 
@@ -345,8 +376,14 @@ router.get('/:id', auth, (req, res) => {
     }
   }
   if (!lesson) return res.status(404).json({ error: 'Lesson not found' });
-  if (!canAccessCourse(db, req.user.id, req.user.role, lesson.course_id)) {
-    return res.status(403).json({ error: 'Not enrolled in this course' });
+  if (req.user.role !== 'Admin') {
+    if (fromLibrary) {
+      if (!userMayAccessLesson(req.user, lesson.id, lesson.course_id)) {
+        return res.status(403).json({ error: 'Access to this lesson was removed' });
+      }
+    } else if (!canAccessCourse(db, req.user.id, req.user.role, lesson.course_id)) {
+      return res.status(403).json({ error: 'Not enrolled in this course' });
+    }
   }
   const staffBypass = ['Admin', 'Trainer', 'Creator'].includes(req.user.role);
   if (!staffBypass && fromLibrary) {
@@ -444,28 +481,42 @@ router.post('/', auth, requireRole('Admin'), (req, res) => {
 });
 
 router.get('/library', auth, requireRole('Admin', 'Trainer'), (req, res) => {
-  const rows = db.prepare(`
+  let rows = db.prepare(`
     SELECT id, title, description, video_url, study_material_html, worksheet_html, worksheet_answer_key_html, assignment_title, created_at
     FROM lesson_library
     ORDER BY id DESC
   `).all();
+  if (isTrainer(req.user)) {
+    const visible = lessonIdsForTrainer(req.user.id);
+    rows = rows.filter((r) => visible.has(Number(r.id)));
+  }
   res.json(rows);
 });
 
 router.get('/admin/all', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
-  const library = db.prepare(`
+  let libraryRows = db.prepare(`
     SELECT ll.*,
            (SELECT COUNT(*) FROM lesson_library_items li WHERE li.lesson_id = ll.id) AS item_count
     FROM lesson_library ll
     ORDER BY ll.id DESC
-  `).all().map((r) => ({ ...r, source: 'lesson_library' }));
+  `).all();
 
-  const legacy = db.prepare(`
+  let legacyRows = db.prepare(`
     SELECT l.id, l.title, l.video_url, l.created_at, c.name AS course_name, l.sort_order
     FROM lessons l
     JOIN courses c ON c.id = l.course_id
     ORDER BY l.id DESC
-  `).all().map((r) => ({
+  `).all();
+
+  if (isTrainer(req.user)) {
+    const visibleLessons = lessonIdsForTrainer(req.user.id);
+    const visibleLegacy = legacyLessonIdsForTrainer(req.user.id);
+    libraryRows = libraryRows.filter((r) => visibleLessons.has(Number(r.id)));
+    legacyRows = legacyRows.filter((r) => visibleLegacy.has(Number(r.id)));
+  }
+
+  const library = libraryRows.map((r) => ({ ...r, source: 'lesson_library' }));
+  const legacy = legacyRows.map((r) => ({
     id: `legacy-${r.id}`,
     title: r.title,
     description: `Course: ${r.course_name} • Sort: ${r.sort_order}`,
@@ -481,7 +532,7 @@ router.get('/admin/all', auth, requireRole('Admin', 'Trainer', 'Creator'), (req,
   res.json([...library, ...legacy]);
 });
 
-router.post('/library', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.post('/library', auth, requireRole('Admin'), (req, res) => {
   const {
     title,
     description,
@@ -510,10 +561,48 @@ router.post('/library', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   res.status(201).json(row);
 });
 
+router.get('/library/:id/access', auth, requireRole('Admin'), (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const data = listLessonAccess(id);
+    if (!data) return res.status(404).json({ error: 'Lesson not found' });
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Failed to load lesson access' });
+  }
+});
+
+router.post('/library/:id/access', auth, requireRole('Admin'), (req, res) => {
+  const id = Number(req.params.id);
+  const userId = Number(req.body?.userId ?? req.body?.user_id);
+  const effect = String(req.body?.effect || 'deny').toLowerCase();
+  try {
+    const row = setLessonOverride(id, userId, effect, req.user.id);
+    const data = listLessonAccess(id);
+    res.json({ override: row, ...data });
+  } catch (e) {
+    res.status(e.statusCode || 400).json({ error: e.message || 'Failed to update lesson access' });
+  }
+});
+
+router.delete('/library/:id/access/:overrideId', auth, requireRole('Admin'), (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    restoreLessonOverride(req.params.overrideId, id);
+    const data = listLessonAccess(id);
+    if (!data) return res.status(404).json({ error: 'Lesson not found' });
+    res.json(data);
+  } catch (e) {
+    res.status(e.statusCode || 400).json({ error: e.message || 'Failed to restore lesson access' });
+  }
+});
+
 router.get('/library/:id/composition', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
   const id = Number(req.params.id);
   const row = db.prepare('SELECT id FROM lesson_library WHERE id = ?').get(id);
-  if (!row) return res.status(404).json({ error: 'Lesson not found' });
+  if (!row || (isTrainer(req.user) && !lessonIdsForTrainer(req.user.id).has(id))) {
+    return res.status(404).json({ error: 'Lesson not found' });
+  }
   try {
     const items = resolveCompositionLabels(id);
     res.json({ lessonId: id, items });
@@ -522,7 +611,7 @@ router.get('/library/:id/composition', auth, requireRole('Admin', 'Trainer', 'Cr
   }
 });
 
-router.put('/library/:id/composition', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.put('/library/:id/composition', auth, requireRole('Admin'), (req, res) => {
   const id = Number(req.params.id);
   const existing = db.prepare('SELECT id FROM lesson_library WHERE id = ?').get(id);
   if (!existing) return res.status(404).json({ error: 'Lesson not found' });
@@ -536,7 +625,7 @@ router.put('/library/:id/composition', auth, requireRole('Admin', 'Trainer'), (r
   }
 });
 
-router.put('/library/:id', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+router.put('/library/:id', auth, requireRole('Admin'), (req, res) => {
   const id = Number(req.params.id);
   const {
     title,
@@ -573,7 +662,7 @@ router.put('/library/:id', auth, requireRole('Admin', 'Trainer'), (req, res) => 
   res.json(row);
 });
 
-router.post('/library/:id/video', auth, requireRole('Admin', 'Trainer'), uploadMemory.single('file'), async (req, res) => {
+router.post('/library/:id/video', auth, requireRole('Admin'), uploadMemory.single('file'), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid lesson template id' });
@@ -601,7 +690,7 @@ router.post('/library/:id/video', auth, requireRole('Admin', 'Trainer'), uploadM
   }
 });
 
-router.delete('/library/:id', auth, requireRole('Admin', 'Trainer'), async (req, res) => {
+router.delete('/library/:id', auth, requireRole('Admin'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
 
@@ -634,7 +723,7 @@ router.delete('/library/:id', auth, requireRole('Admin', 'Trainer'), async (req,
 });
 
 /** Assign or clear the lesson template for a fixed day slot (day count comes from course duration). */
-router.put('/schedule/:mapId', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+router.put('/schedule/:mapId', auth, requireRole('Admin', 'Creator'), (req, res) => {
   const mapId = Number(req.params.mapId);
   const row = db.prepare('SELECT * FROM course_lessons WHERE id = ?').get(mapId);
   if (!row) return res.status(404).json({ error: 'Schedule entry not found' });

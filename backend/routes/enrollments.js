@@ -131,6 +131,7 @@ router.get('/courses/:courseId/open-batches', auth, requireRole('Student', 'Lab'
       ) AS sessions_passed
     FROM batches b
     WHERE COALESCE(b.enrollment_open_status, 'closed') = 'open'
+      AND COALESCE(b.batch_status, 'draft') <> 'completed'
       AND (
         b.course_id = ?
         OR EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = b.id AND bc.course_id = ?)
@@ -168,7 +169,7 @@ router.post('/apply-batch', auth, requireRole('Student', 'Lab'), (req, res) => {
   if (!batchMatchesCourse) {
     return res.status(404).json({ error: 'Batch not found for course' });
   }
-  if ((batch.enrollment_open_status || 'closed') !== 'open') {
+  if ((batch.enrollment_open_status || 'closed') !== 'open' || batch.batch_status === 'completed') {
     return res.status(409).json({ error: 'Batch is currently closed for applications' });
   }
   if (learnerHasCourseAccess(req.user.id, courseId)) {

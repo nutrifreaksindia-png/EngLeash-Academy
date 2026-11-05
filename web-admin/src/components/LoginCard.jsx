@@ -28,12 +28,15 @@ export default function LoginCard({
   onLogin,
   busy,
   error,
+  sessionConflict = null,
+  onConfirmReplace,
+  onCancelReplace,
 }) {
   const [showPassword, setShowPassword] = useState(false);
 
   function handleSubmit(e) {
     e.preventDefault();
-    if (!busy) onLogin();
+    if (!busy && !sessionConflict) onLogin();
   }
 
   const brandPanelStyle = {
@@ -57,7 +60,22 @@ export default function LoginCard({
           </div>
 
           <form className="loginForm" onSubmit={handleSubmit} noValidate>
-            {error ? (
+            {sessionConflict ? (
+              <div className="loginAlert loginAlertWarn" role="status">
+                <p>
+                  This account is already signed in on <strong>{sessionConflict.deviceName || 'another device'}</strong>.
+                </p>
+                <p>Sign in here to continue. That other session will be signed out.</p>
+                <div className="loginConflictActions">
+                  <button type="button" className="loginSecondary" onClick={onCancelReplace} disabled={busy}>
+                    Cancel
+                  </button>
+                  <button type="button" className="loginSubmit loginSubmitInline" onClick={onConfirmReplace} disabled={busy}>
+                    {busy ? 'Signing in…' : 'Sign in here'}
+                  </button>
+                </div>
+              </div>
+            ) : error ? (
               <div className="loginAlert loginAlertError" role="alert">
                 {error}
               </div>
@@ -103,9 +121,11 @@ export default function LoginCard({
               </button>
             </div>
 
-            <button type="submit" className="loginSubmit" disabled={busy}>
-              {busy ? 'Signing in…' : 'Sign in'}
-            </button>
+            {sessionConflict ? null : (
+              <button type="submit" className="loginSubmit" disabled={busy}>
+                {busy ? 'Signing in…' : 'Sign in'}
+              </button>
+            )}
           </form>
         </div>
       </div>

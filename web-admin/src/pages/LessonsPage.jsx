@@ -28,6 +28,11 @@ export default function LessonsPage({
   onDeleteLessonLibrary,
   saveLessonComposition,
   loadLessonComposition,
+  canManageAccess = false,
+  loadLessonAccess,
+  denyLessonAccess,
+  restoreLessonAccess,
+  readOnly = false,
 }) {
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -53,6 +58,13 @@ export default function LessonsPage({
   /** @type {{ type: string, id: number, title: string }[]} */
   const [viewItems, setViewItems] = useState([]);
   const [viewLoading, setViewLoading] = useState(false);
+
+  const [accessOpen, setAccessOpen] = useState(false);
+  const [accessLesson, setAccessLesson] = useState(null);
+  const [accessData, setAccessData] = useState(null);
+  const [accessLoading, setAccessLoading] = useState(false);
+  const [accessError, setAccessError] = useState('');
+  const [accessBusyId, setAccessBusyId] = useState(null);
 
   const libraryLessons = useMemo(
     () => (library || []).filter((l) => l.source !== 'legacy_lessons'),
@@ -158,6 +170,68 @@ export default function LessonsPage({
     setViewOpen(false);
     setViewLesson(null);
     setViewItems([]);
+  }
+
+  async function refreshAccess(lessonId) {
+    if (!loadLessonAccess) return;
+    const data = await loadLessonAccess(lessonId);
+    setAccessData(data);
+  }
+
+  async function startAccess(row) {
+    if (!canManageAccess || !loadLessonAccess || row.source === 'legacy_lessons') return;
+    setAccessLesson({ id: row.id, title: row.title || 'Lesson' });
+    setAccessData(null);
+    setAccessError('');
+    setAccessOpen(true);
+    setAccessLoading(true);
+    try {
+      await refreshAccess(row.id);
+    } catch (e) {
+      setAccessError(e.message || 'Failed to load access');
+    } finally {
+      setAccessLoading(false);
+    }
+  }
+
+  function closeAccess() {
+    setAccessOpen(false);
+    setAccessLesson(null);
+    setAccessData(null);
+    setAccessError('');
+    setAccessBusyId(null);
+  }
+
+  async function handleRemoveAccess(person) {
+    if (!denyLessonAccess || !accessLesson) return;
+    const label = person.name || person.email || `user #${person.userId}`;
+    if (!window.confirm(`Remove ${label}'s access to this lesson? They keep the rest of the course. Library ownership is unchanged.`)) {
+      return;
+    }
+    setAccessBusyId(person.userId);
+    setAccessError('');
+    try {
+      const data = await denyLessonAccess(accessLesson.id, person.userId);
+      setAccessData(data);
+    } catch (e) {
+      setAccessError(e.message || 'Failed to remove access');
+    } finally {
+      setAccessBusyId(null);
+    }
+  }
+
+  async function handleRestoreAccess(person) {
+    if (!restoreLessonAccess || !accessLesson || person.overrideId == null) return;
+    setAccessBusyId(person.userId);
+    setAccessError('');
+    try {
+      const data = await restoreLessonAccess(accessLesson.id, person.overrideId);
+      setAccessData(data);
+    } catch (e) {
+      setAccessError(e.message || 'Failed to restore access');
+    } finally {
+      setAccessBusyId(null);
+    }
   }
 
   async function startEdit(row) {
@@ -271,7 +345,11 @@ export default function LessonsPage({
     <div className="stack">
       <SectionCard
         title="Lessons"
-        subtitle="Compose lessons from library items — order matches what learners see"
+        subtitle={
+          readOnly
+            ? 'Lessons in the courses of your active batches, in the order learners see them'
+            : 'Compose lessons from library items — order matches what learners see'
+        }
         actions={
           <div className="lessonPageToolbar">
             <input
@@ -281,9 +359,11 @@ export default function LessonsPage({
               className="lessonPageSearch"
               aria-label="Search lessons"
             />
-            <button type="button" className="uploadPrimaryBtn" onClick={startNew}>
-              + Create lesson
-            </button>
+            {!readOnly ? (
+              <button type="button" className="uploadPrimaryBtn" onClick={startNew}>
+                + Create lesson
+              </button>
+            ) : null}
           </div>
         }
       >
@@ -310,19 +390,34 @@ export default function LessonsPage({
                       <button type="button" className="secondaryBtn" onClick={() => startView(l)}>
                         View
                       </button>
-                      <button type="button" className="secondaryBtn" onClick={() => startEdit(l)}>
-                        Edit
-                      </button>
-                      <button type="button" className="dangerBtn" onClick={() => handleDeleteLesson(l.id)}>
-                        Delete
-                      </button>
+                      {canManageAccess ? (
+                        <button type="button" className="secondaryBtn" onClick={() => startAccess(l)}>
+                          Access
+                        </button>
+                      ) : null}
+                      {!readOnly ? (
+                        <>
+                          <button type="button" className="secondaryBtn" onClick={() => startEdit(l)}>
+                            Edit
+                          </button>
+                          <button type="button" className="dangerBtn" onClick={() => handleDeleteLesson(l.id)}>
+                            Delete
+                          </button>
+                        </>
+                      ) : null}
                     </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-          {paged.length === 0 ? <p className="muted lessonLibraryEmpty">No lessons yet. Create one to pull in library content.</p> : null}
+          {paged.length === 0 ? (
+            <p className="muted lessonLibraryEmpty">
+              {readOnly
+                ? 'No lessons in your active batches yet.'
+                : 'No lessons yet. Create one to pull in library content.'}
+            </p>
+          ) : null}
         </div>
         <div className="row lessonLibraryPager">
           <button
@@ -374,6 +469,103 @@ export default function LessonsPage({
           </div>
         </SectionCard>
       ) : null}
+
+      <Modal
+        open={accessOpen}
+        title={accessLesson ? `Access · ${accessLesson.title}` : 'Lesson access'}
+        onClose={closeAccess}
+        variant="drawer"
+      >
+        {accessLoading ? (
+          <p className="muted">Loading who can access this lesson…</p>
+        ) : (
+          <div className="lessonAccessBody">
+            <p className="fieldHint">
+              Access is at lesson level. Students inherit it from course enrollment or batch
+              membership; trainers inherit it from the batches they teach. Removing access here
+              does not change library-item ownership.
+            </p>
+            {accessError ? <p className="error">{accessError}</p> : null}
+            {accessData?.courses?.length ? (
+              <p className="muted lessonAccessMapped">
+                Mapped in:{' '}
+                {accessData.courses.map((c) => c.name).filter(Boolean).join(', ')}
+              </p>
+            ) : accessData ? (
+              <p className="muted lessonAccessMapped">
+                This lesson is not mapped to a course yet, so nobody inherits access.
+              </p>
+            ) : null}
+            {accessData && !(accessData.people || []).length ? (
+              <p className="muted">No trainers or students currently have access to this lesson.</p>
+            ) : accessData ? (
+              <div className="tableWrap">
+                <table className="lessonAccessTable">
+                  <thead>
+                    <tr>
+                      <th>Person</th>
+                      <th>Role</th>
+                      <th>How they got access</th>
+                      <th>Status</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(accessData.people || []).map((p) => {
+                      const busy = accessBusyId === p.userId;
+                      const removed = p.status === 'removed';
+                      return (
+                        <tr key={p.userId} className={removed ? 'lessonAccessRemovedRow' : undefined}>
+                          <td>
+                            <div className="lessonAccessPerson">
+                              <strong>{p.name || '—'}</strong>
+                              {p.email ? <span className="muted">{p.email}</span> : null}
+                            </div>
+                          </td>
+                          <td>{p.role || '—'}</td>
+                          <td>
+                            <ul className="lessonAccessReasons">
+                              {(p.reasons || []).map((r, idx) => (
+                                <li key={`${p.userId}-${idx}`}>{r.label}</li>
+                              ))}
+                            </ul>
+                          </td>
+                          <td>
+                            <span className={removed ? 'lessonAccessBadge removed' : 'lessonAccessBadge active'}>
+                              {removed ? 'Removed' : 'Has access'}
+                            </span>
+                          </td>
+                          <td>
+                            {removed ? (
+                              <button
+                                type="button"
+                                className="secondaryBtn"
+                                disabled={busy || p.overrideId == null}
+                                onClick={() => handleRestoreAccess(p)}
+                              >
+                                {busy ? 'Restoring…' : 'Restore'}
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className="dangerBtn"
+                                disabled={busy}
+                                onClick={() => handleRemoveAccess(p)}
+                              >
+                                {busy ? 'Removing…' : 'Remove access'}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </Modal>
 
       <Modal open={viewOpen} title="View lesson" onClose={closeView} variant="modal">
         {viewLoading ? (

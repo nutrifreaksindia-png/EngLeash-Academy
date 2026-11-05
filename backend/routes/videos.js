@@ -5,6 +5,7 @@ const uploadMemory = require('../uploadMemory');
 const { auth, requireRole } = require('../middleware/auth');
 const { isSpacesConfigured, uploadToSpaces, deleteObjectsUnderPrefix } = require('../services/spaces');
 const { canMutateLibraryByCreatedBy, stripCreatorFields, stripRows } = require('../lib/libraryScope');
+const { filterLibraryRowsForTrainer, trainerCanViewLibraryItem } = require('../lib/trainerScope');
 
 const router = express.Router();
 
@@ -41,7 +42,7 @@ router.get('/', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => 
     GROUP BY v.id
     ORDER BY v.updated_at DESC, v.id DESC
   `).all();
-  res.json(stripRows(req.user, rows));
+  res.json(stripRows(req.user, filterLibraryRowsForTrainer(req.user, 'video', rows)));
 });
 
 router.get('/categories', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
@@ -163,7 +164,7 @@ router.delete('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), async (r
   res.status(204).end();
 });
 
-router.post('/:id/assignments', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+router.post('/:id/assignments', auth, requireRole('Admin', 'Creator'), (req, res) => {
   const videoId = Number(req.params.id);
   const video = db.prepare('SELECT * FROM video_library WHERE id = ?').get(videoId);
   if (!video) return res.status(404).json({ error: 'Video not found' });
@@ -192,12 +193,14 @@ router.post('/:id/assignments', auth, requireRole('Admin', 'Trainer', 'Creator')
 router.get('/:id/assignments', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
   const videoId = Number(req.params.id);
   const video = db.prepare('SELECT * FROM video_library WHERE id = ?').get(videoId);
-  if (!video) return res.status(404).json({ error: 'Video not found' });
+  if (!video || !trainerCanViewLibraryItem(req.user, 'video', videoId)) {
+    return res.status(404).json({ error: 'Video not found' });
+  }
   const rows = db.prepare('SELECT * FROM video_assignments WHERE video_id = ? ORDER BY created_at DESC').all(videoId);
   res.json(rows);
 });
 
-router.delete('/assignments/:assignmentId', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
+router.delete('/assignments/:assignmentId', auth, requireRole('Admin', 'Creator'), (req, res) => {
   const assignmentId = Number(req.params.assignmentId);
   const row = db.prepare(`
     SELECT v.created_by

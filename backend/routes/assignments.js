@@ -4,9 +4,11 @@ const { auth, requireRole } = require('../middleware/auth');
 const {
   canMutateLibraryByCreatedBy,
   canViewAssignment,
+  hideOthersDrafts,
   stripCreatorFields,
   stripRows,
 } = require('../lib/libraryScope');
+const { filterLibraryRowsForTrainer, trainerCanViewLibraryItem } = require('../lib/trainerScope');
 
 const router = express.Router();
 
@@ -30,9 +32,7 @@ router.get('/', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => 
     GROUP BY m.id
     ORDER BY m.updated_at DESC, m.id DESC
   `).all();
-  if (req.user.role === 'Creator') {
-    rows = rows.filter((m) => Number(m.is_draft) !== 1 || Number(m.created_by) === Number(req.user.id));
-  }
+  rows = filterLibraryRowsForTrainer(req.user, 'assignment', hideOthersDrafts(req.user, rows));
   res.json(stripRows(req.user, rows));
 });
 
@@ -74,7 +74,7 @@ router.get('/:id', auth, (req, res) => {
     .prepare('SELECT m.*, cu.name AS creator_name FROM assignment_library m LEFT JOIN users cu ON cu.id = m.created_by WHERE m.id = ?')
     .get(id);
   if (!row) return res.status(404).json({ error: 'Assignment not found' });
-  if (!canViewAssignment(req.user, row)) {
+  if (!canViewAssignment(req.user, row) || !trainerCanViewLibraryItem(req.user, 'assignment', id)) {
     return res.status(404).json({ error: 'Assignment not found' });
   }
   res.json(stripCreatorFields(req.user, row));

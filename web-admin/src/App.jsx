@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import LiveClassroomPage from './pages/LiveClassroomPage';
 import LoginCard from './components/LoginCard';
-import StatusBanner from './components/StatusBanner';
 import AdminShell from './components/AdminShell';
 import DashboardPage from './pages/DashboardPage';
 import UsersPage from './pages/UsersPage';
@@ -20,6 +19,10 @@ import AssignmentsPage from './pages/AssignmentsPage';
 import BillingPage from './pages/BillingPage';
 import PaymentsPage from './pages/PaymentsPage';
 import SubscriptionsPage from './pages/SubscriptionsPage';
+import TrainerTodayPage from './pages/TrainerTodayPage';
+import TrainerCalendarPage from './pages/TrainerCalendarPage';
+import TrainerBatchPage from './pages/TrainerBatchPage';
+import ReviewInboxPage from './pages/ReviewInboxPage';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
 
@@ -45,6 +48,49 @@ const CREATOR_ALLOWED_PAGES = new Set([
   'lessons',
 ]);
 
+const TRAINER_ALLOWED_PAGES = new Set([
+  'today',
+  'batches',
+  'calendar',
+  'review',
+  'videos',
+  'study-materials',
+  'worksheets',
+  'quizzes',
+  'assignments',
+  'courses',
+  'lessons',
+]);
+
+function allowedPagesForRole(role) {
+  if (role === 'Creator') return CREATOR_ALLOWED_PAGES;
+  if (role === 'Trainer') return TRAINER_ALLOWED_PAGES;
+  return null;
+}
+
+function landingPageForRole(role) {
+  if (role === 'Creator') return 'study-materials';
+  if (role === 'Trainer') return 'today';
+  return 'dashboard';
+}
+
+const LIBRARY_DATA_KEYS = [
+  'courses',
+  'library',
+  'quizBank',
+  'videos',
+  'videoCategories',
+  'studyMaterials',
+  'worksheets',
+  'assignments',
+];
+
+/** Which App data sets each role loads; roles not listed load everything. */
+const DATA_KEYS_BY_ROLE = {
+  Creator: LIBRARY_DATA_KEYS,
+  Trainer: [...LIBRARY_DATA_KEYS, 'batches', 'holidays'],
+};
+
 function readableHttpError(raw, fallbackStatus) {
   if (typeof raw === 'string' && raw.trim()) return raw.trim();
   if (raw != null && typeof raw !== 'object' && String(raw).trim()) return String(raw).trim();
@@ -54,6 +100,41 @@ function readableHttpError(raw, fallbackStatus) {
   }
   if (fallbackStatus != null) return `Request failed (HTTP ${fallbackStatus})`;
   return 'Request failed';
+}
+
+function isSessionReplacedError(err) {
+  if (!err) return false;
+  if (err.code === 'SESSION_REPLACED') return true;
+  return /session replaced by another device/i.test(String(err.message || ''));
+}
+
+function webAdminDeviceName() {
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+  let browser = 'Browser';
+  if (/Edg\//.test(ua)) browser = 'Edge';
+  else if (/Chrome\//.test(ua)) browser = 'Chrome';
+  else if (/Safari\//.test(ua) && !/Chrome/.test(ua)) browser = 'Safari';
+  else if (/Firefox\//.test(ua)) browser = 'Firefox';
+  return `Web admin (${browser})`;
+}
+
+function friendlyDeviceName(name) {
+  const n = String(name || '').trim();
+  if (!n || /^unknown device$/i.test(n)) return 'another device';
+  return n;
+}
+
+let sessionReplacedListener = null;
+
+function notifySessionReplaced() {
+  sessionReplacedListener?.();
+}
+
+function makeApiError(message, { status, code } = {}) {
+  const err = new Error(message);
+  err.status = status ?? null;
+  err.code = code || null;
+  return err;
 }
 
 async function apiFetch(path, token, options = {}) {
@@ -68,7 +149,9 @@ async function apiFetch(path, token, options = {}) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const fromBody = readableHttpError(data?.error ?? data?.message, res.status);
-    throw new Error(fromBody);
+    const err = makeApiError(fromBody, { status: res.status, code: data?.code });
+    if (data?.code === 'SESSION_REPLACED') notifySessionReplaced();
+    throw err;
   }
   return data;
 }
@@ -113,7 +196,11 @@ async function uploadCourseCover(courseId, token, coverBlob) {
     body,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || 'Cover upload failed');
+  if (!res.ok) {
+    const err = makeApiError(data.error || 'Cover upload failed', { status: res.status, code: data?.code });
+    if (data?.code === 'SESSION_REPLACED') notifySessionReplaced();
+    throw err;
+  }
 }
 
 async function uploadUserProfilePhoto(userId, token, photoBlob) {
@@ -128,7 +215,11 @@ async function uploadUserProfilePhoto(userId, token, photoBlob) {
     body,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || 'Profile photo upload failed');
+  if (!res.ok) {
+    const err = makeApiError(data.error || 'Profile photo upload failed', { status: res.status, code: data?.code });
+    if (data?.code === 'SESSION_REPLACED') notifySessionReplaced();
+    throw err;
+  }
   return data.photoUrl || null;
 }
 
@@ -160,7 +251,12 @@ async function uploadVideoLibraryAsset(token, payload, onProgress) {
         }
       })();
       if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
-      reject(new Error(data.error || xhr.statusText || `Video upload failed (HTTP ${xhr.status})`));
+      const err = makeApiError(data.error || xhr.statusText || `Video upload failed (HTTP ${xhr.status})`, {
+        status: xhr.status,
+        code: data?.code,
+      });
+      if (data?.code === 'SESSION_REPLACED') notifySessionReplaced();
+      reject(err);
     };
     xhr.send(body);
   });
@@ -198,17 +294,109 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [health, setHealth] = useState(null);
   const [authBootstrapping, setAuthBootstrapping] = useState(true);
+  const [sessionConflict, setSessionConflict] = useState(null);
+  const sessionReplacedLock = React.useRef(false);
+  const endReplacedSessionRef = React.useRef(() => {});
 
   const authReady = useMemo(() => Boolean(token), [token]);
 
   function pushToast(text, type = 'info') {
     let label = text == null ? '' : String(text).trim();
+    if (isSessionReplacedError({ message: label })) {
+      endReplacedSession();
+      return;
+    }
     if (!label && type === 'error') label = 'Something went wrong. Check your connection or try again.';
     const id = `${Date.now()}-${Math.random()}`;
-    setToasts((prev) => [...prev, { id, text: label, type }]);
+    setToasts((prev) => {
+      if (prev.some((t) => t.text === label && t.type === type)) return prev;
+      return [...prev, { id, text: label, type }];
+    });
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 2600);
+  }
+
+  function resetClientSession({ loginError } = {}) {
+    persistWebAdminToken('');
+    setToken('');
+    navigate('/');
+    setCurrentPage('dashboard');
+    setUsers([]);
+    setPendingUsers([]);
+    setApplyLeads([]);
+    setCourses([]);
+    setLibrary([]);
+    setBatches([]);
+    setHolidays([]);
+    setQuizBank([]);
+    setVideos([]);
+    setVideoCategories([]);
+    setStudyMaterials([]);
+    setWorksheets([]);
+    setAssignments([]);
+    setBatchSessions([]);
+    setCancelAuditRows([]);
+    setBatchMembers([]);
+    setBatchTrainers([]);
+    setCurrentUser(null);
+    setHealth(null);
+    setToasts([]);
+    setLoadErrors([]);
+    if (loginError) {
+      setError(loginError);
+      setMessage('');
+    } else {
+      setError('');
+      setMessage('Logged out');
+    }
+  }
+
+  function endReplacedSession() {
+    if (sessionReplacedLock.current) return;
+    sessionReplacedLock.current = true;
+    resetClientSession({
+      loginError: 'This account signed in on another device. Sign in again to continue.',
+    });
+  }
+  endReplacedSessionRef.current = endReplacedSession;
+
+  React.useEffect(() => {
+    sessionReplacedListener = () => endReplacedSessionRef.current();
+    return () => {
+      sessionReplacedListener = null;
+    };
+  }, []);
+
+  async function finishAuthenticatedSession(authData, toastText) {
+    if (!authData?.token) {
+      throw new Error('Login did not return a token');
+    }
+    sessionReplacedLock.current = false;
+    setSessionConflict(null);
+    setToken(authData.token);
+    persistWebAdminToken(authData.token);
+    const me = await apiFetch('/users/me', authData.token);
+    setCurrentUser(me);
+    if (!WEB_ADMIN_ROLES.includes(me?.role)) {
+      persistWebAdminToken('');
+      setToken('');
+      throw new Error(`Web admin access is not available for this account. Logged in as ${me?.role || 'Unknown'}`);
+    }
+    setCurrentPage(landingPageForRole(me?.role));
+    const hd = me?.role === 'Admin' ? await apiFetch('/health/details', authData.token).catch(() => null) : null;
+    setHealth(hd);
+    setMessage('');
+    pushToast(toastText, 'success');
+    setTimeout(() => {
+      void loadAllWithToken(authData.token).then(() => {
+        const pend = sessionStorage.getItem('postLoginLive');
+        if (pend?.startsWith('/live/')) {
+          sessionStorage.removeItem('postLoginLive');
+          navigate(pend, { replace: true });
+        }
+      });
+    }, 0);
   }
 
   async function doLogin() {
@@ -217,62 +405,29 @@ export default function App() {
     try {
       const data = await apiFetch('/auth/login', null, {
         method: 'POST',
-        body: JSON.stringify({ email, password, client: 'mobile' }),
+        body: JSON.stringify({ email, password, client: 'mobile', deviceName: webAdminDeviceName() }),
       });
       if (data?.alreadyLoggedIn) {
-        const replaced = await apiFetch('/auth/replace-session', null, {
-          method: 'POST',
-          body: JSON.stringify({ email, password, client: 'mobile' }),
-        });
-        setToken(replaced.token);
-        persistWebAdminToken(replaced.token);
-        const me = await apiFetch('/users/me', replaced.token);
-        setCurrentUser(me);
-        if (!WEB_ADMIN_ROLES.includes(me?.role)) {
-          setToken('');
-          persistWebAdminToken('');
-          throw new Error(`Web admin access is not available for this account. Logged in as ${me?.role || 'Unknown'}`);
-        }
-        if (me?.role === 'Creator') setCurrentPage('study-materials');
-        const hd = me?.role === 'Admin' ? await apiFetch('/health/details', replaced.token).catch(() => null) : null;
-        setHealth(hd);
-        setMessage('Logged in (previous session replaced)');
-        setTimeout(() => {
-          void loadAllWithToken(replaced.token).then(() => {
-            const pend = sessionStorage.getItem('postLoginLive');
-            if (pend?.startsWith('/live/')) {
-              sessionStorage.removeItem('postLoginLive');
-              navigate(pend, { replace: true });
-            }
-          });
-        }, 0);
+        setSessionConflict({ deviceName: friendlyDeviceName(data.deviceName) });
         return;
       }
-      if (!data?.token) {
-        throw new Error('Login did not return a token');
-      }
-      setToken(data.token);
-      persistWebAdminToken(data.token);
-      const me = await apiFetch('/users/me', data.token);
-      setCurrentUser(me);
-      if (!WEB_ADMIN_ROLES.includes(me?.role)) {
-        setToken('');
-        persistWebAdminToken('');
-        throw new Error(`Web admin access is not available for this account. Logged in as ${me?.role || 'Unknown'}`);
-      }
-      if (me?.role === 'Creator') setCurrentPage('study-materials');
-      const hd = me?.role === 'Admin' ? await apiFetch('/health/details', data.token).catch(() => null) : null;
-      setHealth(hd);
-      setMessage('Logged in');
-      setTimeout(() => {
-        void loadAllWithToken(data.token).then(() => {
-          const pend = sessionStorage.getItem('postLoginLive');
-          if (pend?.startsWith('/live/')) {
-            sessionStorage.removeItem('postLoginLive');
-            navigate(pend, { replace: true });
-          }
-        });
-      }, 0);
+      await finishAuthenticatedSession(data, 'Logged in');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyLogin(false);
+    }
+  }
+
+  async function doReplaceSession() {
+    setError('');
+    setBusyLogin(true);
+    try {
+      const replaced = await apiFetch('/auth/replace-session', null, {
+        method: 'POST',
+        body: JSON.stringify({ email, password, client: 'mobile', deviceName: webAdminDeviceName() }),
+      });
+      await finishAuthenticatedSession(replaced, 'Logged in (previous session replaced)');
     } catch (e) {
       setError(e.message);
     } finally {
@@ -287,100 +442,36 @@ export default function App() {
       const me = await apiFetch('/users/me', nextToken);
       setCurrentUser(me);
 
-      if (me.role === 'Creator') {
-        const [c, l, q, v, vc, sm, ws, asg] = await Promise.all([
-          apiFetchSafe('/courses', nextToken),
-          apiFetchSafe('/lessons/admin/all', nextToken),
-          apiFetchSafe('/quizzes/v2', nextToken),
-          apiFetchSafe('/videos', nextToken),
-          apiFetchSafe('/videos/categories', nextToken),
-          apiFetchSafe('/study-materials', nextToken),
-          apiFetchSafe('/worksheets', nextToken),
-          apiFetchSafe('/assignments', nextToken),
-        ]);
-        setUsers([]);
-        setPendingUsers([]);
-        setPendingApplications([]);
-        setApplyLeads([]);
-        setBatches([]);
-        setHolidays([]);
-        if (c.ok) setCourses(Array.isArray(c.data) ? c.data : []);
-        else setCourses([]);
-        if (l.ok) setLibrary(Array.isArray(l.data) ? l.data : []);
-        else setLibrary([]);
-        if (q.ok) setQuizBank(Array.isArray(q.data) ? q.data : []);
-        else setQuizBank([]);
-        if (v.ok) setVideos(Array.isArray(v.data) ? v.data : []);
-        else setVideos([]);
-        if (vc.ok) setVideoCategories(Array.isArray(vc.data) ? vc.data : []);
-        else setVideoCategories([]);
-        if (sm.ok) setStudyMaterials(Array.isArray(sm.data) ? sm.data : []);
-        else setStudyMaterials([]);
-        if (ws.ok) setWorksheets(Array.isArray(ws.data) ? ws.data : []);
-        else setWorksheets([]);
-        if (asg.ok) setAssignments(Array.isArray(asg.data) ? asg.data : []);
-        else setAssignments([]);
-        setHealth(null);
-        setLoadErrors([
-          !c.ok ? `/courses: ${c.error}` : null,
-          !l.ok ? `/lessons/admin/all: ${l.error}` : null,
-          !q.ok ? `/quizzes/v2: ${q.error}` : null,
-          !v.ok ? `/videos: ${v.error}` : null,
-          !vc.ok ? `/videos/categories: ${vc.error}` : null,
-          !sm.ok ? `/study-materials: ${sm.error}` : null,
-          !ws.ok ? `/worksheets: ${ws.error}` : null,
-          !asg.ok ? `/assignments: ${asg.error}` : null,
-        ].filter(Boolean));
-        return;
-      }
+      const sources = {
+        users: { path: '/users', set: setUsers },
+        pendingUsers: { path: '/users/pending', set: setPendingUsers },
+        applyLeads: { path: '/payments/admin/apply-enquiries', set: setApplyLeads },
+        courses: { path: '/courses', set: setCourses },
+        library: { path: '/lessons/admin/all', set: setLibrary },
+        batches: { path: '/batch-manager', set: setBatches },
+        holidays: { path: '/batch-manager/holidays/list', set: setHolidays },
+        quizBank: { path: '/quizzes/v2', set: setQuizBank },
+        videos: { path: '/videos', set: setVideos },
+        videoCategories: { path: '/videos/categories', set: setVideoCategories },
+        studyMaterials: { path: '/study-materials', set: setStudyMaterials },
+        worksheets: { path: '/worksheets', set: setWorksheets },
+        assignments: { path: '/assignments', set: setAssignments },
+      };
+      const keys = DATA_KEYS_BY_ROLE[me.role] || Object.keys(sources);
+      const results = await Promise.all(keys.map((k) => apiFetchSafe(sources[k].path, nextToken)));
 
-      const [u, pu, ae, c, l, b, h, q, v, vc, sm, ws, asg] = await Promise.all([
-        apiFetchSafe('/users', nextToken),
-        apiFetchSafe('/users/pending', nextToken),
-        apiFetchSafe('/payments/admin/apply-enquiries', nextToken),
-        apiFetchSafe('/courses', nextToken),
-        apiFetchSafe('/lessons/admin/all', nextToken),
-        apiFetchSafe('/batch-manager', nextToken),
-        apiFetchSafe('/batch-manager/holidays/list', nextToken),
-        apiFetchSafe('/quizzes/v2', nextToken),
-        apiFetchSafe('/videos', nextToken),
-        apiFetchSafe('/videos/categories', nextToken),
-        apiFetchSafe('/study-materials', nextToken),
-        apiFetchSafe('/worksheets', nextToken),
-        apiFetchSafe('/assignments', nextToken),
-      ]);
-
-      if (u.ok) setUsers(Array.isArray(u.data) ? u.data : []);
-      if (pu.ok) setPendingUsers(Array.isArray(pu.data) ? pu.data : []);
-      if (ae.ok) setApplyLeads(Array.isArray(ae.data) ? ae.data : []);
-      else setApplyLeads([]);
-      if (c.ok) setCourses(Array.isArray(c.data) ? c.data : []);
-      if (l.ok) setLibrary(Array.isArray(l.data) ? l.data : []);
-      if (b.ok) setBatches(Array.isArray(b.data) ? b.data : []);
-      if (h.ok) setHolidays(Array.isArray(h.data) ? h.data : []);
-      if (q.ok) setQuizBank(Array.isArray(q.data) ? q.data : []);
-      if (v.ok) setVideos(Array.isArray(v.data) ? v.data : []);
-      if (vc.ok) setVideoCategories(Array.isArray(vc.data) ? vc.data : []);
-      if (sm.ok) setStudyMaterials(Array.isArray(sm.data) ? sm.data : []);
-      if (ws.ok) setWorksheets(Array.isArray(ws.data) ? ws.data : []);
-      if (asg.ok) setAssignments(Array.isArray(asg.data) ? asg.data : []);
-
-      const errs = [
-        !u.ok ? `/users: ${u.error}` : null,
-        !pu.ok ? `/users/pending: ${pu.error}` : null,
-        !ae.ok ? `/payments/admin/apply-enquiries: ${ae.error}` : null,
-        !c.ok ? `/courses: ${c.error}` : null,
-        !l.ok ? `/lessons/admin/all: ${l.error}` : null,
-        !b.ok ? `/batch-manager: ${b.error}` : null,
-        !h.ok ? `/batch-manager/holidays/list: ${h.error}` : null,
-        !q.ok ? `/quizzes/v2: ${q.error}` : null,
-        !v.ok ? `/videos: ${v.error}` : null,
-        !vc.ok ? `/videos/categories: ${vc.error}` : null,
-        !sm.ok ? `/study-materials: ${sm.error}` : null,
-        !ws.ok ? `/worksheets: ${ws.error}` : null,
-        !asg.ok ? `/assignments: ${asg.error}` : null,
-      ].filter(Boolean);
-      setLoadErrors(errs);
+      Object.keys(sources).forEach((k) => {
+        if (!keys.includes(k)) sources[k].set([]);
+      });
+      keys.forEach((k, i) => {
+        const r = results[i];
+        if (r.ok) sources[k].set(Array.isArray(r.data) ? r.data : []);
+        else if (k === 'applyLeads') sources[k].set([]);
+      });
+      if (me.role !== 'Admin') setHealth(null);
+      setLoadErrors(
+        keys.map((k, i) => (results[i].ok ? null : `${sources[k].path}: ${results[i].error}`)).filter(Boolean),
+      );
     } catch (e) {
       setError(e.message);
     }
@@ -404,7 +495,7 @@ export default function App() {
         }
         setToken(stored);
         setCurrentUser(me);
-        if (me?.role === 'Creator') setCurrentPage('study-materials');
+        setCurrentPage(landingPageForRole(me?.role));
         const hd = me?.role === 'Admin' ? await apiFetch('/health/details', stored).catch(() => null) : null;
         if (!cancelled) setHealth(hd);
         await loadAllWithToken(stored);
@@ -421,29 +512,9 @@ export default function App() {
   }, []);
 
   function logout() {
-    persistWebAdminToken('');
-    setToken('');
-    navigate('/');
-    setCurrentPage('dashboard');
-    setUsers([]);
-    setPendingUsers([]);
-    setCourses([]);
-    setLibrary([]);
-    setBatches([]);
-    setHolidays([]);
-    setQuizBank([]);
-    setVideos([]);
-    setVideoCategories([]);
-    setStudyMaterials([]);
-    setWorksheets([]);
-    setAssignments([]);
-    setBatchSessions([]);
-    setCancelAuditRows([]);
-    setBatchMembers([]);
-    setBatchTrainers([]);
-    setCurrentUser(null);
-    setHealth(null);
-    setMessage('Logged out');
+    sessionReplacedLock.current = false;
+    setSessionConflict(null);
+    resetClientSession();
   }
 
   async function createUser(payload) {
@@ -632,6 +703,23 @@ export default function App() {
     return apiFetch(`/lessons/library/${lessonId}/composition`, token);
   }
 
+  async function loadLessonAccess(lessonId) {
+    return apiFetch(`/lessons/library/${lessonId}/access`, token);
+  }
+
+  async function denyLessonAccess(lessonId, userId) {
+    return apiFetch(`/lessons/library/${lessonId}/access`, token, {
+      method: 'POST',
+      body: JSON.stringify({ userId, effect: 'deny' }),
+    });
+  }
+
+  async function restoreLessonAccess(lessonId, overrideId) {
+    return apiFetch(`/lessons/library/${lessonId}/access/${overrideId}`, token, {
+      method: 'DELETE',
+    });
+  }
+
   async function deleteCourse(id) {
     try {
       await apiFetch(`/courses/${id}`, token, { method: 'DELETE' });
@@ -787,6 +875,109 @@ export default function App() {
       pushToast(err.message, 'error');
       return false;
     }
+  }
+
+  async function completeBatch(batchId) {
+    try {
+      await apiFetch(`/batch-manager/${batchId}/complete`, token, { method: 'POST' });
+      await loadAll();
+      pushToast('Batch marked complete', 'success');
+      return true;
+    } catch (err) {
+      setError(err.message);
+      pushToast(err.message, 'error');
+      return false;
+    }
+  }
+
+  async function reopenBatch(batchId) {
+    try {
+      await apiFetch(`/batch-manager/${batchId}/reopen`, token, { method: 'POST' });
+      await loadAll();
+      pushToast('Batch reopened', 'success');
+      return true;
+    } catch (err) {
+      setError(err.message);
+      pushToast(err.message, 'error');
+      return false;
+    }
+  }
+
+  async function transferLibraryOwner({ itemType, itemId, toUserId }) {
+    await apiFetch('/library/ownership/transfer', token, {
+      method: 'POST',
+      body: JSON.stringify({ itemType, itemId, toUserId }),
+    });
+    await loadAll();
+    pushToast('Ownership transferred', 'success');
+  }
+
+  async function transferAllLibraryContent(fromUserId, toUserId) {
+    const data = await apiFetch('/library/ownership/transfer-all', token, {
+      method: 'POST',
+      body: JSON.stringify({ fromUserId, toUserId }),
+    });
+    await loadAll();
+    pushToast(`Transferred ${data?.count ?? 0} item(s)`, 'success');
+    return data;
+  }
+
+  async function loadTrainerToday() {
+    return apiFetch('/batch-manager/my/today', token);
+  }
+
+  const loadShellNotifications = React.useCallback(async () => {
+    if (!token) return [];
+    const items = [];
+    if (currentUser?.role === 'Trainer' || currentUser?.role === 'Admin') {
+      try {
+        const queue = await apiFetch('/batch-manager/my/review-queue?status=pending', token);
+        const count = Array.isArray(queue) ? queue.length : 0;
+        if (count > 0) {
+          items.push({
+            id: 'review-queue',
+            title: `${count} submission${count === 1 ? '' : 's'} waiting for review`,
+            body: 'Open Review to grade student work.',
+            page: currentUser?.role === 'Trainer' ? 'review' : 'batches',
+          });
+        }
+      } catch {
+        /* live API may not expose the queue yet */
+      }
+    }
+    return items;
+  }, [token, currentUser?.role]);
+
+  async function loadTrainerSessions(from, to) {
+    return apiFetch(`/batch-manager/my/sessions?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, token);
+  }
+
+  async function loadReviewQueue(status = 'pending') {
+    const suffix = status ? `?status=${encodeURIComponent(status)}` : '';
+    return apiFetch(`/batch-manager/my/review-queue${suffix}`, token);
+  }
+
+  async function submitAssignmentReview(batchId, assignmentId, submissionId, payload) {
+    return apiFetch(
+      `/batch-manager/${batchId}/assignments/${assignmentId}/submissions/${submissionId}/review`,
+      token,
+      { method: 'PUT', body: JSON.stringify(payload) },
+    );
+  }
+
+  async function loadStudentProgress(batchId, studentId) {
+    return apiFetch(`/batch-manager/${batchId}/students/${studentId}/progress`, token);
+  }
+
+  async function addStudentNote(batchId, studentId, note) {
+    return apiFetch(`/batch-manager/${batchId}/students/${studentId}/notes`, token, {
+      method: 'POST',
+      body: JSON.stringify({ note }),
+    });
+  }
+
+  async function deleteStudentNote(batchId, noteId) {
+    await apiFetch(`/batch-manager/${batchId}/notes/${noteId}`, token, { method: 'DELETE' });
   }
 
   async function deleteUser(userId) {
@@ -1070,9 +1261,10 @@ export default function App() {
   }
 
   React.useEffect(() => {
-    if (!token || !currentUser || currentUser.role !== 'Creator') return;
-    if (!CREATOR_ALLOWED_PAGES.has(currentPage)) {
-      setCurrentPage('study-materials');
+    if (!token || !currentUser) return;
+    const allowed = allowedPagesForRole(currentUser.role);
+    if (allowed && !allowed.has(currentPage)) {
+      setCurrentPage(landingPageForRole(currentUser.role));
     }
   }, [token, currentUser, currentPage]);
 
@@ -1085,8 +1277,8 @@ export default function App() {
     () => (row) => {
       if (!row || currentUser?.id == null) return false;
       const role = currentUser.role;
-      if (role === 'Admin' || role === 'Trainer') return true;
-      if (role === 'Creator') return Number(row.created_by) === Number(currentUser.id);
+      if (role === 'Admin') return true;
+      if (role === 'Trainer' || role === 'Creator') return Number(row.created_by) === Number(currentUser.id);
       return false;
     },
     [currentUser],
@@ -1348,6 +1540,10 @@ export default function App() {
     ['Trainer', 'Admin', 'Creator', 'Lab'].includes(u.role)
   );
   const showCreatedBy = currentUser?.role === 'Admin';
+  const isTrainer = currentUser?.role === 'Trainer';
+  const isAdmin = currentUser?.role === 'Admin';
+  const staffUsers = users.filter((u) => ['Trainer', 'Admin'].includes(u.role));
+  const onTransferOwner = isAdmin ? transferLibraryOwner : null;
 
   if (currentPage === 'dashboard') {
     page = <DashboardPage users={users} courses={courses} batches={batches} holidays={holidays} applyLeads={applyLeads} />;
@@ -1378,6 +1574,8 @@ export default function App() {
         onGetUserDetails={getUserDetails}
         canDangerDelete={currentUser?.role === 'Admin'}
         onDeleteUser={deleteUser}
+        staffUsers={staffUsers}
+        onTransferAllContent={isAdmin ? transferAllLibraryContent : null}
       />
     );
   } else if (currentPage === 'leads') {
@@ -1387,6 +1585,7 @@ export default function App() {
       <CoursesPage
         courses={courses}
         library={library}
+        readOnly={isTrainer}
         onCreateCourse={createCourse}
         onUpdateCourse={updateCourse}
         onDeleteCourse={deleteCourse}
@@ -1399,6 +1598,7 @@ export default function App() {
     page = (
       <LessonsPage
         library={library}
+        readOnly={isTrainer}
         videos={videos}
         studyMaterials={studyMaterials}
         worksheets={worksheets}
@@ -1409,6 +1609,43 @@ export default function App() {
         onDeleteLessonLibrary={deleteLessonLibrary}
         saveLessonComposition={saveLessonComposition}
         loadLessonComposition={loadLessonComposition}
+        canManageAccess={isAdmin}
+        loadLessonAccess={isAdmin ? loadLessonAccess : null}
+        denyLessonAccess={isAdmin ? denyLessonAccess : null}
+        restoreLessonAccess={isAdmin ? restoreLessonAccess : null}
+      />
+    );
+  } else if (currentPage === 'today' && isTrainer) {
+    page = (
+      <TrainerTodayPage
+        loadToday={loadTrainerToday}
+        loadReviewQueue={loadReviewQueue}
+        loadLessonComposition={loadLessonComposition}
+        onOpenBatch={(id) => {
+          setSelectedBatchId(String(id));
+          setCurrentPage('batches');
+        }}
+      />
+    );
+  } else if (currentPage === 'calendar' && isTrainer) {
+    page = (
+      <TrainerCalendarPage
+        loadSessions={loadTrainerSessions}
+        holidays={holidays}
+        onOpenBatch={(id) => {
+          setSelectedBatchId(String(id));
+          setCurrentPage('batches');
+        }}
+      />
+    );
+  } else if (currentPage === 'review' && isTrainer) {
+    page = (
+      <ReviewInboxPage
+        loadReviewQueue={loadReviewQueue}
+        submitReview={submitAssignmentReview}
+        loadStudentProgress={loadStudentProgress}
+        addStudentNote={addStudentNote}
+        deleteStudentNote={deleteStudentNote}
       />
     );
   } else if (currentPage === 'subscriptions' && currentUser?.role === 'Admin') {
@@ -1416,8 +1653,30 @@ export default function App() {
       <SubscriptionsPage loadSubscriptions={fetchAdminSubscriptions} onDeleteGrant={deleteSubscriptionGrant} />
     );
   } else if (currentPage === 'batches') {
-    page = (
+    page = isTrainer ? (
+      <TrainerBatchPage
+        batches={batches}
+        selectedBatchId={selectedBatchId}
+        setSelectedBatchId={setSelectedBatchId}
+        onLoadSessions={loadSessions}
+        onCancelSession={cancelSession}
+        cancelAuditRows={cancelAuditRows}
+        batchMembers={batchMembers}
+        batchTrainers={batchTrainers}
+        batchSessions={batchSessions}
+        fetchBatchAssignments={fetchBatchAssignments}
+        createBatchAssignment={createBatchAssignment}
+        fetchAssignmentSubmissions={fetchAssignmentSubmissions}
+        fetchBatchAttendance={fetchBatchAttendance}
+        fetchBatchLiveRecordings={fetchBatchLiveRecordings}
+        saveSessionAttendance={saveSessionAttendance}
+        loadStudentProgress={loadStudentProgress}
+        addStudentNote={addStudentNote}
+        deleteStudentNote={deleteStudentNote}
+      />
+    ) : (
       <BatchesPage
+        trainerMode={false}
         onCreateBatch={createBatch}
         onUpdateBatch={updateBatch}
         courses={courses}
@@ -1426,6 +1685,8 @@ export default function App() {
         selectedBatchId={selectedBatchId}
         setSelectedBatchId={setSelectedBatchId}
         onStartBatch={startBatch}
+        onCompleteBatch={completeBatch}
+        onReopenBatch={reopenBatch}
         onLoadSessions={loadSessions}
         onCancelSession={cancelSession}
         cancelAuditRows={cancelAuditRows}
@@ -1494,12 +1755,15 @@ export default function App() {
         lessons={library}
         showCreatedBy={showCreatedBy}
         libraryCanMutate={libraryCanMutate}
+        canMapToCourse={!isTrainer}
         onCreateQuiz={createQuizBank}
         onGetQuiz={getQuizBankDetails}
         onUpdateQuiz={updateQuizBank}
         onPublishVersion={publishQuizVersion}
         onAssignQuiz={assignQuiz}
         onDeleteQuiz={deleteQuizBank}
+        staffUsers={staffUsers}
+        onTransferOwner={onTransferOwner}
       />
     );
   } else if (currentPage === 'videos') {
@@ -1511,10 +1775,13 @@ export default function App() {
         courses={courses}
         showCreatedBy={showCreatedBy}
         libraryCanMutate={libraryCanMutate}
+        canMapToCourse={!isTrainer}
         onCreateVideo={createVideo}
         onUpdateVideo={updateVideo}
         onDeleteVideo={deleteVideo}
         onAssignVideo={assignVideo}
+        staffUsers={staffUsers}
+        onTransferOwner={onTransferOwner}
       />
     );
   } else if (currentPage === 'study-materials') {
@@ -1527,6 +1794,8 @@ export default function App() {
         onUpdate={updateStudyMaterial}
         onDelete={deleteStudyMaterial}
         onUploadAsset={uploadStudyMaterialAsset}
+        staffUsers={staffUsers}
+        onTransferOwner={onTransferOwner}
       />
     );
   } else if (currentPage === 'worksheets') {
@@ -1539,6 +1808,8 @@ export default function App() {
         onUpdate={updateWorksheet}
         onDelete={deleteWorksheet}
         onUploadAsset={uploadWorksheetAsset}
+        staffUsers={staffUsers}
+        onTransferOwner={onTransferOwner}
       />
     );
   } else if (currentPage === 'settings') {
@@ -1562,6 +1833,8 @@ export default function App() {
         createAssignment={createAssignment}
         updateAssignment={updateAssignment}
         deleteAssignment={deleteAssignment}
+        staffUsers={staffUsers}
+        onTransferOwner={onTransferOwner}
       />
     );
   }
@@ -1597,18 +1870,23 @@ export default function App() {
                 onLogin={doLogin}
                 busy={busyLogin}
                 error={error}
+                sessionConflict={sessionConflict}
+                onConfirmReplace={doReplaceSession}
+                onCancelReplace={() => setSessionConflict(null)}
               />
             </div>
           ) : (
             <div className="app">
               <ToastStack toasts={toasts} />
-              <StatusBanner error={error} message={message} />
               <AdminShell
                 currentPage={currentPage}
                 onNavigate={setCurrentPage}
                 onRefresh={loadAll}
                 onLogout={logout}
+                currentUser={currentUser}
+                loadNotifications={loadShellNotifications}
                 creatorMode={currentUser?.role === 'Creator'}
+                trainerMode={isTrainer}
                 showBillingNav={currentUser?.role === 'Admin'}
                 showPaymentsNav={currentUser?.role === 'Admin'}
                 showSubscriptionsNav={currentUser?.role === 'Admin'}

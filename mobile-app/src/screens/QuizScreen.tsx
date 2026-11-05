@@ -9,6 +9,7 @@ import {
   View,
 } from 'react-native';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
+import CelebrationMoment from '../components/learn/CelebrationMoment';
 import { api } from '../api/client';
 
 const BRAND_RED = '#c41e3a';
@@ -17,7 +18,12 @@ const BRAND_BLUE = '#1a237e';
 type Quiz = { id: number; title: string; questions: { id: number; question_text: string; options: string[] }[] };
 
 export default function QuizScreen({ route, navigation }: any) {
-  const { lessonId, quiz, assignmentId } = route.params as { lessonId: number; quiz?: Quiz; assignmentId?: number };
+  const { lessonId, quiz, assignmentId, courseId } = route.params as {
+    lessonId: number;
+    quiz?: Quiz;
+    assignmentId?: number;
+    courseId?: number;
+  };
   const [selected, setSelected] = useState<Record<number, number>>({});
   const [multiSelected, setMultiSelected] = useState<Record<number, number[]>>({});
   const [matchingSelected, setMatchingSelected] = useState<Record<number, Record<string, string>>>({});
@@ -30,14 +36,18 @@ export default function QuizScreen({ route, navigation }: any) {
   React.useEffect(() => {
     if (!assignmentId) return;
     setLoading(true);
-    api.get(`/quizzes/v2/assignment/${assignmentId}`)
+    const q =
+      courseId != null && courseId !== ''
+        ? `?courseId=${encodeURIComponent(String(courseId))}`
+        : '';
+    api.get(`/quizzes/v2/assignment/${assignmentId}${q}`)
       .then((payload) => {
         setLoadedQuiz(payload.quiz || null);
         setLoadedAssignment(payload.assignment || null);
       })
       .catch((e) => Alert.alert('Error', e?.message || 'Could not load quiz'))
       .finally(() => setLoading(false));
-  }, [assignmentId]);
+  }, [assignmentId, courseId]);
 
   const submit = async () => {
     setLoading(true);
@@ -56,11 +66,15 @@ export default function QuizScreen({ route, navigation }: any) {
           }
           return acc;
         }, {});
-        const result = await api.post(`/quizzes/v2/assignment/${assignmentId}/submit`, { answers });
+        const result = await api.post(`/quizzes/v2/assignment/${assignmentId}/submit`, {
+          answers,
+          ...(courseId != null ? { courseId: Number(courseId) } : {}),
+        });
         setSubmitted({ score: Number(result.score || 0), total: Number(result.maxScore || 0) });
       } else if (quiz) {
         const result = await api.post(`/quizzes/lesson/${lessonId}/submit`, {
           answers: quiz.questions.map((q) => selected[q.id] ?? -1),
+          ...(courseId != null ? { courseId: Number(courseId) } : {}),
         });
         setSubmitted({ score: result.score, total: result.total });
       }
@@ -108,19 +122,19 @@ export default function QuizScreen({ route, navigation }: any) {
   }
 
   if (submitted !== null) {
-    const passed = submitted.total > 0 && submitted.score === submitted.total;
     return (
       <View style={styles.pageRoot}>
         <ScreenPageTitle title="Quiz" />
-        <View style={styles.resultCard}>
-          <Text style={styles.resultTitle}>{passed ? 'Well done!' : 'Quiz complete'}</Text>
-          <Text style={styles.resultScore}>
-            {submitted.score} / {submitted.total} correct
-          </Text>
+        <CelebrationMoment
+          variant="quiz_result"
+          subjectTitle={liveQuiz.title}
+          score={submitted.score}
+          total={submitted.total}
+        >
           <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
             <Text style={styles.backBtnText}>Back to lesson</Text>
           </TouchableOpacity>
-        </View>
+        </CelebrationMoment>
       </View>
     );
   }

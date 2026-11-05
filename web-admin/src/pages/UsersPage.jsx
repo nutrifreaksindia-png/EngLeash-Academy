@@ -42,6 +42,8 @@ export default function UsersPage({
   createTitle,
   createSubtitle,
   defaultRole = 'Trainer',
+  staffUsers = [],
+  onTransferAllContent,
 }) {
   const resolvedCreateTitle = createTitle ?? (variant === 'students' ? 'Add student' : 'Add user');
   const resolvedCreateSubtitle =
@@ -55,6 +57,8 @@ export default function UsersPage({
   const [viewOpen, setViewOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [viewStudent, setViewStudent] = useState(null);
+  const [transferToId, setTransferToId] = useState('');
+  const [transferBusy, setTransferBusy] = useState(false);
 
   const [listQuery, setListQuery] = useState('');
   const createFormRef = useRef(null);
@@ -353,35 +357,43 @@ export default function UsersPage({
   }
 
   async function openStudentView(student) {
-    const details = onGetUserDetails ? await onGetUserDetails(student.id) : student;
-    setViewStudent(details);
-    setViewOpen(true);
+    try {
+      const details = onGetUserDetails ? await onGetUserDetails(student.id) : student;
+      setViewStudent(details);
+      setViewOpen(true);
+    } catch (err) {
+      window.alert(err?.message || 'Could not load user details');
+    }
   }
 
   async function openEdit(student) {
-    const details = onGetUserDetails ? await onGetUserDetails(student.id) : student;
-    const countryIso = normalizeCountryIsoByName(details.studentProfile?.country);
-    const stateIso = normalizeStateIsoByName(countryIso, details.studentProfile?.state_province);
-    setEditForm({
-      id: details.id,
-      role: details.role || 'Student',
-      name: details.name || '',
-      email: details.email || '',
-      mobileNumber: details.mobile_number || '',
-      gender: details.studentProfile?.gender || 'Other',
-      birthDate: details.studentProfile?.birth_date || '',
-      addressLine1: details.studentProfile?.address_line_1 || '',
-      addressLine2: details.studentProfile?.address_line_2 || '',
-      cityDistrict: details.studentProfile?.city_district || '',
-      stateProvince: details.studentProfile?.state_province || '',
-      country: details.studentProfile?.country || '',
-      countryCode: details.studentProfile?.country_code || '',
-      countryIso,
-      stateIso,
-      occupation: details.studentProfile?.occupation || 'Student',
-    });
-    setEditOpen(true);
-    setViewOpen(false);
+    try {
+      const details = onGetUserDetails ? await onGetUserDetails(student.id) : student;
+      const countryIso = normalizeCountryIsoByName(details.studentProfile?.country);
+      const stateIso = normalizeStateIsoByName(countryIso, details.studentProfile?.state_province);
+      setEditForm({
+        id: details.id,
+        role: details.role || (isStudents ? 'Student' : 'Trainer'),
+        name: details.name || '',
+        email: details.email || '',
+        mobileNumber: details.mobile_number || '',
+        gender: details.studentProfile?.gender || 'Other',
+        birthDate: details.studentProfile?.birth_date || '',
+        addressLine1: details.studentProfile?.address_line_1 || '',
+        addressLine2: details.studentProfile?.address_line_2 || '',
+        cityDistrict: details.studentProfile?.city_district || '',
+        stateProvince: details.studentProfile?.state_province || '',
+        country: details.studentProfile?.country || '',
+        countryCode: details.studentProfile?.country_code || '',
+        countryIso,
+        stateIso,
+        occupation: details.studentProfile?.occupation || 'Student',
+      });
+      setEditOpen(true);
+      setViewOpen(false);
+    } catch (err) {
+      window.alert(err?.message || 'Could not load user for editing');
+    }
   }
 
   async function submitEdit(e) {
@@ -512,6 +524,82 @@ export default function UsersPage({
           </form>
         </SectionCard>
         {studentsTable}
+
+        <Modal open={viewOpen} title="User details" onClose={() => setViewOpen(false)}>
+          {viewStudent ? (
+            <div className="stack">
+              <p>
+                <strong>{viewStudent.name || '-'}</strong>
+              </p>
+              <p className="muted" style={{ marginTop: 0 }}>
+                {viewStudent.email || '-'}
+              </p>
+              <p>Role: {viewStudent.role || '-'}</p>
+              <p>Status: {viewStudent.status || '-'}</p>
+              <p>Mobile: {viewStudent.mobile_number || '-'}</p>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="secondaryBtn" type="button" onClick={() => openEdit(viewStudent)}>
+                  Edit
+                </button>
+              </div>
+              {onTransferAllContent && ['Trainer', 'Admin', 'Creator'].includes(viewStudent.role) ? (
+                <form
+                  className="stack"
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    if (!transferToId) return;
+                    if (
+                      !window.confirm(
+                        `Transfer ALL library content owned by ${viewStudent.name || viewStudent.email} to the selected user?`,
+                      )
+                    ) {
+                      return;
+                    }
+                    setTransferBusy(true);
+                    try {
+                      await onTransferAllContent(viewStudent.id, Number(transferToId));
+                      setTransferToId('');
+                    } finally {
+                      setTransferBusy(false);
+                    }
+                  }}
+                >
+                  <h4 className="batchModalSubhead">Transfer all content</h4>
+                  <select value={transferToId} onChange={(e) => setTransferToId(e.target.value)} required>
+                    <option value="">New owner…</option>
+                    {(staffUsers || [])
+                      .filter((u) => Number(u.id) !== Number(viewStudent.id))
+                      .map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.name || u.email} ({u.role})
+                        </option>
+                      ))}
+                  </select>
+                  <button type="submit" disabled={transferBusy || !transferToId}>
+                    {transferBusy ? 'Transferring…' : 'Transfer all content'}
+                  </button>
+                </form>
+              ) : null}
+            </div>
+          ) : null}
+        </Modal>
+
+        <Modal open={editOpen} title={`Edit ${editForm.role || 'user'}`} onClose={() => setEditOpen(false)} variant="drawer">
+          <form onSubmit={submitEdit} className="formGrid">
+            <label className="muted">
+              Role
+              <input value={editForm.role || ''} readOnly disabled />
+            </label>
+            <input value={editForm.name} onChange={(e) => setEditField('name', e.target.value)} placeholder="Name" required />
+            <input value={editForm.email} onChange={(e) => setEditField('email', e.target.value)} placeholder="Email" type="email" required />
+            <input
+              value={editForm.mobileNumber}
+              onChange={(e) => setEditField('mobileNumber', String(e.target.value || '').replace(/[^\d]/g, '').slice(0, 15))}
+              placeholder="Mobile number"
+            />
+            <button type="submit">Save</button>
+          </form>
+        </Modal>
       </div>
     );
   }
