@@ -417,16 +417,7 @@ async function buildFromOrdered(slides: LearnSlide[], lesson: LessonBundle, orde
       }
       if (pack) appendQuizSeries(slides, pack, row.orderIndex);
     } else if (row.type === 'assignment') {
-      slides.push({
-        key: `ord-as-${row.orderIndex}-${row.id}`,
-        kind: 'assignment',
-        assignmentId: row.id,
-        title: row.title || 'Assignment',
-        description: row.description || '',
-        contentType: 'assignment',
-        contentId: row.id,
-        orderIndex: row.orderIndex,
-      });
+      // Assignments appear in My Assignments by schedule day — not in Learn Mode.
     }
   }
 }
@@ -666,14 +657,13 @@ export async function buildLessonSlides(
   return slides;
 }
 
-export type LibraryCategory = 'video' | 'study_material' | 'worksheet' | 'quiz' | 'assignment';
+export type LibraryCategory = 'video' | 'study_material' | 'worksheet' | 'quiz';
 
 export const LIBRARY_CATEGORY_LABELS: Record<LibraryCategory, string> = {
   video: 'Videos',
   study_material: 'Study Material',
   worksheet: 'Worksheet',
   quiz: 'Quizzes',
-  assignment: 'Assignments',
 };
 
 export function slideLibraryCategory(slide: LearnSlide | undefined): LibraryCategory | null {
@@ -683,7 +673,7 @@ export function slideLibraryCategory(slide: LearnSlide | undefined): LibraryCate
     return slide.contentType === 'worksheet' ? 'worksheet' : 'study_material';
   }
   if (slide.kind === 'open_pdf_sheet') return 'worksheet';
-  if (slide.kind === 'assignment') return 'assignment';
+  if (slide.kind === 'assignment') return null;
   if (
     slide.kind === 'quizzes_list' ||
     slide.kind === 'quiz_start' ||
@@ -811,8 +801,6 @@ export function nextLessonFooterAction(
         return sameType ? 'Next Quiz' : 'Quiz';
       case 'worksheet':
         return sameType ? 'Next Worksheet' : 'Worksheet';
-      case 'assignment':
-        return sameType ? 'Next Assignment' : 'Assignment';
       default:
         return 'Next';
     }

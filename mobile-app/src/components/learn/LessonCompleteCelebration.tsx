@@ -32,18 +32,31 @@ export default function LessonCompleteCelebration({
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    const load = async (showSpinner: boolean) => {
+      if (showSpinner) setLoading(true);
       try {
         const record = await getLessonProgressV2(userId, courseId, lessonId);
         if (!cancelled) setSnapshot(summarizeLessonEndProgress(record, summary));
       } catch {
         if (!cancelled) setSnapshot(summarizeLessonEndProgress(null, summary));
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && showSpinner) setLoading(false);
       }
-    })();
+    };
+
+    void load(true);
+    // Re-read shortly after mount in case the last video mark finished a tick late.
+    const t1 = setTimeout(() => {
+      void load(false);
+    }, 350);
+    const t2 = setTimeout(() => {
+      void load(false);
+    }, 900);
+
     return () => {
       cancelled = true;
+      clearTimeout(t1);
+      clearTimeout(t2);
     };
   }, [userId, courseId, lessonId, summary]);
 

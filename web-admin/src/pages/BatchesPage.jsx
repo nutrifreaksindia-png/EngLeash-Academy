@@ -138,7 +138,6 @@ export default function BatchesPage({
   onRemoveBatchTrainer,
   batchSessions,
   fetchBatchAssignments,
-  createBatchAssignment,
   fetchAssignmentSubmissions,
   fetchBatchAttendance,
   fetchBatchLiveRecordings,
@@ -197,8 +196,6 @@ export default function BatchesPage({
 
   const [assignments, setAssignments] = React.useState([]);
   const [assignLoading, setAssignLoading] = React.useState(false);
-  const [newAssignTitle, setNewAssignTitle] = React.useState('');
-  const [newAssignDue, setNewAssignDue] = React.useState('');
   const [submissionCache, setSubmissionCache] = React.useState({});
   const [attendanceData, setAttendanceData] = React.useState(null);
   const [attendanceLoading, setAttendanceLoading] = React.useState(false);
@@ -665,19 +662,6 @@ export default function BatchesPage({
     } catch {
       /* App.jsx surfaces toast */
     }
-  }
-
-  async function handleCreateAssignment(e) {
-    e.preventDefault();
-    if (!modalBatch || !newAssignTitle.trim()) return;
-    await createBatchAssignment(modalBatch.id, {
-      title: newAssignTitle.trim(),
-      dueDate: newAssignDue || null,
-    });
-    const rows = await fetchBatchAssignments(modalBatch.id);
-    setAssignments(Array.isArray(rows) ? rows : []);
-    setNewAssignTitle('');
-    setNewAssignDue('');
   }
 
   async function loadSubs(aid) {
@@ -1476,16 +1460,10 @@ export default function BatchesPage({
           <p className="muted">Loading…</p>
         ) : (
           <div className="stack batchModalBody">
-            <form onSubmit={handleCreateAssignment} className="row">
-              <input
-                placeholder="Assignment title"
-                value={newAssignTitle}
-                onChange={(e) => setNewAssignTitle(e.target.value)}
-                required
-              />
-              <input type="date" value={newAssignDue} onChange={(e) => setNewAssignDue(e.target.value)} />
-              <button type="submit">Add assignment</button>
-            </form>
+            <p className="muted">
+              Schedule from the library via <strong>Assignments → Set an Assignment</strong>. Legacy homework for
+              this batch is listed below.
+            </p>
             <div className="tableWrap">
               <table>
                 <thead>

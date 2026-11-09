@@ -43,6 +43,7 @@ import LiveScheduleScreen from '../screens/LiveScheduleScreen';
 import SessionRecordingsScreen from '../screens/SessionRecordingsScreen';
 import MyAssignmentsScreen from '../screens/MyAssignmentsScreen';
 import AssignmentScreen from '../screens/AssignmentScreen';
+import AssignmentOccurrenceScreen from '../screens/AssignmentOccurrenceScreen';
 import AccountScreen from '../screens/AccountScreen';
 import PaymentsInvoicesScreen from '../screens/PaymentsInvoicesScreen';
 import SignupScreen from '../screens/SignupScreen';
@@ -180,6 +181,11 @@ function AssignmentsStackNavigator() {
     <AssignmentsStack.Navigator screenOptions={stackOpts} initialRouteName="MyAssignmentsHome">
       <AssignmentsStack.Screen name="MyAssignmentsHome" component={MyAssignmentsScreen} options={{ title: 'My Assignments' }} />
       <AssignmentsStack.Screen name="Assignment" component={AssignmentScreen} options={{ title: 'Assignment' }} />
+      <AssignmentsStack.Screen
+        name="AssignmentOccurrence"
+        component={AssignmentOccurrenceScreen}
+        options={{ title: 'Assignment' }}
+      />
     </AssignmentsStack.Navigator>
   );
 }

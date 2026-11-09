@@ -25,6 +25,7 @@ const {
   isLessonDenied,
   userMayAccessLesson,
 } = require('../lib/lessonAccess');
+const { derivedAssignmentLabel } = require('../lib/assignmentHelpers');
 
 const router = express.Router();
 const baseUrl = process.env.STORAGE_URL || process.env.API_URL || '';
@@ -154,9 +155,9 @@ function resolveCompositionLabels(lessonId) {
       title = b?.title || 'Quiz';
       description = b?.description || '';
     } else if (r.item_type === 'assignment') {
-      const a = db.prepare('SELECT title, description FROM assignment_library WHERE id = ?').get(r.item_id);
-      title = a?.title || 'Assignment';
-      description = a?.description || '';
+      const a = db.prepare('SELECT * FROM assignment_library WHERE id = ?').get(r.item_id);
+      title = a ? derivedAssignmentLabel(a) : 'Assignment';
+      description = '';
     }
     out.push({
       sortOrder: r.sort_order,
@@ -242,14 +243,17 @@ function buildOrderedContentForLearner(reqUser, lessonId) {
         quizAssignmentId: qa?.id ?? null,
       });
     } else if (r.item_type === 'assignment') {
+      // Kept in composition for admin/lesson editors; Learn Mode skips slides client-side.
+      // Students complete these via My Assignments on the schedule day.
       const al = db.prepare('SELECT * FROM assignment_library WHERE id = ?').get(r.item_id);
       if (!al || !canViewAssignment(reqUser, al)) continue;
       out.push({
         orderIndex: r.sort_order,
         type: 'assignment',
         id: al.id,
-        title: al.title,
-        description: al.description || '',
+        title: derivedAssignmentLabel(al),
+        description: '',
+        responseType: al.response_type || 'file',
       });
     }
   }

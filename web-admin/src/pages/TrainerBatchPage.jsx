@@ -51,7 +51,6 @@ export default function TrainerBatchPage({
   batchTrainers = [],
   batchSessions = [],
   fetchBatchAssignments,
-  createBatchAssignment,
   fetchAssignmentSubmissions,
   fetchBatchAttendance,
   fetchBatchLiveRecordings,
@@ -63,9 +62,6 @@ export default function TrainerBatchPage({
   const navigate = useNavigate();
   const [tab, setTab] = useState('overview');
   const [assignments, setAssignments] = useState([]);
-  const [assignTitle, setAssignTitle] = useState('');
-  const [assignDue, setAssignDue] = useState('');
-  const [assignMax, setAssignMax] = useState('10');
   const [subs, setSubs] = useState({});
   const [attendance, setAttendance] = useState(null);
   const [recordings, setRecordings] = useState([]);
@@ -149,20 +145,6 @@ export default function TrainerBatchPage({
         <p className="muted">You are not assigned to any batches yet.</p>
       </SectionCard>
     );
-  }
-
-  async function handleCreateAssignment(e) {
-    e.preventDefault();
-    await createBatchAssignment(batch.id, {
-      title: assignTitle,
-      dueDate: assignDue || null,
-      maxScore: Number(assignMax || 10),
-    });
-    setAssignTitle('');
-    setAssignDue('');
-    setAssignMax('10');
-    const rows = await fetchBatchAssignments(batch.id);
-    setAssignments(Array.isArray(rows) ? rows : []);
   }
 
   return (
@@ -394,20 +376,10 @@ export default function TrainerBatchPage({
 
       {tab === 'assignments' ? (
         <SectionCard title="Assignments">
-          <form className="row" onSubmit={handleCreateAssignment}>
-            <input value={assignTitle} onChange={(e) => setAssignTitle(e.target.value)} placeholder="Title" required />
-            <input type="date" value={assignDue} onChange={(e) => setAssignDue(e.target.value)} />
-            <input
-              type="number"
-              min={1}
-              step="0.5"
-              value={assignMax}
-              onChange={(e) => setAssignMax(e.target.value)}
-              title="Max score"
-              style={{ width: 80 }}
-            />
-            <button type="submit">Add</button>
-          </form>
+          <p className="muted" style={{ marginBottom: 12 }}>
+            Schedule homework from the library via{' '}
+            <strong>Assignments → Set an Assignment</strong>. Legacy batch homework (if any) is listed below.
+          </p>
           <div className="tableWrap">
             <table className="dataTable">
               <thead>

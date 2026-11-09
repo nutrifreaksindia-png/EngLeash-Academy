@@ -58,6 +58,7 @@ export type ContentSummaryItem = {
 };
 
 /** Types that share equal lesson weight when present. */
+/** Weighted learn-mode types — assignments are tracked in My Assignments, not lesson %. */
 export const LESSON_PROGRESS_TYPES = [
   'video',
   'study_material',

@@ -1,39 +1,59 @@
 import React, { useCallback, useState } from 'react';
-import { ActivityIndicator, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import {
+  ActivityIndicator,
+  FlatList,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 
 const BRAND_RED = '#c41e3a';
+const BRAND_BLUE = '#1a237e';
 
-type Batch = { id: number; title?: string; name?: string; course_name?: string };
+type Filter = 'today' | 'overdue' | 'upcoming';
+
+type Occurrence = {
+  id: number;
+  displayLabel?: string;
+  batchName?: string;
+  schedule_date?: string;
+  due_at?: string;
+  done?: boolean;
+  library?: { response_type?: string; displayLabel?: string };
+};
 
 export default function MyAssignmentsScreen({ navigation }: any) {
   const { user } = useAuth();
-  const [batches, setBatches] = useState<Batch[]>([]);
+  const [filter, setFilter] = useState<Filter>('today');
+  const [rows, setRows] = useState<Occurrence[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
     if (!user) return;
     try {
-      const rows = await api.get('/batch-manager');
-      setBatches(Array.isArray(rows) ? rows : []);
+      const data = await api.get(`/assignments/my?filter=${encodeURIComponent(filter)}`);
+      setRows(Array.isArray(data) ? data : []);
     } catch {
-      setBatches([]);
+      setRows([]);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [user]);
+  }, [filter, user]);
 
   useFocusEffect(
     useCallback(() => {
       if (!user) return;
       setLoading(true);
-      load();
-    }, [load, user?.id])
+      void load();
+    }, [load, user?.id]),
   );
 
   if (!user) {
@@ -47,58 +67,113 @@ export default function MyAssignmentsScreen({ navigation }: any) {
     );
   }
 
-  if (loading) {
-    return (
-      <View style={styles.pageRoot}>
-        <ScreenPageTitle title="My Assignments" />
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color={BRAND_RED} />
-        </View>
-      </View>
-    );
-  }
-
   return (
     <View style={styles.container}>
       <ScreenPageTitle title="My Assignments" />
-      <Text style={styles.sub}>Choose a batch to open its assignments.</Text>
-      <FlatList style={styles.listFlex}
-        data={batches}
-        keyExtractor={(item) => String(item.id)}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
-        contentContainerStyle={styles.list}
-        ListEmptyComponent={<Text style={styles.empty}>No batches linked to your account yet.</Text>}
-        renderItem={({ item }) => (
+      <View style={styles.filters}>
+        {(
+          [
+            { id: 'today', label: 'Today' },
+            { id: 'overdue', label: 'Overdue' },
+            { id: 'upcoming', label: 'Upcoming' },
+          ] as const
+        ).map((f) => (
           <TouchableOpacity
-            style={styles.card}
-            onPress={() => navigation.navigate('Assignment', { batchId: item.id })}
+            key={f.id}
+            style={[styles.chip, filter === f.id && styles.chipOn]}
+            onPress={() => {
+              setFilter(f.id);
+              setLoading(true);
+            }}
           >
-            <Text style={styles.cardTitle}>{item.title || item.name}</Text>
-            {item.course_name ? <Text style={styles.cardSub}>{item.course_name}</Text> : null}
+            <Text style={[styles.chipText, filter === f.id && styles.chipTextOn]}>{f.label}</Text>
           </TouchableOpacity>
-        )}
-      />
+        ))}
+      </View>
+
+      {loading ? (
+        <View style={styles.centered}>
+          <ActivityIndicator size="large" color={BRAND_RED} />
+        </View>
+      ) : (
+        <FlatList
+          style={styles.listFlex}
+          data={rows}
+          keyExtractor={(item) => String(item.id)}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={() => {
+                setRefreshing(true);
+                void load();
+              }}
+            />
+          }
+          contentContainerStyle={styles.list}
+          ListEmptyComponent={
+            <Text style={styles.empty}>
+              {filter === 'today'
+                ? 'No assignments due today.'
+                : filter === 'overdue'
+                  ? 'No overdue assignments.'
+                  : 'No upcoming assignments.'}
+            </Text>
+          }
+          renderItem={({ item }) => (
+            <TouchableOpacity
+              style={styles.card}
+              onPress={() =>
+                navigation.navigate('AssignmentOccurrence', {
+                  occurrenceId: item.id,
+                  title: item.displayLabel || item.library?.displayLabel || 'Assignment',
+                })
+              }
+            >
+              <Text style={styles.cardTitle}>
+                {item.displayLabel || item.library?.displayLabel || `Assignment #${item.id}`}
+              </Text>
+              {item.batchName ? <Text style={styles.cardSub}>{item.batchName}</Text> : null}
+              <Text style={styles.cardMeta}>
+                {item.due_at ? `Due ${String(item.due_at).replace('T', ' ').slice(0, 16)}` : `Day ${item.schedule_date}`}
+                {item.done ? ' · Done' : ''}
+                {item.library?.response_type ? ` · ${item.library.response_type}` : ''}
+              </Text>
+            </TouchableOpacity>
+          )}
+        />
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  pageRoot: { flex: 1, backgroundColor: '#f5f5f5' },
-  container: { flex: 1, backgroundColor: '#f5f5f5', paddingTop: 0 },
+  pageRoot: { flex: 1, backgroundColor: '#f8fafc' },
+  container: { flex: 1, backgroundColor: '#f8fafc' },
+  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  hint: { color: '#64748b', textAlign: 'center' },
+  filters: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, paddingBottom: 8 },
+  chip: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  chipOn: { backgroundColor: BRAND_RED, borderColor: BRAND_RED },
+  chipText: { fontWeight: '700', color: '#64748b', fontSize: 13 },
+  chipTextOn: { color: '#fff' },
   listFlex: { flex: 1 },
-  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
-  hint: { color: '#666', textAlign: 'center' },
-  sub: { fontSize: 14, color: '#555', paddingHorizontal: 20, marginTop: 4, marginBottom: 12 },
-  list: { padding: 20, paddingBottom: 40 },
-  empty: { color: '#666', textAlign: 'center', paddingVertical: 32 },
+  list: { padding: 16, paddingTop: 4, gap: 10 },
+  empty: { color: '#94a3b8', textAlign: 'center', marginTop: 40 },
   card: {
     backgroundColor: '#fff',
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 16,
-    marginBottom: 12,
-    borderLeftWidth: 4,
-    borderLeftColor: BRAND_RED,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
-  cardTitle: { fontSize: 17, fontWeight: '700', color: '#222' },
-  cardSub: { fontSize: 14, color: '#666', marginTop: 4 },
+  cardTitle: { fontSize: 16, fontWeight: '800', color: BRAND_BLUE },
+  cardSub: { marginTop: 4, color: '#64748b', fontSize: 13 },
+  cardMeta: { marginTop: 8, color: '#94a3b8', fontSize: 12, fontWeight: '600' },
 });

@@ -750,6 +750,127 @@ function ensureV1Tables(db) {
   migrateBackfillCourseAccessGrants(db);
   migrateApplyCourseEnquiriesCallback(db);
   migrateTrainerPanel(db);
+  migrateAssignmentsOverhaul(db);
+}
+
+/** Library header/assets/response types + occurrences (replaces ad-hoc batch_assignments). */
+function migrateAssignmentsOverhaul(db) {
+  safeAlter(db, 'ALTER TABLE assignment_library ADD COLUMN label TEXT');
+  safeAlter(db, "ALTER TABLE assignment_library ADD COLUMN response_type TEXT DEFAULT 'file'");
+  safeAlter(db, 'ALTER TABLE assignment_library ADD COLUMN header_json TEXT');
+  safeAlter(db, 'ALTER TABLE assignment_library ADD COLUMN recurrence_json TEXT');
+  // title stays NOT NULL historically; new rows still get a derived/placeholder title for search.
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS assignment_assets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      assignment_id INTEGER NOT NULL REFERENCES assignment_library(id) ON DELETE CASCADE,
+      asset_type TEXT NOT NULL CHECK(asset_type IN ('image','video','audio','pdf','file','link','gif')),
+      url TEXT,
+      storage_key TEXT,
+      meta_json TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_assignment_assets_assignment
+      ON assignment_assets (assignment_id, sort_order, id);
+
+    CREATE TABLE IF NOT EXISTS assignment_occurrences (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      library_id INTEGER REFERENCES assignment_library(id) ON DELETE SET NULL,
+      source TEXT NOT NULL DEFAULT 'trainer_set' CHECK(source IN ('lesson','trainer_set','migrated')),
+      batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+      lesson_id INTEGER REFERENCES lesson_library(id) ON DELETE SET NULL,
+      schedule_date TEXT NOT NULL,
+      due_at TEXT,
+      notes TEXT,
+      recurrence_json TEXT,
+      parent_occurrence_id INTEGER REFERENCES assignment_occurrences(id) ON DELETE SET NULL,
+      max_score REAL DEFAULT 10,
+      legacy_batch_assignment_id INTEGER,
+      created_by INTEGER REFERENCES users(id),
+      created_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(batch_id, library_id, lesson_id, schedule_date, source)
+    );
+    CREATE INDEX IF NOT EXISTS idx_assignment_occurrences_batch_date
+      ON assignment_occurrences (batch_id, schedule_date, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_assignment_occurrences_library
+      ON assignment_occurrences (library_id, id DESC);
+
+    CREATE TABLE IF NOT EXISTS assignment_occurrence_students (
+      occurrence_id INTEGER NOT NULL REFERENCES assignment_occurrences(id) ON DELETE CASCADE,
+      student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      PRIMARY KEY (occurrence_id, student_id)
+    );
+  `);
+
+  safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN occurrence_id INTEGER REFERENCES assignment_occurrences(id) ON DELETE CASCADE');
+  safeAlter(db, "ALTER TABLE assignment_submissions ADD COLUMN response_type TEXT DEFAULT 'file'");
+  safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN text_body TEXT');
+  safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN mime_type TEXT');
+  safeAlter(db, "ALTER TABLE assignment_submissions ADD COLUMN status TEXT DEFAULT 'submitted'");
+
+  // Backfill library header_json from title where missing.
+  try {
+    const rows = db.prepare('SELECT id, title, header_json FROM assignment_library').all();
+    const upd = db.prepare('UPDATE assignment_library SET header_json = ?, label = COALESCE(label, ?) WHERE id = ?');
+    for (const r of rows) {
+      if (r.header_json) continue;
+      const title = String(r.title || '').trim() || 'Assignment';
+      upd.run(JSON.stringify({ type: 'text', text: title }), title, r.id);
+    }
+  } catch (_) {
+    /* ignore */
+  }
+
+  // Migrate legacy batch_assignments → library stubs + occurrences.
+  try {
+    const legacy = db.prepare('SELECT * FROM batch_assignments ORDER BY id').all();
+    const hasOcc = db.prepare(
+      'SELECT id FROM assignment_occurrences WHERE legacy_batch_assignment_id = ?',
+    );
+    const insLib = db.prepare(
+      `INSERT INTO assignment_library (title, description, content_html, created_by, is_draft, label, response_type, header_json)
+       VALUES (?, ?, ?, ?, 0, ?, 'file', ?)`,
+    );
+    const insOcc = db.prepare(
+      `INSERT INTO assignment_occurrences
+        (library_id, source, batch_id, lesson_id, schedule_date, due_at, notes, max_score, legacy_batch_assignment_id, created_by)
+       VALUES (?, 'migrated', ?, NULL, ?, ?, ?, ?, ?, ?)`,
+    );
+    const linkSub = db.prepare(
+      'UPDATE assignment_submissions SET occurrence_id = ?, response_type = COALESCE(response_type, ?) WHERE assignment_id = ? AND occurrence_id IS NULL',
+    );
+
+    for (const a of legacy) {
+      if (hasOcc.get(a.id)) continue;
+      const title = String(a.title || 'Assignment').trim() || 'Assignment';
+      const due = a.due_date ? String(a.due_date).slice(0, 10) : null;
+      const scheduleDate = due || new Date().toISOString().slice(0, 10);
+      const header = JSON.stringify({ type: 'text', text: title });
+      const lib = insLib.run(
+        title,
+        a.description || null,
+        a.description ? `<p>${String(a.description).replace(/</g, '&lt;')}</p>` : '',
+        a.created_by || null,
+        title,
+        header,
+      );
+      const occ = insOcc.run(
+        lib.lastInsertRowid,
+        a.batch_id,
+        scheduleDate,
+        a.due_date || null,
+        null,
+        a.max_score != null ? a.max_score : 10,
+        a.id,
+        a.created_by || null,
+      );
+      linkSub.run(occ.lastInsertRowid, 'file', a.id);
+    }
+  } catch (e) {
+    console.error('[migrateAssignmentsOverhaul] legacy migrate', e.message || e);
+  }
 }
 
 /** Trainer panel: batch completion, grading, ownership log, private notes. */

@@ -3,6 +3,25 @@ import SectionCard from '../components/SectionCard';
 import RichTextField from '../components/RichTextField';
 import TransferOwnerControl from '../components/TransferOwnerControl';
 
+const RESPONSE_TYPES = [
+  { id: 'text', label: 'Text' },
+  { id: 'image', label: 'Image' },
+  { id: 'video', label: 'Video' },
+  { id: 'file', label: 'File' },
+  { id: 'voice', label: 'Voice' },
+  { id: 'other', label: 'Other (mark done)' },
+];
+
+const HEADER_TYPES = [
+  { id: 'text', label: 'Text' },
+  { id: 'image', label: 'Image' },
+  { id: 'video', label: 'Video' },
+  { id: 'audio', label: 'Audio' },
+  { id: 'pdf', label: 'PDF' },
+  { id: 'file', label: 'File' },
+  { id: 'link', label: 'Link' },
+];
+
 function snippet(text, max = 96) {
   const t = String(text || '')
     .replace(/<[^>]+>/g, ' ')
@@ -21,6 +40,10 @@ function formatWhen(iso) {
   }
 }
 
+function displayName(a) {
+  return a?.displayLabel || a?.label || a?.title || `Assignment #${a?.id || ''}`;
+}
+
 export default function AssignmentsPage({
   assignments,
   showCreatedBy = false,
@@ -29,6 +52,8 @@ export default function AssignmentsPage({
   createAssignment,
   updateAssignment,
   deleteAssignment,
+  uploadAssignmentAsset,
+  deleteAssignmentAsset,
   staffUsers = [],
   onTransferOwner,
 }) {
@@ -40,26 +65,30 @@ export default function AssignmentsPage({
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorId, setEditorId] = useState(null);
   const [editorLoading, setEditorLoading] = useState(false);
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
   const [contentHtml, setContentHtml] = useState('');
+  const [responseType, setResponseType] = useState('file');
+  const [headerType, setHeaderType] = useState('text');
+  const [headerText, setHeaderText] = useState('');
+  const [headerUrl, setHeaderUrl] = useState('');
+  const [assets, setAssets] = useState([]);
+  const [recurring, setRecurring] = useState(false);
+  const [recurrenceFrequency, setRecurrenceFrequency] = useState('weekly');
+  const [recurrenceCount, setRecurrenceCount] = useState(4);
   const [editorSaving, setEditorSaving] = useState(false);
   const [editorNotice, setEditorNotice] = useState('');
+  const [uploadingAsset, setUploadingAsset] = useState(false);
 
   const filtered = useMemo(() => {
     const needle = q.toLowerCase().trim();
     if (!needle) return assignments || [];
     return (assignments || []).filter((a) => {
-      const t = String(a.title || '').toLowerCase();
-      const d = String(a.description || '').toLowerCase();
-      return t.includes(needle) || d.includes(needle);
+      const t = displayName(a).toLowerCase();
+      const body = String(a.content_html || '').toLowerCase();
+      return t.includes(needle) || body.includes(needle);
     });
   }, [assignments, q]);
 
-  const fetchOne = useCallback(
-    async (id) => loadAssignment(id),
-    [loadAssignment],
-  );
+  const fetchOne = useCallback(async (id) => loadAssignment(id), [loadAssignment]);
 
   useEffect(() => {
     if (!viewingId) {
@@ -83,12 +112,34 @@ export default function AssignmentsPage({
     };
   }, [viewingId, fetchOne]);
 
+  function buildHeader() {
+    if (headerType === 'text') return { type: 'text', text: headerText };
+    if (headerType === 'link') return { type: 'link', url: headerUrl, title: headerText || headerUrl };
+    return { type: headerType, url: headerUrl, text: headerText };
+  }
+
+  function buildRecurrence() {
+    if (!recurring) return null;
+    return {
+      frequency: recurrenceFrequency,
+      interval: 1,
+      count: Number(recurrenceCount) || 1,
+      byWeekday: recurrenceFrequency === 'weekly' ? [1, 2, 3, 4, 5] : undefined,
+    };
+  }
+
   function openCreate() {
     setEditorNotice('');
     setEditorId(null);
-    setTitle('');
-    setDescription('');
     setContentHtml('');
+    setResponseType('file');
+    setHeaderType('text');
+    setHeaderText('');
+    setHeaderUrl('');
+    setAssets([]);
+    setRecurring(false);
+    setRecurrenceFrequency('weekly');
+    setRecurrenceCount(4);
     setEditorOpen(true);
   }
 
@@ -99,9 +150,17 @@ export default function AssignmentsPage({
     setEditorLoading(true);
     try {
       const row = await fetchOne(id);
-      setTitle(row.title || '');
-      setDescription(row.description || '');
       setContentHtml(row.content_html || '');
+      setResponseType(row.response_type || 'file');
+      const h = row.header || {};
+      setHeaderType(h.type || 'text');
+      setHeaderText(h.text || h.title || '');
+      setHeaderUrl(h.url || '');
+      setAssets(Array.isArray(row.assets) ? row.assets : []);
+      const rec = row.recurrence;
+      setRecurring(Boolean(rec && rec.frequency));
+      if (rec?.frequency) setRecurrenceFrequency(rec.frequency);
+      if (rec?.count) setRecurrenceCount(rec.count);
     } catch (e) {
       setEditorNotice(e.message || 'Could not load');
       setEditorOpen(false);
@@ -130,10 +189,18 @@ export default function AssignmentsPage({
     return () => window.removeEventListener('keydown', onKey);
   }, [editorOpen, closeEditor]);
 
-  async function persist(payload) {
+  async function persist(isDraft) {
     setEditorSaving(true);
     setEditorNotice('');
     try {
+      const payload = {
+        header: buildHeader(),
+        contentHtml,
+        responseType,
+        recurrence: buildRecurrence(),
+        isDraft,
+        label: headerType === 'text' ? headerText : headerText || headerUrl,
+      };
       if (editorId == null) await createAssignment(payload);
       else await updateAssignment(editorId, payload);
       resetEditorPanel();
@@ -144,28 +211,38 @@ export default function AssignmentsPage({
     }
   }
 
-  async function saveDraft() {
-    const t = String(title || '').trim() || 'Untitled draft';
-    await persist({
-      title: t,
-      description,
-      contentHtml,
-      isDraft: true,
-    });
-  }
-
-  async function publish() {
-    const t = String(title || '').trim();
-    if (!t) {
-      window.alert('Enter a title before publishing.');
+  async function onAttachFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || editorId == null || !uploadAssignmentAsset) {
+      if (editorId == null) window.alert('Save a draft first, then attach files.');
       return;
     }
-    await persist({
-      title: t,
-      description,
-      contentHtml,
-      isDraft: false,
-    });
+    const ext = (file.name || '').split('.').pop()?.toLowerCase() || '';
+    let assetType = 'file';
+    if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) assetType = ext === 'gif' ? 'gif' : 'image';
+    else if (['mp4', 'mov', 'webm'].includes(ext)) assetType = 'video';
+    else if (['mp3', 'wav', 'm4a', 'aac'].includes(ext)) assetType = 'audio';
+    else if (ext === 'pdf') assetType = 'pdf';
+    setUploadingAsset(true);
+    try {
+      const asset = await uploadAssignmentAsset(editorId, file, assetType);
+      setAssets((prev) => [...prev, asset]);
+    } catch (err) {
+      window.alert(err.message || 'Upload failed');
+    } finally {
+      setUploadingAsset(false);
+    }
+  }
+
+  async function removeAsset(assetId) {
+    if (!deleteAssignmentAsset || editorId == null) return;
+    try {
+      await deleteAssignmentAsset(editorId, assetId);
+      setAssets((prev) => prev.filter((a) => a.id !== assetId));
+    } catch (err) {
+      window.alert(err.message || 'Could not remove');
+    }
   }
 
   async function removeRow(id) {
@@ -182,14 +259,14 @@ export default function AssignmentsPage({
     <div className="stack">
       <SectionCard
         title="Assignment Library"
-        subtitle="Short homework briefs with rich text — title, description, and instructions for learners"
+        subtitle="Header, instructions, attachments, and how learners respond — no separate title field"
       >
         <div className="assignmentLibraryToolbar">
           <input
             className="assignmentLibrarySearch"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search by title or description"
+            placeholder="Search assignments"
             aria-label="Search assignments"
           />
           <button type="button" className="uploadPrimaryBtn" onClick={openCreate}>
@@ -201,8 +278,8 @@ export default function AssignmentsPage({
           <table className="assignmentLibraryTable">
             <thead>
               <tr>
-                <th>Title</th>
-                <th>Description</th>
+                <th>Assignment</th>
+                <th>Response</th>
                 {showCreatedBy ? <th>Created by</th> : null}
                 <th>Status</th>
                 <th>Updated</th>
@@ -214,11 +291,15 @@ export default function AssignmentsPage({
                 const isDraft = Number(a.is_draft) === 1;
                 return (
                   <tr key={a.id}>
-                    <td className="assignmentLibraryTitleCell">{a.title || '—'}</td>
-                    <td className="muted assignmentLibraryDescCell">{snippet(a.description)}</td>
+                    <td className="assignmentLibraryTitleCell">{displayName(a)}</td>
+                    <td className="muted">{a.response_type || 'file'}</td>
                     {showCreatedBy ? <td>{a.creator_name || `#${a.created_by}` || '—'}</td> : null}
                     <td>
-                      {isDraft ? <span className="studyDraftBadge">Draft</span> : <span className="muted">Published</span>}
+                      {isDraft ? (
+                        <span className="studyDraftBadge">Draft</span>
+                      ) : (
+                        <span className="muted">Published</span>
+                      )}
                     </td>
                     <td className="muted assignmentLibraryDateCell">{formatWhen(a.updated_at)}</td>
                     <td>
@@ -251,16 +332,14 @@ export default function AssignmentsPage({
               })}
             </tbody>
           </table>
-          {filtered.length === 0 ? <p className="muted assignmentLibraryEmpty">No assignments match your search.</p> : null}
+          {filtered.length === 0 ? (
+            <p className="muted assignmentLibraryEmpty">No assignments match your search.</p>
+          ) : null}
         </div>
       </SectionCard>
 
       {viewingId ? (
-        <div
-          className="studyViewOverlay"
-          role="presentation"
-          onClick={() => setViewingId(null)}
-        >
+        <div className="studyViewOverlay" role="presentation" onClick={() => setViewingId(null)}>
           <div
             className="studyViewModal assignmentViewModal"
             role="dialog"
@@ -268,7 +347,9 @@ export default function AssignmentsPage({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="modalHead">
-              <h3 id="assignment-view-title">{viewLoading ? 'Loading…' : viewDetail?.title || 'Assignment'}</h3>
+              <h3 id="assignment-view-title">
+                {viewLoading ? 'Loading…' : displayName(viewDetail) || 'Assignment'}
+              </h3>
               <button type="button" className="secondaryBtn" onClick={() => setViewingId(null)}>
                 Close
               </button>
@@ -277,49 +358,16 @@ export default function AssignmentsPage({
               <p className="muted">Loading assignment…</p>
             ) : viewDetail ? (
               <>
-                {viewDetail.description ? (
-                  <p className="fieldHint" style={{ marginTop: 0 }}>
-                    {viewDetail.description}
-                  </p>
-                ) : null}
+                <p className="fieldHint" style={{ marginTop: 0 }}>
+                  Response type: <strong>{viewDetail.response_type || 'file'}</strong>
+                </p>
                 {Number(viewDetail.is_draft) === 1 ? (
-                  <p className="studyDraftBanner">This assignment is a draft and is hidden from learners until published.</p>
+                  <p className="studyDraftBanner">Draft — hidden from learners until published.</p>
                 ) : null}
                 <div
                   className="studyViewPreviewWrap assignmentViewHtml"
                   dangerouslySetInnerHTML={{ __html: viewDetail.content_html || '' }}
                 />
-                <div className="row" style={{ marginTop: 12 }}>
-                  {libraryCanMutate(viewDetail) ? (
-                    <>
-                      <button
-                        type="button"
-                        className="secondaryBtn"
-                        onClick={() => {
-                          const id = viewDetail.id;
-                          setViewingId(null);
-                          openEdit(id);
-                        }}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        className="dangerBtn"
-                        onClick={async () => {
-                          await removeRow(viewDetail.id);
-                          setViewingId(null);
-                        }}
-                      >
-                        Delete
-                      </button>
-                    </>
-                  ) : (
-                    <p className="muted" style={{ margin: 0 }}>
-                      You can view this assignment; only the author or staff can edit or delete it.
-                    </p>
-                  )}
-                </div>
               </>
             ) : (
               <p className="muted">Could not load this assignment.</p>
@@ -350,41 +398,106 @@ export default function AssignmentsPage({
                 className="assignmentEditorForm"
                 onSubmit={(e) => {
                   e.preventDefault();
-                  publish();
+                  void persist(false);
                 }}
               >
                 <div className="courseFormField">
-                  <label className="fieldLabel" htmlFor="assignment-title">
-                    Title
-                  </label>
-                  <input
-                    id="assignment-title"
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    placeholder="Assignment title"
-                    autoComplete="off"
-                  />
-                  <p className="fieldHint">Required to publish. Drafts may use “Untitled draft” until you name it.</p>
+                  <label className="fieldLabel">Header</label>
+                  <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                    <select value={headerType} onChange={(e) => setHeaderType(e.target.value)}>
+                      {HEADER_TYPES.map((h) => (
+                        <option key={h.id} value={h.id}>
+                          {h.label}
+                        </option>
+                      ))}
+                    </select>
+                    {headerType === 'text' || headerType === 'link' ? (
+                      <input
+                        style={{ flex: 1, minWidth: 180 }}
+                        value={headerText}
+                        onChange={(e) => setHeaderText(e.target.value)}
+                        placeholder={headerType === 'link' ? 'Link title (optional)' : 'Header text'}
+                      />
+                    ) : null}
+                    {headerType !== 'text' ? (
+                      <input
+                        style={{ flex: 1, minWidth: 180 }}
+                        value={headerUrl}
+                        onChange={(e) => setHeaderUrl(e.target.value)}
+                        placeholder="URL or uploaded asset URL"
+                      />
+                    ) : null}
+                  </div>
                 </div>
 
                 <div className="courseFormField">
-                  <label className="fieldLabel" htmlFor="assignment-desc">
-                    Description
-                  </label>
-                  <textarea
-                    id="assignment-desc"
-                    className="courseTextarea"
-                    rows={2}
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                    placeholder="Brief summary (optional) — shown in lists and alongside the title"
-                  />
+                  <label className="fieldLabel">Response type</label>
+                  <select value={responseType} onChange={(e) => setResponseType(e.target.value)}>
+                    {RESPONSE_TYPES.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
                 <div className="courseFormField">
                   <label className="fieldLabel">Assignment content</label>
-                  <p className="fieldHint">Instructions, tasks, links, and formatting for learners.</p>
                   <RichTextField value={contentHtml} onChange={setContentHtml} />
+                </div>
+
+                <div className="courseFormField">
+                  <label className="fieldLabel">Attachments</label>
+                  {editorId == null ? (
+                    <p className="fieldHint">Save a draft first to upload attachments.</p>
+                  ) : (
+                    <>
+                      <input type="file" onChange={onAttachFile} disabled={uploadingAsset} />
+                      <ul className="muted">
+                        {assets.map((a) => (
+                          <li key={a.id}>
+                            {a.asset_type}: {a.url || '—'}{' '}
+                            <button type="button" className="dangerBtn" onClick={() => removeAsset(a.id)}>
+                              Remove
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                </div>
+
+                <div className="courseFormField">
+                  <label className="fieldLabel">
+                    <input
+                      type="checkbox"
+                      checked={recurring}
+                      onChange={(e) => setRecurring(e.target.checked)}
+                    />{' '}
+                    Recurring template (used when setting for batches)
+                  </label>
+                  {recurring ? (
+                    <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                      <select
+                        value={recurrenceFrequency}
+                        onChange={(e) => setRecurrenceFrequency(e.target.value)}
+                      >
+                        <option value="daily">Daily</option>
+                        <option value="weekly">Weekly (weekdays)</option>
+                      </select>
+                      <label>
+                        Occurrences{' '}
+                        <input
+                          type="number"
+                          min={1}
+                          max={60}
+                          value={recurrenceCount}
+                          onChange={(e) => setRecurrenceCount(e.target.value)}
+                          style={{ width: 64 }}
+                        />
+                      </label>
+                    </div>
+                  ) : null}
                 </div>
 
                 {editorNotice ? (
@@ -398,7 +511,7 @@ export default function AssignmentsPage({
                     type="button"
                     className="studySaveDraftCloseBtn"
                     disabled={editorSaving}
-                    onClick={() => saveDraft()}
+                    onClick={() => void persist(true)}
                   >
                     Save draft &amp; close
                   </button>

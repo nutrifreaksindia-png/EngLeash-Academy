@@ -16,6 +16,7 @@ import SettingsPage from './pages/SettingsPage';
 import StudyMaterialsPage from './pages/StudyMaterialsPage';
 import WorksheetsPage from './pages/WorksheetsPage';
 import AssignmentsPage from './pages/AssignmentsPage';
+import TrainerAssignmentsPage from './pages/TrainerAssignmentsPage';
 import BillingPage from './pages/BillingPage';
 import PaymentsPage from './pages/PaymentsPage';
 import SubscriptionsPage from './pages/SubscriptionsPage';
@@ -1532,6 +1533,52 @@ export default function App() {
     await loadAll();
   }
 
+  async function uploadAssignmentAsset(id, file, assetType) {
+    const body = new FormData();
+    body.append('file', file);
+    body.append('assetType', assetType);
+    const res = await fetch(`${API_BASE}/api/assignments/${id}/assets`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Assignment asset upload failed');
+    return data;
+  }
+
+  async function deleteAssignmentAsset(id, assetId) {
+    await apiFetch(`/assignments/${id}/assets/${assetId}`, token, { method: 'DELETE' });
+  }
+
+  async function loadTrainerOccurrences({ batchId } = {}) {
+    const q = batchId != null ? `?batchId=${encodeURIComponent(batchId)}` : '';
+    return apiFetch(`/assignments/trainer${q}`, token);
+  }
+
+  async function loadTrainerResponses({ batchId } = {}) {
+    const q = batchId != null ? `?batchId=${encodeURIComponent(batchId)}` : '';
+    return apiFetch(`/assignments/trainer/responses${q}`, token);
+  }
+
+  async function setAssignment(payload) {
+    return apiFetch('/assignments/set', token, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async function reviewOccurrenceSubmission(occurrenceId, submissionId, payload) {
+    return apiFetch(`/assignments/occurrences/${occurrenceId}/submissions/${submissionId}/review`, token, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async function loadBatchMembersForSet(batchId) {
+    return apiFetch(`/batch-manager/${batchId}/members`, token);
+  }
+
   let page = null;
   /** Classroom learners only — excludes trainers/admins mistakenly grouped here. */
   const studentAccounts = users.filter((u) => u.role === 'Student');
@@ -1665,7 +1712,6 @@ export default function App() {
         batchTrainers={batchTrainers}
         batchSessions={batchSessions}
         fetchBatchAssignments={fetchBatchAssignments}
-        createBatchAssignment={createBatchAssignment}
         fetchAssignmentSubmissions={fetchAssignmentSubmissions}
         fetchBatchAttendance={fetchBatchAttendance}
         fetchBatchLiveRecordings={fetchBatchLiveRecordings}
@@ -1699,7 +1745,6 @@ export default function App() {
         onRemoveBatchTrainer={removeBatchTrainer}
         batchSessions={batchSessions}
         fetchBatchAssignments={fetchBatchAssignments}
-        createBatchAssignment={createBatchAssignment}
         fetchAssignmentSubmissions={fetchAssignmentSubmissions}
         fetchBatchAttendance={fetchBatchAttendance}
         fetchBatchLiveRecordings={fetchBatchLiveRecordings}
@@ -1824,7 +1869,7 @@ export default function App() {
       />
     );
   } else if (currentPage === 'assignments') {
-    page = (
+    const libraryPage = (
       <AssignmentsPage
         assignments={assignments}
         showCreatedBy={showCreatedBy}
@@ -1833,9 +1878,40 @@ export default function App() {
         createAssignment={createAssignment}
         updateAssignment={updateAssignment}
         deleteAssignment={deleteAssignment}
+        uploadAssignmentAsset={uploadAssignmentAsset}
+        deleteAssignmentAsset={deleteAssignmentAsset}
         staffUsers={staffUsers}
         onTransferOwner={onTransferOwner}
       />
+    );
+    page = isTrainer ? (
+      <div className="stack">
+        <TrainerAssignmentsPage
+          batches={batches}
+          assignmentsLibrary={assignments}
+          loadTrainerOccurrences={loadTrainerOccurrences}
+          loadTrainerResponses={loadTrainerResponses}
+          setAssignment={setAssignment}
+          reviewSubmission={reviewOccurrenceSubmission}
+          loadBatchMembers={loadBatchMembersForSet}
+        />
+        {libraryPage}
+      </div>
+    ) : isAdmin ? (
+      <div className="stack">
+        <TrainerAssignmentsPage
+          batches={batches}
+          assignmentsLibrary={assignments}
+          loadTrainerOccurrences={loadTrainerOccurrences}
+          loadTrainerResponses={loadTrainerResponses}
+          setAssignment={setAssignment}
+          reviewSubmission={reviewOccurrenceSubmission}
+          loadBatchMembers={loadBatchMembersForSet}
+        />
+        {libraryPage}
+      </div>
+    ) : (
+      libraryPage
     );
   }
 

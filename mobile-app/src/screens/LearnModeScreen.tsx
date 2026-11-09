@@ -188,8 +188,6 @@ export default function LearnModeScreen({ route, navigation }: any) {
         await markGenericDone(user.id, courseId, lessonId, 'notes', slide.contentId, summary);
       } else if (slide.kind === 'open_pdf_sheet') {
         await markGenericDone(user.id, courseId, lessonId, 'pdf_worksheet', slide.contentId, summary);
-      } else if (slide.kind === 'assignment') {
-        await markGenericDone(user.id, courseId, lessonId, 'assignment', slide.contentId, summary);
       } else if (slide.kind === 'done') {
         await markLessonCompletedIfDone(user.id, courseId, lessonId, summary);
       }
@@ -542,7 +540,7 @@ export default function LearnModeScreen({ route, navigation }: any) {
         user.id,
         courseId,
         lessonId,
-        slide.contentId,
+        Number(slide.contentId),
         summaryRef.current,
       );
     },
@@ -757,25 +755,6 @@ export default function LearnModeScreen({ route, navigation }: any) {
               onPress={() => navigation.navigate('Worksheet', { worksheets: item.worksheets })}
             >
               <Text style={styles.primaryBtnText}>Open worksheet files</Text>
-            </TouchableOpacity>
-          </View>
-        );
-
-      case 'assignment':
-        return (
-          <View style={[styles.page, styles.centerSheet, pagePad]}>
-            <Text style={styles.sectionLabel}>{item.title}</Text>
-            {item.description ? <Text style={styles.submitHint}>{item.description}</Text> : null}
-            <TouchableOpacity
-              style={styles.primaryBtn}
-              onPress={() =>
-                navigation.navigate('AssignmentLibraryDetail', {
-                  assignmentId: item.assignmentId,
-                  title: item.title,
-                })
-              }
-            >
-              <Text style={styles.primaryBtnText}>Open assignment</Text>
             </TouchableOpacity>
           </View>
         );
@@ -1012,22 +991,46 @@ export default function LearnModeScreen({ route, navigation }: any) {
   const footerNext = nextLessonFooterAction(slides, index);
   const showCloseFooter = currentSlide?.kind === 'done';
 
+  const flushCurrentVideoProgress = useCallback(async () => {
+    if (!user?.id) return;
+    const cur = slidesRef.current[index];
+    if (!cur || cur.kind !== 'video') return;
+    await markVideoWatched(user.id, courseId, lessonId, Number(cur.contentId), summaryRef.current);
+  }, [courseId, index, lessonId, user?.id]);
+
   const goFooterNext = useCallback(() => {
     const action = nextLessonFooterAction(slidesRef.current, index);
     if (!action) {
       navigation.goBack();
       return;
     }
-    if (action.kind === 'done') {
-      transitionToSlide(action.doneIndex);
-      return;
-    }
-    if (action.item.category === 'quiz' && action.item.quizKey) {
-      openQuizSquare(action.item.quizKey);
-      return;
-    }
-    transitionToSlide(action.item.firstIndex);
-  }, [index, navigation, openQuizSquare, transitionToSlide]);
+    void (async () => {
+      // Persist the current video before leaving — otherwise the end screen can load at 0%
+      // while the async playback mark is still writing (then lesson detail shows 100% after Close).
+      await flushCurrentVideoProgress();
+      if (action.kind === 'done') {
+        if (user?.id) {
+          await markLessonCompletedIfDone(user.id, courseId, lessonId, summaryRef.current);
+        }
+        transitionToSlide(action.doneIndex);
+        return;
+      }
+      if (action.item.category === 'quiz' && action.item.quizKey) {
+        openQuizSquare(action.item.quizKey);
+        return;
+      }
+      transitionToSlide(action.item.firstIndex);
+    })();
+  }, [
+    courseId,
+    flushCurrentVideoProgress,
+    index,
+    lessonId,
+    navigation,
+    openQuizSquare,
+    transitionToSlide,
+    user?.id,
+  ]);
 
   return (
     <View style={[styles.root, { paddingTop: insets.top }]}>
