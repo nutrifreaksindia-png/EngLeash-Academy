@@ -12,7 +12,6 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { joinOpensAtLabel, userMayJoinLiveSession } from '../utils/liveJoinWindow';
@@ -327,7 +326,6 @@ export default function LiveSessionsScreen({ navigation }: any) {
   if (loading) {
     return (
       <View style={styles.container}>
-        <ScreenPageTitle title="My Sessions" />
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={BRAND_RED} />
         </View>
@@ -337,7 +335,6 @@ export default function LiveSessionsScreen({ navigation }: any) {
 
   return (
     <View style={styles.container}>
-      <ScreenPageTitle title="My Sessions" />
       <ScrollView
         style={styles.listFlex}
         contentContainerStyle={styles.content}

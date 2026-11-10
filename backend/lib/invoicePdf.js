@@ -177,7 +177,8 @@ function streamInvoicePdf(res, bundle) {
   const filename = `${invoice.invoiceNumber || `invoice-${payment.id}`}.pdf`;
 
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  // inline so mobile/web viewers can display without forcing a download
+  res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
   doc.pipe(res);
 
   const logoPath = path.join(__dirname, '..', '..', 'brand', 'logo_long.jpg');

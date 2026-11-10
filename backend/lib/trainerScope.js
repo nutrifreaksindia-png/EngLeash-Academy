@@ -66,6 +66,8 @@ const VISIBLE_ITEMS_SQL = {
           WHERE ${MAPPING_IN_SCOPE}`,
   assignment: `
     SELECT id FROM assignment_library WHERE created_by = @uid
+    UNION SELECT id FROM assignment_library
+          WHERE COALESCE(is_public, 0) = 1 AND COALESCE(is_draft, 0) = 0
     UNION ${lessonItemsSql('assignment')}`,
 };
 

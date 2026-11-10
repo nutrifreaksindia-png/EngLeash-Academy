@@ -6,6 +6,7 @@ const { auth, requireRole } = require('../middleware/auth');
 const { isSpacesConfigured, uploadToSpaces, deleteObjectsUnderPrefix } = require('../services/spaces');
 const {
   canMutateLibraryByCreatedBy,
+  canSetAssignmentPublic,
   canViewAssignment,
   hideOthersDrafts,
   stripCreatorFields,
@@ -29,16 +30,74 @@ const {
   serializeLibraryRow,
   parseJsonSafe,
   academyToday,
+  addDaysYmd,
   RESPONSE_TYPES,
 } = require('../lib/assignmentHelpers');
+const { expiresAtFromRetentionDays } = require('../lib/appSettings');
 
 const router = express.Router();
 const uploadSingle = uploadMemory.single('file');
+/** Accept legacy `file` and multi `files` in one request. */
+const uploadSubmissionMedia = uploadMemory.fields([
+  { name: 'file', maxCount: 1 },
+  { name: 'files', maxCount: 20 },
+]);
+
+function collectUploadedFiles(req) {
+  const out = [];
+  const bag = req.files || {};
+  for (const f of bag.files || []) out.push(f);
+  for (const f of bag.file || []) out.push(f);
+  if (req.file) out.push(req.file);
+  return out;
+}
+
+function listSubmissionFiles(submissionId) {
+  return db
+    .prepare(
+      `SELECT id, submission_id, file_key, file_url, mime_type, kind, file_name, sort_order, created_at
+       FROM assignment_submission_files
+       WHERE submission_id = ?
+       ORDER BY sort_order ASC, id ASC`,
+    )
+    .all(submissionId);
+}
+
+function serializeSubmissionFiles(submission, spacesExpired) {
+  if (!submission?.id) return [];
+  let rows = listSubmissionFiles(submission.id);
+  if (!rows.length && submission.file_url) {
+    rows = [
+      {
+        id: null,
+        submission_id: submission.id,
+        file_key: submission.file_key || '',
+        file_url: submission.file_url,
+        mime_type: submission.mime_type || null,
+        kind: submission.response_type || 'file',
+        file_name: null,
+        sort_order: 0,
+      },
+    ];
+  }
+  return rows.map((f) => ({
+    id: f.id,
+    url: spacesExpired ? '' : f.file_url || '',
+    mime_type: f.mime_type || null,
+    kind: f.kind || submission.response_type || 'file',
+    file_name: f.file_name || null,
+    sort_order: f.sort_order || 0,
+  }));
+}
 
 function truthyDraft(val) {
   if (val === true || val === 1 || val === '1') return true;
   if (String(val).toLowerCase() === 'true') return true;
   return false;
+}
+
+function truthyFlag(val) {
+  return truthyDraft(val);
 }
 
 function normalizeContentHtml(val) {
@@ -122,8 +181,9 @@ function materializeLessonOccurrencesForBatch(batchId, onOrBeforeYmd) {
       const libId = Number(it.item_id);
       const lib = db.prepare('SELECT id, is_draft FROM assignment_library WHERE id = ?').get(libId);
       if (!lib || Number(lib.is_draft) === 1) continue;
-      // Due end of schedule day by default for lesson-sourced.
-      ins.run(libId, batchId, lessonId, scheduleDate, `${scheduleDate}T23:59:59`);
+      // Lesson-sourced: due end of the next calendar day after the session.
+      const dueYmd = addDaysYmd(scheduleDate, 1);
+      ins.run(libId, batchId, lessonId, scheduleDate, `${dueYmd}T23:59:59`);
     }
   }
 }
@@ -144,19 +204,58 @@ function occurrencePayload(row, studentId = null) {
       )
       .get(row.id, studentId);
   }
-  const batch = db.prepare('SELECT id, name, title FROM batches WHERE id = ?').get(row.batch_id);
+  const batch = db
+    .prepare('SELECT id, name, title, batch_number, trainer_id FROM batches WHERE id = ?')
+    .get(row.batch_id);
+  const spacesStatus = submission?.spaces_status === 'expired' ? 'expired' : 'active';
+  const spacesExpired = spacesStatus === 'expired';
+  const batchTitle = batch?.title || batch?.name || null;
+  const batchNumber = batch?.batch_number != null ? Number(batch.batch_number) : null;
+  const batchTrainerName = batch?.trainer_id
+    ? db.prepare('SELECT name FROM users WHERE id = ?').get(batch.trainer_id)?.name || null
+    : null;
+  let reviewerName = null;
+  if (submission?.reviewed_by) {
+    reviewerName =
+      db.prepare('SELECT name FROM users WHERE id = ?').get(submission.reviewed_by)?.name || null;
+  }
+  if (!reviewerName) reviewerName = batchTrainerName;
   return {
     ...row,
     displayLabel: derivedAssignmentLabel(lib || { id: row.library_id, title: row.notes }),
     library: lib ? serializeLibraryRow(lib, assets) : null,
-    batchName: batch?.title || batch?.name || null,
-    submission,
+    batchName:
+      batchTitle && batchNumber != null
+        ? `${batchTitle} · #${batchNumber}`
+        : batchTitle,
+    batch_number: batchNumber,
+    batch_trainer_name: batchTrainerName,
+    submission: submission
+      ? (() => {
+          const files = serializeSubmissionFiles(submission, spacesExpired);
+          const primaryUrl = spacesExpired
+            ? ''
+            : files[0]?.url || submission.file_url || '';
+          return {
+            ...submission,
+            file_url: primaryUrl,
+            mime_type: files[0]?.mime_type || submission.mime_type || null,
+            spaces_status: spacesStatus,
+            spacesExpired,
+            reviewer_name: reviewerName,
+            files,
+          };
+        })()
+      : null,
+    spacesExpired,
     done: Boolean(
       submission &&
         (submission.status === 'done' ||
           submission.status === 'submitted' ||
           submission.file_url ||
-          submission.text_body),
+          submission.text_body ||
+          spacesExpired ||
+          listSubmissionFiles(submission.id).length > 0),
     ),
   };
 }
@@ -168,8 +267,11 @@ router.get('/', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => 
     .prepare(
       `
     SELECT m.id, m.title, m.description, m.label, m.response_type, m.header_json, m.is_draft,
-           m.created_by, m.created_at, m.updated_at, m.content_html, m.recurrence_json,
-           MAX(cu.name) AS creator_name
+           m.is_public, m.created_by, m.created_at, m.updated_at, m.content_html, m.recurrence_json,
+           MAX(cu.name) AS creator_name,
+           (
+             SELECT COUNT(*) FROM assignment_assets aa WHERE aa.assignment_id = m.id
+           ) AS asset_count
     FROM assignment_library m
     LEFT JOIN users cu ON cu.id = m.created_by
     GROUP BY m.id
@@ -186,6 +288,8 @@ router.get('/', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => 
         displayLabel: derivedAssignmentLabel(r),
         response_type: normalizeResponseType(r.response_type),
         header: normalizeHeader(r.header_json),
+        is_public: Number(r.is_public) === 1 ? 1 : 0,
+        asset_count: Number(r.asset_count) || 0,
       })),
     ),
   );
@@ -207,17 +311,26 @@ router.post('/', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) =>
       label = 'Untitled draft';
     }
     const title = label.slice(0, 200);
+    let isPublic = 0;
+    if (req.body?.isPublic !== undefined || req.body?.is_public !== undefined) {
+      isPublic = truthyFlag(req.body?.isPublic ?? req.body?.is_public) ? 1 : 0;
+    }
+    if (isDraft) isPublic = 0;
+    if (isPublic && !canSetAssignmentPublic(req.user, { created_by: req.user.id })) {
+      return res.status(403).json({ error: 'Only admins or the creating trainer can make an assignment public' });
+    }
     const r = db
       .prepare(
         `INSERT INTO assignment_library
-          (title, description, content_html, created_by, is_draft, label, response_type, header_json, recurrence_json)
-         VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+          (title, description, content_html, created_by, is_draft, is_public, label, response_type, header_json, recurrence_json)
+         VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         title,
         contentHtml,
         req.user.id,
         isDraft ? 1 : 0,
+        isPublic,
         label,
         responseType,
         header ? JSON.stringify(header) : JSON.stringify({ type: 'text', text: label }),
@@ -256,6 +369,7 @@ router.get('/my', auth, requireRole('Student', 'Lab', 'Admin', 'Trainer'), (req,
       `SELECT o.*
        FROM assignment_occurrences o
        WHERE o.batch_id IN (${placeholders})
+         AND COALESCE(o.status, 'active') != 'cancelled'
        ORDER BY o.schedule_date DESC, o.id DESC`,
     )
     .all(...batchIds);
@@ -268,10 +382,19 @@ router.get('/my', auth, requireRole('Student', 'Lab', 'Admin', 'Trainer'), (req,
     const dueDay = row.due_at ? String(row.due_at).slice(0, 10) : scheduleDate;
     const done = payload.done;
 
-    if (filter === 'today') {
-      if (scheduleDate === today || dueDay === today) out.push(payload);
+    // Filters:
+    // - due_today / today: open window from schedule day through due date (inclusive), not completed
+    // - overdue: past due, not completed
+    // - upcoming: schedule day still in the future, not completed
+    // - completed: submitted / done
+    if (done) {
+      if (filter === 'completed') out.push(payload);
+    } else if (filter === 'completed') {
+      /* skip open items */
+    } else if (filter === 'today' || filter === 'due_today') {
+      if (scheduleDate && dueDay && scheduleDate <= today && dueDay >= today) out.push(payload);
     } else if (filter === 'overdue') {
-      if (!done && dueDay && dueDay < today && scheduleDate <= today) out.push(payload);
+      if (dueDay && dueDay < today) out.push(payload);
     } else if (filter === 'upcoming') {
       if (scheduleDate > today) out.push(payload);
     } else {
@@ -281,13 +404,93 @@ router.get('/my', auth, requireRole('Student', 'Lab', 'Admin', 'Trainer'), (req,
   res.json(out);
 });
 
+router.get('/my/counts', auth, requireRole('Student', 'Lab', 'Admin', 'Trainer'), (req, res) => {
+  const today = academyToday();
+  const batchIds = studentBatchIds(req.user.id);
+  if (!batchIds.length) {
+    return res.json({ today: 0, due_today: 0, overdue: 0, upcoming: 0, completed: 0 });
+  }
+
+  for (const bid of batchIds) {
+    materializeLessonOccurrencesForBatch(bid, today);
+  }
+
+  const placeholders = batchIds.map(() => '?').join(',');
+  const rows = db
+    .prepare(
+      `SELECT o.*
+       FROM assignment_occurrences o
+       WHERE o.batch_id IN (${placeholders})
+         AND COALESCE(o.status, 'active') != 'cancelled'`,
+    )
+    .all(...batchIds);
+
+  let todayCount = 0;
+  let overdueCount = 0;
+  let upcomingCount = 0;
+  let completedCount = 0;
+  for (const row of rows) {
+    if (!isStudentTargeted(row.id, req.user.id)) continue;
+    const payload = occurrencePayload(row, req.user.id);
+    const scheduleDate = String(row.schedule_date || '').slice(0, 10);
+    const dueDay = row.due_at ? String(row.due_at).slice(0, 10) : scheduleDate;
+    const done = payload.done;
+    if (done) {
+      completedCount += 1;
+      continue;
+    }
+    if (scheduleDate && dueDay && scheduleDate <= today && dueDay >= today) todayCount += 1;
+    if (dueDay && dueDay < today) overdueCount += 1;
+    if (scheduleDate > today) upcomingCount += 1;
+  }
+  res.json({
+    today: todayCount,
+    due_today: todayCount,
+    overdue: overdueCount,
+    upcoming: upcomingCount,
+    completed: completedCount,
+  });
+});
+
+/** Resolve lesson schedule day (Day 1, Day 2…) → session_date for a batch. */
+function resolveBatchSessionDate(batchId, displayDay) {
+  const sessions = db
+    .prepare(
+      `SELECT session_day, session_date, lesson_title, status
+       FROM batch_sessions
+       WHERE batch_id = ?
+       ORDER BY session_day`,
+    )
+    .all(batchId);
+  let display = 0;
+  for (const s of sessions) {
+    if (String(s.status || '') === 'cancelled') continue;
+    display += 1;
+    if (display === Number(displayDay)) {
+      const ymd = String(s.session_date || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) {
+        throw new Error(`Batch ${batchId} day ${displayDay} has no session date`);
+      }
+      return { scheduleDate: ymd, sessionDay: s.session_day, lessonTitle: s.lesson_title || null };
+    }
+  }
+  throw new Error(`Batch ${batchId} has no lesson schedule day ${displayDay}`);
+}
+
 router.post('/set', auth, requireRole('Admin', 'Trainer'), (req, res) => {
   try {
     const libraryIds = Array.isArray(req.body?.libraryIds)
       ? req.body.libraryIds.map(Number).filter(Boolean)
       : [];
     const batchIds = Array.isArray(req.body?.batchIds) ? req.body.batchIds.map(Number).filter(Boolean) : [];
-    const day = String(req.body?.day || req.body?.scheduleDate || '').slice(0, 10);
+    const sessionDayRaw = req.body?.sessionDay ?? req.body?.lessonDay ?? null;
+    const legacyDay = String(req.body?.day || req.body?.scheduleDate || '').slice(0, 10);
+    const sessionDay =
+      sessionDayRaw != null && String(sessionDayRaw).trim() !== ''
+        ? Number(sessionDayRaw)
+        : Number.isFinite(Number(req.body?.day)) && !/^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.day || ''))
+          ? Number(req.body.day)
+          : null;
     const dueAt = req.body?.dueAt != null ? String(req.body.dueAt) : null;
     const notes = req.body?.notes != null ? String(req.body.notes) : null;
     const studentIds = Array.isArray(req.body?.studentIds)
@@ -298,7 +501,10 @@ router.post('/set', auth, requireRole('Admin', 'Trainer'), (req, res) => {
 
     if (!libraryIds.length) return res.status(400).json({ error: 'libraryIds required' });
     if (!batchIds.length) return res.status(400).json({ error: 'batchIds required' });
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return res.status(400).json({ error: 'day must be YYYY-MM-DD' });
+    const useSessionDay = Number.isFinite(sessionDay) && sessionDay >= 1;
+    if (!useSessionDay && !/^\d{4}-\d{2}-\d{2}$/.test(legacyDay)) {
+      return res.status(400).json({ error: 'sessionDay (lesson Day 1, 2, …) is required' });
+    }
 
     if (req.user.role === 'Trainer') {
       const allowed = new Set(trainerBatchIds(req.user.id));
@@ -323,9 +529,15 @@ router.post('/set', auth, requireRole('Admin', 'Trainer'), (req, res) => {
         if (!lib || Number(lib.is_draft) === 1) {
           throw new Error(`Assignment ${libId} not found or is draft`);
         }
+        if (!trainerCanViewLibraryItem(req.user, 'assignment', libId)) {
+          throw new Error(`Assignment ${libId} is not available to assign`);
+        }
         const rule = recurrence || parseJsonSafe(lib.recurrence_json, null);
-        const dates = expandRecurrenceDates(day, rule);
         for (const bid of batchIds) {
+          const startYmd = useSessionDay
+            ? resolveBatchSessionDate(bid, sessionDay).scheduleDate
+            : legacyDay;
+          const dates = expandRecurrenceDates(startYmd, rule);
           let parentId = null;
           dates.forEach((scheduleDate, idx) => {
             const due =
@@ -383,6 +595,7 @@ router.get('/trainer', auth, requireRole('Admin', 'Trainer'), (req, res) => {
     .prepare(
       `SELECT o.* FROM assignment_occurrences o
        WHERE o.batch_id IN (${placeholders})
+         AND COALESCE(o.status, 'active') != 'cancelled'
        ORDER BY o.schedule_date DESC, o.id DESC
        LIMIT 500`,
     )
@@ -401,25 +614,38 @@ router.get('/trainer/responses', auth, requireRole('Admin', 'Trainer'), (req, re
   const placeholders = batchIds.map(() => '?').join(',');
   const rows = db
     .prepare(
-      `SELECT s.*, o.schedule_date, o.due_at, o.batch_id AS occ_batch_id, o.library_id,
-              u.name AS student_name, b.title AS batch_title, b.name AS batch_name
+      `SELECT s.*, o.schedule_date, o.due_at, o.batch_id AS occ_batch_id, o.library_id, o.max_score AS occurrence_max_score,
+              u.name AS student_name, b.title AS batch_title, b.name AS batch_name, b.batch_number
        FROM assignment_submissions s
        JOIN assignment_occurrences o ON o.id = s.occurrence_id
        JOIN users u ON u.id = s.student_id
        JOIN batches b ON b.id = o.batch_id
        WHERE o.batch_id IN (${placeholders})
-       ORDER BY s.submitted_at DESC, s.id DESC
+         AND COALESCE(o.status, 'active') != 'cancelled'
+       ORDER BY
+         CASE WHEN COALESCE(s.review_status, 'pending') = 'pending' THEN 0 ELSE 1 END,
+         s.submitted_at DESC, s.id DESC
        LIMIT 500`,
     )
     .all(...batchIds);
   res.json(
-    rows.map((r) => ({
-      ...r,
-      displayLabel: derivedAssignmentLabel(
-        db.prepare('SELECT * FROM assignment_library WHERE id = ?').get(r.library_id) || {},
-      ),
-      batchName: r.batch_title || r.batch_name,
-    })),
+    rows.map((r) => {
+      const title = r.batch_title || r.batch_name;
+      const num = r.batch_number != null ? Number(r.batch_number) : null;
+      const spacesExpired = r.spaces_status === 'expired';
+      const files = serializeSubmissionFiles(r, spacesExpired);
+      return {
+        ...r,
+        max_score: r.occurrence_max_score != null ? r.occurrence_max_score : r.max_score,
+        displayLabel: derivedAssignmentLabel(
+          db.prepare('SELECT * FROM assignment_library WHERE id = ?').get(r.library_id) || {},
+        ),
+        batchName: title && num != null ? `${title} · #${num}` : title,
+        batch_number: num,
+        file_url: spacesExpired ? '' : files[0]?.url || r.file_url || '',
+        files,
+      };
+    }),
   );
 });
 
@@ -442,11 +668,58 @@ router.get('/occurrences/:occurrenceId', auth, (req, res) => {
   res.json(occurrencePayload(row));
 });
 
+router.patch('/occurrences/:occurrenceId', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+  const id = Number(req.params.occurrenceId);
+  const row = db.prepare('SELECT * FROM assignment_occurrences WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role === 'Trainer' && !trainerBatchIds(req.user.id).includes(Number(row.batch_id))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  if (String(row.status || '') === 'cancelled') {
+    return res.status(409).json({ error: 'Occurrence is cancelled' });
+  }
+  const dueAt =
+    req.body?.dueAt !== undefined || req.body?.due_at !== undefined
+      ? req.body?.dueAt ?? req.body?.due_at
+      : undefined;
+  const notes = req.body?.notes !== undefined ? req.body.notes : undefined;
+  if (dueAt === undefined && notes === undefined) {
+    return res.status(400).json({ error: 'dueAt or notes required' });
+  }
+  db.prepare(
+    `UPDATE assignment_occurrences SET
+       due_at = CASE WHEN ? THEN ? ELSE due_at END,
+       notes = CASE WHEN ? THEN ? ELSE notes END
+     WHERE id = ?`,
+  ).run(
+    dueAt !== undefined ? 1 : 0,
+    dueAt === null || dueAt === '' ? null : String(dueAt),
+    notes !== undefined ? 1 : 0,
+    notes == null ? null : String(notes),
+    id,
+  );
+  const updated = db.prepare('SELECT * FROM assignment_occurrences WHERE id = ?').get(id);
+  res.json(occurrencePayload(updated));
+});
+
+router.delete('/occurrences/:occurrenceId', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+  const id = Number(req.params.occurrenceId);
+  const row = db.prepare('SELECT * FROM assignment_occurrences WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role === 'Trainer' && !trainerBatchIds(req.user.id).includes(Number(row.batch_id))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  // Soft-cancel when status column exists; otherwise delete targeting rows + occurrence.
+  db.prepare(`UPDATE assignment_occurrences SET status = 'cancelled' WHERE id = ?`).run(id);
+  const updated = db.prepare('SELECT * FROM assignment_occurrences WHERE id = ?').get(id);
+  res.json(occurrencePayload(updated));
+});
+
 router.post(
   '/occurrences/:occurrenceId/submit',
   auth,
   requireRole('Student', 'Lab'),
-  uploadSingle,
+  uploadSubmissionMedia,
   async (req, res) => {
     try {
       const occurrenceId = Number(req.params.occurrenceId);
@@ -464,41 +737,48 @@ router.post(
         req.body?.responseType || lib?.response_type || 'file',
       );
       const textBody = req.body?.textBody != null ? String(req.body.textBody) : null;
+      const append =
+        req.body?.append === true ||
+        req.body?.append === '1' ||
+        req.body?.append === 'true';
 
-      let fileKey = '';
-      let fileUrl = '';
-      let mimeType = null;
+      const incoming = collectUploadedFiles(req);
+      const uploadedFiles = [];
 
       if (responseType === 'other') {
         // mark done with no media
       } else if (responseType === 'text') {
         if (!textBody || !textBody.trim()) return res.status(400).json({ error: 'textBody required' });
       } else {
-        if (!req.file) return res.status(400).json({ error: 'file is required' });
+        if (!incoming.length) return res.status(400).json({ error: 'file is required' });
         if (!isSpacesConfigured()) return res.status(503).json({ error: 'Storage is not configured' });
-        const ext = (req.file.originalname || '').split('.').pop() || 'bin';
-        const base =
-          sanitizeName(req.file.originalname?.replace(/\.[^.]+$/, '') || responseType) || responseType;
-        const key = `live-recordings/assignments/occurrence-${occurrenceId}/${req.user.id}-${Date.now()}-${base}.${ext}`;
-        const uploaded = await uploadToSpaces({
-          buffer: req.file.buffer,
-          mimeType: req.file.mimetype,
-          key,
-        });
-        fileKey = uploaded.key;
-        fileUrl = uploaded.publicUrl;
-        mimeType = req.file.mimetype;
+        for (let i = 0; i < incoming.length; i += 1) {
+          const file = incoming[i];
+          const ext = (file.originalname || '').split('.').pop() || 'bin';
+          const base =
+            sanitizeName(file.originalname?.replace(/\.[^.]+$/, '') || responseType) || responseType;
+          const key = `live-recordings/assignments/occurrence-${occurrenceId}/${req.user.id}-${Date.now()}-${i}-${base}.${ext}`;
+          const uploaded = await uploadToSpaces({
+            buffer: file.buffer,
+            mimeType: file.mimetype,
+            key,
+          });
+          uploadedFiles.push({
+            fileKey: uploaded.key,
+            fileUrl: uploaded.publicUrl,
+            mimeType: file.mimetype || null,
+            fileName: file.originalname || null,
+            kind: responseType,
+          });
+        }
       }
 
-      const legacyAssignmentId =
-        row.legacy_batch_assignment_id ||
-        db
-          .prepare('SELECT id FROM batch_assignments WHERE batch_id = ? ORDER BY id DESC LIMIT 1')
-          .get(row.batch_id)?.id ||
-        null;
-
-      // Keep legacy NOT NULL assignment_id if present; use placeholder 0-row via insert into batch if needed.
-      let assignmentId = legacyAssignmentId;
+      // Each occurrence must own its own batch_assignments stub. Never reuse
+      // "latest for batch" — that caused ON CONFLICT(assignment_id, student_id)
+      // to overwrite a different assignment's submission.
+      let assignmentId = row.legacy_batch_assignment_id
+        ? Number(row.legacy_batch_assignment_id)
+        : null;
       if (!assignmentId) {
         const stub = db
           .prepare(
@@ -519,35 +799,133 @@ router.post(
         );
       }
 
-      db.prepare(
-        `INSERT INTO assignment_submissions
-          (assignment_id, batch_id, student_id, file_key, file_url, occurrence_id, response_type, text_body, mime_type, status, review_status, score, feedback, reviewed_by, reviewed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'done', 'pending', NULL, NULL, NULL, NULL)
-         ON CONFLICT(assignment_id, student_id) DO UPDATE SET
-           file_key = excluded.file_key,
-           file_url = excluded.file_url,
-           occurrence_id = excluded.occurrence_id,
-           response_type = excluded.response_type,
-           text_body = excluded.text_body,
-           mime_type = excluded.mime_type,
-           status = 'done',
-           review_status = 'pending',
-           score = NULL,
-           feedback = NULL,
-           reviewed_by = NULL,
-           reviewed_at = NULL,
-           submitted_at = datetime('now')`,
-      ).run(
-        assignmentId,
-        row.batch_id,
-        req.user.id,
-        fileKey || 'none',
-        fileUrl || '',
-        occurrenceId,
-        responseType,
-        textBody,
-        mimeType,
-      );
+      const expiresAt = expiresAtFromRetentionDays();
+      const existingSub = db
+        .prepare(
+          `SELECT id FROM assignment_submissions
+           WHERE occurrence_id = ? AND student_id = ?
+           ORDER BY id DESC LIMIT 1`,
+        )
+        .get(occurrenceId, req.user.id);
+
+      const primary = uploadedFiles[0] || null;
+      let primaryKey = primary?.fileKey || '';
+      let primaryUrl = primary?.fileUrl || '';
+      let primaryMime = primary?.mimeType || null;
+
+      if (existingSub?.id && append && !primary) {
+        const prev = db.prepare('SELECT * FROM assignment_submissions WHERE id = ?').get(existingSub.id);
+        primaryKey = prev?.file_key || '';
+        primaryUrl = prev?.file_url || '';
+        primaryMime = prev?.mime_type || null;
+      }
+
+      if (existingSub?.id && append && primary && !listSubmissionFiles(existingSub.id).length && primaryUrl) {
+        // keep existing primary if appending onto a legacy single-file row
+      } else if (existingSub?.id && append && !primary) {
+        /* text-only append — keep media */
+      }
+
+      if (existingSub?.id && append) {
+        const prev = db.prepare('SELECT * FROM assignment_submissions WHERE id = ?').get(existingSub.id);
+        if (!primaryUrl && prev?.file_url) {
+          primaryKey = prev.file_key || 'none';
+          primaryUrl = prev.file_url;
+          primaryMime = prev.mime_type || null;
+        }
+      }
+
+      let submissionId = existingSub?.id || null;
+      if (existingSub?.id) {
+        db.prepare(
+          `UPDATE assignment_submissions SET
+             assignment_id = ?,
+             batch_id = ?,
+             file_key = ?,
+             file_url = ?,
+             response_type = ?,
+             text_body = COALESCE(?, text_body),
+             mime_type = ?,
+             status = 'done',
+             review_status = 'pending',
+             score = NULL,
+             feedback = NULL,
+             reviewed_by = NULL,
+             reviewed_at = NULL,
+             submitted_at = datetime('now'),
+             expires_at = ?,
+             spaces_status = ?
+           WHERE id = ?`,
+        ).run(
+          assignmentId,
+          row.batch_id,
+          primaryKey || 'none',
+          primaryUrl || '',
+          responseType,
+          textBody,
+          primaryMime,
+          expiresAt,
+          primaryKey && primaryKey !== 'none' ? 'active' : 'none',
+          existingSub.id,
+        );
+        submissionId = existingSub.id;
+      } else {
+        const inserted = db
+          .prepare(
+            `INSERT INTO assignment_submissions
+            (assignment_id, batch_id, student_id, file_key, file_url, occurrence_id, response_type, text_body, mime_type, status, review_status, score, feedback, reviewed_by, reviewed_at, expires_at, spaces_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'done', 'pending', NULL, NULL, NULL, NULL, ?, ?)`,
+          )
+          .run(
+            assignmentId,
+            row.batch_id,
+            req.user.id,
+            primaryKey || 'none',
+            primaryUrl || '',
+            occurrenceId,
+            responseType,
+            textBody,
+            primaryMime,
+            expiresAt,
+            primaryKey && primaryKey !== 'none' ? 'active' : 'none',
+          );
+        submissionId = inserted.lastInsertRowid;
+      }
+
+      if (uploadedFiles.length && submissionId) {
+        if (!append) {
+          db.prepare('DELETE FROM assignment_submission_files WHERE submission_id = ?').run(submissionId);
+        }
+        const maxOrder =
+          db
+            .prepare(
+              'SELECT COALESCE(MAX(sort_order), -1) AS m FROM assignment_submission_files WHERE submission_id = ?',
+            )
+            .get(submissionId)?.m ?? -1;
+        const insFile = db.prepare(
+          `INSERT INTO assignment_submission_files
+            (submission_id, file_key, file_url, mime_type, kind, file_name, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        );
+        uploadedFiles.forEach((f, idx) => {
+          insFile.run(
+            submissionId,
+            f.fileKey,
+            f.fileUrl,
+            f.mimeType,
+            f.kind,
+            f.fileName,
+            Number(maxOrder) + 1 + idx,
+          );
+        });
+        // Keep submission primary pointing at first file in the set
+        const first = listSubmissionFiles(submissionId)[0];
+        if (first) {
+          db.prepare(
+            `UPDATE assignment_submissions SET file_key = ?, file_url = ?, mime_type = ?, spaces_status = 'active' WHERE id = ?`,
+          ).run(first.file_key, first.file_url, first.mime_type, submissionId);
+        }
+      }
 
       const submission = db
         .prepare(
@@ -565,24 +943,77 @@ router.put(
   '/occurrences/:occurrenceId/submissions/:submissionId/review',
   auth,
   requireRole('Admin', 'Trainer'),
-  (req, res) => {
-    const occurrenceId = Number(req.params.occurrenceId);
-    const submissionId = Number(req.params.submissionId);
-    const row = db.prepare('SELECT * FROM assignment_occurrences WHERE id = ?').get(occurrenceId);
-    if (!row) return res.status(404).json({ error: 'Not found' });
-    if (req.user.role === 'Trainer' && !trainerBatchIds(req.user.id).includes(Number(row.batch_id))) {
-      return res.status(403).json({ error: 'Forbidden' });
+  uploadSingle,
+  async (req, res) => {
+    try {
+      const occurrenceId = Number(req.params.occurrenceId);
+      const submissionId = Number(req.params.submissionId);
+      const row = db.prepare('SELECT * FROM assignment_occurrences WHERE id = ?').get(occurrenceId);
+      if (!row) return res.status(404).json({ error: 'Not found' });
+      if (req.user.role === 'Trainer' && !trainerBatchIds(req.user.id).includes(Number(row.batch_id))) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      const existing = db
+        .prepare('SELECT * FROM assignment_submissions WHERE id = ? AND occurrence_id = ?')
+        .get(submissionId, occurrenceId);
+      if (!existing) return res.status(404).json({ error: 'Submission not found' });
+
+      // Score removed from review UX — keep null unless explicitly provided for legacy clients.
+      const score =
+        req.body?.score != null && String(req.body.score).trim() !== ''
+          ? Number(req.body.score)
+          : null;
+      const feedback = req.body?.feedback != null ? String(req.body.feedback) : existing.feedback;
+      const clearAudio =
+        req.body?.clearFeedbackAudio === true ||
+        req.body?.clearFeedbackAudio === '1' ||
+        req.body?.clearFeedbackAudio === 'true';
+
+      let feedbackAudioUrl = existing.feedback_audio_url || null;
+      let feedbackAudioKey = existing.feedback_audio_key || null;
+
+      if (clearAudio) {
+        feedbackAudioUrl = null;
+        feedbackAudioKey = null;
+      }
+
+      if (req.file) {
+        if (!isSpacesConfigured()) return res.status(503).json({ error: 'Storage is not configured' });
+        const ext = (req.file.originalname || '').split('.').pop() || 'webm';
+        const key = `live-recordings/assignments/feedback/occurrence-${occurrenceId}/${submissionId}-${Date.now()}.${ext}`;
+        const uploaded = await uploadToSpaces({
+          buffer: req.file.buffer,
+          mimeType: req.file.mimetype || 'audio/webm',
+          key,
+        });
+        feedbackAudioKey = uploaded.key;
+        feedbackAudioUrl = uploaded.publicUrl;
+      }
+
+      if (!String(feedback || '').trim() && !feedbackAudioUrl) {
+        return res.status(400).json({ error: 'Feedback text or voice note is required' });
+      }
+
+      db.prepare(
+        `UPDATE assignment_submissions SET
+          score = ?, feedback = ?, feedback_audio_url = ?, feedback_audio_key = ?,
+          review_status = 'reviewed',
+          reviewed_by = ?, reviewed_at = datetime('now')
+         WHERE id = ? AND occurrence_id = ?`,
+      ).run(
+        Number.isFinite(score) ? score : null,
+        feedback,
+        feedbackAudioUrl,
+        feedbackAudioKey,
+        req.user.id,
+        submissionId,
+        occurrenceId,
+      );
+      const updated = db.prepare('SELECT * FROM assignment_submissions WHERE id = ?').get(submissionId);
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ error: error.message || 'Review failed' });
     }
-    const score = req.body?.score != null ? Number(req.body.score) : null;
-    const feedback = req.body?.feedback != null ? String(req.body.feedback) : null;
-    db.prepare(
-      `UPDATE assignment_submissions SET
-        score = ?, feedback = ?, review_status = 'reviewed',
-        reviewed_by = ?, reviewed_at = datetime('now')
-       WHERE id = ? AND occurrence_id = ?`,
-    ).run(score, feedback, req.user.id, submissionId, occurrenceId);
-    const updated = db.prepare('SELECT * FROM assignment_submissions WHERE id = ?').get(submissionId);
-    res.json(updated);
   },
 );
 
@@ -630,6 +1061,23 @@ router.put('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) 
         : null;
     const title = nextLabel != null ? nextLabel.slice(0, 200) : null;
 
+    const publicIn = req.body?.isPublic !== undefined || req.body?.is_public !== undefined;
+    let setPublic = false;
+    let nextIsPublic = 0;
+    if (draftEffective === 1) {
+      // Drafts are never public — clear if previously set.
+      if (Number(row.is_public) === 1 || publicIn) {
+        setPublic = true;
+        nextIsPublic = 0;
+      }
+    } else if (publicIn) {
+      if (!canSetAssignmentPublic(req.user, row)) {
+        return res.status(403).json({ error: 'Only admins or the creating trainer can change public sharing' });
+      }
+      setPublic = true;
+      nextIsPublic = truthyFlag(req.body?.isPublic ?? req.body?.is_public) ? 1 : 0;
+    }
+
     db.prepare(
       `UPDATE assignment_library SET
         title = COALESCE(?, title),
@@ -639,6 +1087,7 @@ router.put('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) 
         header_json = COALESCE(?, header_json),
         recurrence_json = CASE WHEN ? THEN ? ELSE recurrence_json END,
         is_draft = COALESCE(?, is_draft),
+        is_public = CASE WHEN ? = 1 THEN ? ELSE is_public END,
         updated_at = datetime('now')
       WHERE id = ?`,
     ).run(
@@ -650,6 +1099,8 @@ router.put('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) 
       recurrenceIn ? 1 : 0,
       recurrenceIn ? (recurrence ? JSON.stringify(recurrence) : null) : null,
       nextIsDraft,
+      setPublic ? 1 : 0,
+      nextIsPublic,
       id,
     );
     const updated = getLibraryOr404(id);

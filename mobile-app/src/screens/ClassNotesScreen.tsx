@@ -1,6 +1,7 @@
 import React from 'react';
-import { Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
+import { openMedia } from '../lib/openMedia';
 
 const BRAND_RED = '#c41e3a';
 
@@ -9,25 +10,25 @@ type Note = { id: number; title: string; fileUrl: string };
 export default function ClassNotesScreen({ route, navigation }: any) {
   const { notes } = route.params as { notes: Note[] };
 
-  const openPdf = (url: string) => {
-    Linking.openURL(url).catch(() => {});
-  };
-
   return (
     <View style={styles.pageRoot}>
       <ScreenPageTitle title="Class notes" />
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.subtitle}>Tap to view or download (opens in browser)</Text>
-      {notes.map((n) => (
-        <TouchableOpacity key={n.id} style={styles.card} onPress={() => openPdf(n.fileUrl)}>
-          <Text style={styles.cardTitle}>{n.title}</Text>
-          <Text style={styles.cardSub}>View / Download PDF</Text>
+        <Text style={styles.subtitle}>Tap to view in the app</Text>
+        {notes.map((n) => (
+          <TouchableOpacity
+            key={n.id}
+            style={styles.card}
+            onPress={() => openMedia(navigation, { url: n.fileUrl, title: n.title, kind: 'pdf' })}
+          >
+            <Text style={styles.cardTitle}>{n.title}</Text>
+            <Text style={styles.cardSub}>View PDF</Text>
+          </TouchableOpacity>
+        ))}
+        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
+          <Text style={styles.backBtnText}>Back</Text>
         </TouchableOpacity>
-      ))}
-      <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-        <Text style={styles.backBtnText}>Back</Text>
-      </TouchableOpacity>
-    </ScrollView>
+      </ScrollView>
     </View>
   );
 }

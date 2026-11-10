@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
+import { openMedia } from '../lib/openMedia';
 
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
 
-export default function AssignmentScreen({ route }: any) {
+export default function AssignmentScreen({ route, navigation }: any) {
   const { batchId } = route.params;
   const [loading, setLoading] = useState(true);
   const [assignments, setAssignments] = useState<any[]>([]);
@@ -97,7 +98,16 @@ export default function AssignmentScreen({ route }: any) {
               </TouchableOpacity>
             </View>
             {(submissions[a.id] || []).map((s) => (
-              <TouchableOpacity key={s.id} onPress={() => Linking.openURL(s.file_url)}>
+              <TouchableOpacity
+                key={s.id}
+                onPress={() =>
+                  openMedia(navigation, {
+                    url: s.file_url,
+                    title: s.student_name || s.student_email || 'Submission',
+                    kind: 'pdf',
+                  })
+                }
+              >
                 <Text style={styles.submissionLine}>
                   {s.student_name || s.student_email} - {new Date(s.submitted_at).toLocaleString()}
                 </Text>

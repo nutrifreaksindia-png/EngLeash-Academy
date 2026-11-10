@@ -133,12 +133,17 @@ const videoRoutes = require('./routes/videos');
 const studyMaterialRoutes = require('./routes/studyMaterials');
 const worksheetRoutes = require('./routes/worksheets');
 const assignmentRoutes = require('./routes/assignments');
+const settingsRoutes = require('./routes/settings');
 const libraryOwnershipRoutes = require('./routes/libraryOwnership');
 const { router: paymentRoutes, razorpayWebhookHandler } = require('./routes/payments');
 const billingPackageRoutes = require('./routes/billingPackages');
 const subscriptionRoutes = require('./routes/subscriptions');
 const { runApplyOverdueEnforcementSweep } = require('./services/applyDueEnforcement');
 const { runBatchCompletionSweep } = require('./services/batchCompletion');
+const { runAssignmentResponsePrune } = require('./lib/pruneAssignmentResponses');
+const { ensureAppSettingsTable } = require('./lib/appSettings');
+
+ensureAppSettingsTable();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -166,6 +171,7 @@ app.use('/api/videos', videoRoutes);
 app.use('/api/study-materials', studyMaterialRoutes);
 app.use('/api/worksheets', worksheetRoutes);
 app.use('/api/assignments', assignmentRoutes);
+app.use('/api/settings', settingsRoutes);
 app.use('/api/library/ownership', libraryOwnershipRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/billing', billingPackageRoutes);
@@ -234,3 +240,21 @@ function sweepCompletedBatches() {
 
 sweepCompletedBatches();
 setInterval(sweepCompletedBatches, BATCH_COMPLETION_SWEEP_MS);
+
+const ASSIGNMENT_RESPONSE_PRUNE_MS = Number(process.env.ASSIGNMENT_RESPONSE_PRUNE_MS || 6 * 60 * 60 * 1000);
+
+async function sweepAssignmentResponses() {
+  try {
+    const summary = await runAssignmentResponsePrune();
+    if (summary.marked > 0 || summary.deletedObjects > 0) {
+      console.log('[assignment-response-prune]', summary);
+    }
+  } catch (error) {
+    console.error('[assignment-response-prune] failed', error);
+  }
+}
+
+void sweepAssignmentResponses();
+setInterval(() => {
+  void sweepAssignmentResponses();
+}, ASSIGNMENT_RESPONSE_PRUNE_MS);

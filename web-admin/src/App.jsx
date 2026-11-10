@@ -224,18 +224,19 @@ async function uploadUserProfilePhoto(userId, token, photoBlob) {
   return data.photoUrl || null;
 }
 
-async function uploadVideoLibraryAsset(token, payload, onProgress) {
-  return new Promise((resolve, reject) => {
-    const body = new FormData();
-    body.append('title', payload.title || '');
-    body.append('description', payload.description || '');
-    body.append('categoryId', String(payload.categoryId || ''));
-    body.append('file', payload.file);
+/** Returns { promise, abort }. Caller must keep abort for Stop/Discard. */
+function uploadVideoLibraryAsset(token, payload, onProgress) {
+  const body = new FormData();
+  body.append('title', payload.title || '');
+  body.append('description', payload.description || '');
+  body.append('categoryId', String(payload.categoryId || ''));
+  body.append('file', payload.file);
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${API_BASE}/api/videos`);
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', `${API_BASE}/api/videos`);
+  if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
 
+  const promise = new Promise((resolve, reject) => {
     xhr.upload.onprogress = (evt) => {
       if (!evt.lengthComputable) return;
       const pct = Math.max(0, Math.min(100, Math.round((evt.loaded / evt.total) * 100)));
@@ -243,6 +244,11 @@ async function uploadVideoLibraryAsset(token, payload, onProgress) {
     };
 
     xhr.onerror = () => reject(new Error('Network error while uploading video'));
+    xhr.onabort = () => {
+      const err = new Error('Upload stopped');
+      err.code = 'UPLOAD_ABORTED';
+      reject(err);
+    };
     xhr.onload = () => {
       const data = (() => {
         try {
@@ -261,6 +267,17 @@ async function uploadVideoLibraryAsset(token, payload, onProgress) {
     };
     xhr.send(body);
   });
+
+  return {
+    promise,
+    abort: () => {
+      try {
+        xhr.abort();
+      } catch {
+        /* ignore */
+      }
+    },
+  };
 }
 
 export default function App() {
@@ -298,6 +315,10 @@ export default function App() {
   const [sessionConflict, setSessionConflict] = useState(null);
   const sessionReplacedLock = React.useRef(false);
   const endReplacedSessionRef = React.useRef(() => {});
+  const videoUploadAbortRef = React.useRef(null);
+  const videoUploadJobIdRef = React.useRef(0);
+  const [videoUploadJob, setVideoUploadJob] = useState(null);
+  // { id, phase, progress, message, error, title, fileName, videoId }
 
   const authReady = useMemo(() => Boolean(token), [token]);
 
@@ -813,7 +834,11 @@ export default function App() {
     const data = await apiFetch(`/payments/admin/${paymentId}/invoice-link`, token);
     const url = String(data?.url || '').trim();
     if (!url) throw new Error('Invoice link not available');
-    window.open(url, '_blank', 'noopener,noreferrer');
+    return {
+      url,
+      invoiceNumber: data?.invoiceNumber || null,
+      title: data?.invoiceNumber ? `Invoice ${data.invoiceNumber}` : 'Invoice',
+    };
   }
 
   async function recordAdminApplyManualPayment(dueItemId, payload = {}) {
@@ -1285,6 +1310,19 @@ export default function App() {
     [currentUser],
   );
 
+  const libraryCanSharePublic = useMemo(
+    () => (row) => {
+      if (!currentUser?.id) return false;
+      if (currentUser.role === 'Admin') return true;
+      if (currentUser.role === 'Trainer') {
+        if (!row) return true; // new assignment owned by this trainer
+        return Number(row.created_by) === Number(currentUser.id);
+      }
+      return false;
+    },
+    [currentUser],
+  );
+
   async function addBatchMember(studentId, batchId) {
     const bid = batchId ?? selectedBatchId;
     if (!bid || !studentId) return;
@@ -1343,9 +1381,116 @@ export default function App() {
     }
   }
 
-  async function createVideo(payload, onProgress) {
-    await uploadVideoLibraryAsset(token, payload, onProgress);
-    await loadAll();
+  function patchVideoUploadJob(jobId, patch) {
+    setVideoUploadJob((prev) => {
+      if (!prev || prev.id !== jobId) return prev;
+      return { ...prev, ...patch };
+    });
+  }
+
+  function startVideoUpload(payload) {
+    if (videoUploadJob && ['uploading', 'processing'].includes(videoUploadJob.phase)) {
+      pushToast('A video is already uploading. Stop or discard it first.', 'error');
+      return;
+    }
+    if (!payload?.file) {
+      pushToast('Choose a video file first', 'error');
+      return;
+    }
+    if (!payload?.categoryId) {
+      pushToast('Please select a category', 'error');
+      return;
+    }
+
+    videoUploadAbortRef.current?.();
+    videoUploadAbortRef.current = null;
+    const jobId = videoUploadJobIdRef.current + 1;
+    videoUploadJobIdRef.current = jobId;
+    const fileName = payload.file?.name || 'video';
+    const title = String(payload.title || '').trim() || fileName;
+
+    setVideoUploadJob({
+      id: jobId,
+      phase: 'uploading',
+      progress: 0,
+      message: 'Uploading to secure cloud storage…',
+      error: '',
+      title,
+      fileName,
+      videoId: null,
+      formResetToken: 0,
+    });
+
+    const { promise, abort } = uploadVideoLibraryAsset(token, payload, (pct) => {
+      patchVideoUploadJob(jobId, {
+        progress: pct,
+        ...(pct >= 100
+          ? { phase: 'processing', message: 'Optimizing and preparing your video…' }
+          : { phase: 'uploading', message: 'Uploading to secure cloud storage…' }),
+      });
+    });
+    videoUploadAbortRef.current = abort;
+
+    promise
+      .then(async (created) => {
+        videoUploadAbortRef.current = null;
+        const videoId = created?.id != null ? Number(created.id) : null;
+        patchVideoUploadJob(jobId, {
+          phase: 'done',
+          progress: 100,
+          message: 'Upload completed successfully.',
+          error: '',
+          videoId: Number.isFinite(videoId) ? videoId : null,
+          formResetToken: Date.now(),
+        });
+        await loadAll();
+        pushToast(`Video “${title}” uploaded`, 'success');
+        window.setTimeout(() => {
+          setVideoUploadJob((prev) => (prev?.id === jobId && prev.phase === 'done' ? null : prev));
+        }, 1600);
+      })
+      .catch((err) => {
+        videoUploadAbortRef.current = null;
+        if (err?.code === 'UPLOAD_ABORTED') {
+          patchVideoUploadJob(jobId, {
+            phase: 'aborted',
+            message: 'Upload stopped.',
+            error: '',
+          });
+          return;
+        }
+        patchVideoUploadJob(jobId, {
+          phase: 'failed',
+          message: 'Upload failed.',
+          error: err?.message || 'Video upload failed',
+        });
+        pushToast(err?.message || 'Video upload failed', 'error');
+      });
+  }
+
+  function stopVideoUpload() {
+    const job = videoUploadJob;
+    if (!job || !['uploading', 'processing'].includes(job.phase)) return;
+    videoUploadAbortRef.current?.();
+    videoUploadAbortRef.current = null;
+    patchVideoUploadJob(job.id, {
+      phase: 'aborted',
+      message: 'Upload stopped.',
+      error: '',
+    });
+  }
+
+  function discardVideoUpload() {
+    const job = videoUploadJob;
+    if (job && ['uploading', 'processing'].includes(job.phase)) {
+      videoUploadAbortRef.current?.();
+      videoUploadAbortRef.current = null;
+    }
+    const videoId = job?.videoId != null ? Number(job.videoId) : null;
+    setVideoUploadJob(null);
+    if (Number.isFinite(videoId) && videoId > 0) {
+      void deleteVideo(videoId).catch(() => {});
+    }
   }
 
   async function updateVideo(id, payload) {
@@ -1513,11 +1658,12 @@ export default function App() {
   }
 
   async function createAssignment(payload) {
-    await apiFetch('/assignments', token, {
+    const created = await apiFetch('/assignments', token, {
       method: 'POST',
       body: JSON.stringify(payload),
     });
     await loadAll();
+    return created;
   }
 
   async function updateAssignment(id, payload) {
@@ -1533,18 +1679,36 @@ export default function App() {
     await loadAll();
   }
 
-  async function uploadAssignmentAsset(id, file, assetType) {
-    const body = new FormData();
-    body.append('file', file);
-    body.append('assetType', assetType);
-    const res = await fetch(`${API_BASE}/api/assignments/${id}/assets`, {
-      method: 'POST',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      body,
+  async function uploadAssignmentAsset(id, file, assetType, onProgress) {
+    return new Promise((resolve, reject) => {
+      const body = new FormData();
+      body.append('file', file);
+      body.append('assetType', assetType);
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${API_BASE}/api/assignments/${id}/assets`);
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+
+      xhr.upload.onprogress = (evt) => {
+        if (!evt.lengthComputable) return;
+        const pct = Math.max(0, Math.min(100, Math.round((evt.loaded / evt.total) * 100)));
+        onProgress?.(pct);
+      };
+
+      xhr.onerror = () => reject(new Error('Network error while uploading assignment asset'));
+      xhr.onload = () => {
+        const data = (() => {
+          try {
+            return JSON.parse(xhr.responseText || '{}');
+          } catch {
+            return {};
+          }
+        })();
+        if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
+        reject(new Error(data.error || xhr.statusText || 'Assignment asset upload failed'));
+      };
+      xhr.send(body);
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || 'Assignment asset upload failed');
-    return data;
   }
 
   async function deleteAssignmentAsset(id, assetId) {
@@ -1568,15 +1732,55 @@ export default function App() {
     });
   }
 
-  async function reviewOccurrenceSubmission(occurrenceId, submissionId, payload) {
+  async function reviewOccurrenceSubmission(occurrenceId, submissionId, payload = {}) {
+    const hasVoice = payload?.voiceBlob instanceof Blob;
+    if (hasVoice) {
+      const body = new FormData();
+      if (payload.feedback != null) body.append('feedback', String(payload.feedback));
+      if (payload.clearFeedbackAudio) body.append('clearFeedbackAudio', '1');
+      if (payload.score != null && payload.score !== '') body.append('score', String(payload.score));
+      body.append('file', payload.voiceBlob, `feedback-${Date.now()}.webm`);
+      const res = await fetch(
+        `${API_BASE}/api/assignments/occurrences/${occurrenceId}/submissions/${submissionId}/review`,
+        {
+          method: 'PUT',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          body,
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Review failed');
+      return data;
+    }
     return apiFetch(`/assignments/occurrences/${occurrenceId}/submissions/${submissionId}/review`, token, {
       method: 'PUT',
+      body: JSON.stringify({
+        feedback: payload.feedback,
+        clearFeedbackAudio: payload.clearFeedbackAudio || undefined,
+        score: payload.score,
+      }),
+    });
+  }
+
+  async function updateOccurrence(occurrenceId, payload) {
+    return apiFetch(`/assignments/occurrences/${occurrenceId}`, token, {
+      method: 'PATCH',
       body: JSON.stringify(payload),
+    });
+  }
+
+  async function cancelOccurrence(occurrenceId) {
+    return apiFetch(`/assignments/occurrences/${occurrenceId}`, token, {
+      method: 'DELETE',
     });
   }
 
   async function loadBatchMembersForSet(batchId) {
     return apiFetch(`/batch-manager/${batchId}/members`, token);
+  }
+
+  async function loadBatchSessionsForSet(batchId) {
+    return apiFetch(`/batch-manager/${batchId}/sessions`, token);
   }
 
   let page = null;
@@ -1816,15 +2020,14 @@ export default function App() {
       <VideosPage
         videos={videos}
         categories={videoCategories}
-        lessons={library}
-        courses={courses}
         showCreatedBy={showCreatedBy}
         libraryCanMutate={libraryCanMutate}
-        canMapToCourse={!isTrainer}
-        onCreateVideo={createVideo}
+        videoUploadJob={videoUploadJob}
+        onStartVideoUpload={startVideoUpload}
+        onStopVideoUpload={stopVideoUpload}
+        onDiscardVideoUpload={discardVideoUpload}
         onUpdateVideo={updateVideo}
         onDeleteVideo={deleteVideo}
-        onAssignVideo={assignVideo}
         staffUsers={staffUsers}
         onTransferOwner={onTransferOwner}
       />
@@ -1866,52 +2069,54 @@ export default function App() {
         onDeleteHoliday={deleteHolidayByDate}
         onCreateCategory={createVideoCategory}
         onDeleteCategory={deleteVideoCategory}
+        loadAssignmentRetention={
+          isAdmin
+            ? () => apiFetch('/settings/assignment-response-retention', token)
+            : null
+        }
+        saveAssignmentRetention={
+          isAdmin
+            ? (days) =>
+                apiFetch('/settings/assignment-response-retention', token, {
+                  method: 'PUT',
+                  body: JSON.stringify({ days }),
+                })
+            : null
+        }
       />
     );
   } else if (currentPage === 'assignments') {
-    const libraryPage = (
-      <AssignmentsPage
-        assignments={assignments}
-        showCreatedBy={showCreatedBy}
-        libraryCanMutate={libraryCanMutate}
+    const libraryProps = {
+      assignments,
+      showCreatedBy,
+      libraryCanMutate,
+      libraryCanSharePublic,
+      loadAssignment,
+      createAssignment,
+      updateAssignment,
+      deleteAssignment,
+      uploadAssignmentAsset,
+      deleteAssignmentAsset,
+      staffUsers,
+      onTransferOwner,
+    };
+    page = isTrainer || isAdmin ? (
+      <TrainerAssignmentsPage
+        batches={batches}
+        assignmentsLibrary={assignments}
+        loadTrainerOccurrences={loadTrainerOccurrences}
+        loadTrainerResponses={loadTrainerResponses}
+        setAssignment={setAssignment}
+        reviewSubmission={reviewOccurrenceSubmission}
+        loadBatchMembers={loadBatchMembersForSet}
+        loadBatchSessions={loadBatchSessionsForSet}
+        cancelOccurrence={cancelOccurrence}
         loadAssignment={loadAssignment}
-        createAssignment={createAssignment}
-        updateAssignment={updateAssignment}
-        deleteAssignment={deleteAssignment}
-        uploadAssignmentAsset={uploadAssignmentAsset}
-        deleteAssignmentAsset={deleteAssignmentAsset}
-        staffUsers={staffUsers}
-        onTransferOwner={onTransferOwner}
+        showLibraryTab
+        {...libraryProps}
       />
-    );
-    page = isTrainer ? (
-      <div className="stack">
-        <TrainerAssignmentsPage
-          batches={batches}
-          assignmentsLibrary={assignments}
-          loadTrainerOccurrences={loadTrainerOccurrences}
-          loadTrainerResponses={loadTrainerResponses}
-          setAssignment={setAssignment}
-          reviewSubmission={reviewOccurrenceSubmission}
-          loadBatchMembers={loadBatchMembersForSet}
-        />
-        {libraryPage}
-      </div>
-    ) : isAdmin ? (
-      <div className="stack">
-        <TrainerAssignmentsPage
-          batches={batches}
-          assignmentsLibrary={assignments}
-          loadTrainerOccurrences={loadTrainerOccurrences}
-          loadTrainerResponses={loadTrainerResponses}
-          setAssignment={setAssignment}
-          reviewSubmission={reviewOccurrenceSubmission}
-          loadBatchMembers={loadBatchMembersForSet}
-        />
-        {libraryPage}
-      </div>
     ) : (
-      libraryPage
+      <AssignmentsPage {...libraryProps} />
     );
   }
 
@@ -1954,6 +2159,54 @@ export default function App() {
           ) : (
             <div className="app">
               <ToastStack toasts={toasts} />
+              {videoUploadJob &&
+              ['uploading', 'processing', 'failed', 'aborted'].includes(videoUploadJob.phase) ? (
+                <div className="globalVideoUploadBar" role="status">
+                  <div className="globalVideoUploadBarMain">
+                    <strong>
+                      {videoUploadJob.phase === 'processing'
+                        ? 'Processing video'
+                        : videoUploadJob.phase === 'failed'
+                          ? 'Video upload failed'
+                          : videoUploadJob.phase === 'aborted'
+                            ? 'Video upload stopped'
+                            : 'Uploading video'}
+                    </strong>
+                    <span className="globalVideoUploadBarMeta">
+                      {videoUploadJob.title || videoUploadJob.fileName}
+                      {['uploading', 'processing'].includes(videoUploadJob.phase)
+                        ? ` · ${videoUploadJob.progress}%`
+                        : ''}
+                    </span>
+                    {['uploading', 'processing'].includes(videoUploadJob.phase) ? (
+                      <div className="uploadProgressTrack globalVideoUploadTrack">
+                        <div
+                          className={`uploadProgressBar ${videoUploadJob.phase}`}
+                          style={{ width: `${videoUploadJob.progress}%` }}
+                        />
+                      </div>
+                    ) : null}
+                    {videoUploadJob.error ? (
+                      <span className="uploadErrorText">{videoUploadJob.error}</span>
+                    ) : null}
+                  </div>
+                  <div className="globalVideoUploadBarActions">
+                    {currentPage !== 'videos' ? (
+                      <button type="button" className="secondaryBtn" onClick={() => setCurrentPage('videos')}>
+                        Open Videos
+                      </button>
+                    ) : null}
+                    {['uploading', 'processing'].includes(videoUploadJob.phase) ? (
+                      <button type="button" className="secondaryBtn" onClick={stopVideoUpload}>
+                        Stop uploading
+                      </button>
+                    ) : null}
+                    <button type="button" className="dangerBtn" onClick={discardVideoUpload}>
+                      Discard
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               <AdminShell
                 currentPage={currentPage}
                 onNavigate={setCurrentPage}

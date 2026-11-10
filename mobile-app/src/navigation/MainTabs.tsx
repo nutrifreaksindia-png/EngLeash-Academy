@@ -29,6 +29,7 @@ import CourseCatalogScreen from '../screens/CourseCatalogScreen';
 import CourseDetailScreen from '../screens/CourseDetailScreen';
 import LessonDetailScreen from '../screens/LessonDetailScreen';
 import VideoPlayerScreen from '../screens/VideoPlayerScreen';
+import MediaViewerScreen from '../screens/MediaViewerScreen';
 import ClassNotesScreen from '../screens/ClassNotesScreen';
 import QuizScreen from '../screens/QuizScreen';
 import WorksheetScreen from '../screens/WorksheetScreen';
@@ -93,6 +94,7 @@ function HomeStackNavigator() {
         })}
       />
       <HomeStack.Screen name="Login" component={LoginScreen} options={{ title: 'Sign in' }} />
+      <HomeStack.Screen name="MediaViewer" component={MediaViewerScreen} options={{ title: 'Viewer' }} />
     </HomeStack.Navigator>
   );
 }
@@ -141,6 +143,7 @@ function CoursesStackNavigator({ navigation, route }: { navigation: any; route: 
         }}
       />
       <CoursesStack.Screen name="VideoPlayer" component={VideoPlayerScreen} options={{ title: 'Video', headerShown: false }} />
+      <CoursesStack.Screen name="MediaViewer" component={MediaViewerScreen} options={{ title: 'Viewer' }} />
       <CoursesStack.Screen name="ClassNotes" component={ClassNotesScreen} options={{ title: 'Class notes' }} />
       <CoursesStack.Screen name="Quiz" component={QuizScreen} options={{ title: 'Quiz' }} />
       <CoursesStack.Screen name="Worksheet" component={WorksheetScreen} options={{ title: 'Worksheet (PDF)' }} />
@@ -172,6 +175,7 @@ function SessionsStackNavigator() {
         options={{ title: 'Recordings' }}
       />
       <SessionsStack.Screen name="LiveSchedule" component={LiveScheduleScreen} options={{ title: 'Schedule live' }} />
+      <SessionsStack.Screen name="MediaViewer" component={MediaViewerScreen} options={{ title: 'Viewer' }} />
     </SessionsStack.Navigator>
   );
 }
@@ -186,6 +190,12 @@ function AssignmentsStackNavigator() {
         component={AssignmentOccurrenceScreen}
         options={{ title: 'Assignment' }}
       />
+      <AssignmentsStack.Screen name="MediaViewer" component={MediaViewerScreen} options={{ title: 'Viewer' }} />
+      <AssignmentsStack.Screen
+        name="VideoPlayer"
+        component={VideoPlayerScreen}
+        options={{ title: 'Video', headerShown: false }}
+      />
     </AssignmentsStack.Navigator>
   );
 }
@@ -197,6 +207,7 @@ function AccountStackNavigator() {
       <AccountStack.Screen name="PaymentsInvoices" component={PaymentsInvoicesScreen} options={{ title: 'Payments & Invoices' }} />
       <AccountStack.Screen name="Login" component={LoginScreen} options={{ title: 'Sign in' }} />
       <AccountStack.Screen name="Signup" component={SignupScreen} options={{ title: 'Sign up' }} />
+      <AccountStack.Screen name="MediaViewer" component={MediaViewerScreen} options={{ title: 'Invoice' }} />
     </AccountStack.Navigator>
   );
 }

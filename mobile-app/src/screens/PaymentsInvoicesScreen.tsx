@@ -3,7 +3,6 @@ import { useFocusEffect } from '@react-navigation/native';
 import {
   ActivityIndicator,
   Alert,
-  Linking,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -14,6 +13,7 @@ import {
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { openMedia } from '../lib/openMedia';
 import { alertApplyPaymentError, payApplyDueWithRazorpay } from '../payments/razorpayApplyBilling';
 
 const BRAND_BLUE = '#1a237e';
@@ -126,7 +126,7 @@ function dueTimingText(due: ApplyDueRow) {
   return null;
 }
 
-export default function PaymentsInvoicesScreen() {
+export default function PaymentsInvoicesScreen({ navigation }: any) {
   const { user, refreshUser } = useAuth();
   const [payments, setPayments] = useState<PaymentRow[]>([]);
   const [applyProfiles, setApplyProfiles] = useState<ApplyBillingRow[]>([]);
@@ -165,7 +165,11 @@ export default function PaymentsInvoicesScreen() {
       const data = await api.get(`/payments/my/${paymentId}/invoice-link`);
       const url = String(data?.url || '').trim();
       if (!url) throw new Error('Invoice link not available');
-      await Linking.openURL(url);
+      openMedia(navigation, {
+        url,
+        title: data?.invoiceNumber ? `Invoice ${data.invoiceNumber}` : 'Invoice',
+        kind: 'pdf',
+      });
     } catch (error: any) {
       Alert.alert('Invoice', error?.message || 'Could not open invoice PDF');
     } finally {

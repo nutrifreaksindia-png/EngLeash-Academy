@@ -1,6 +1,8 @@
 import React, { useMemo } from 'react';
 import { Linking, StyleProp, useWindowDimensions, View, ViewStyle } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
 import RenderHTML, { MixedStyleRecord } from 'react-native-render-html';
+import { isViewableMediaUrl, openMedia } from '../lib/openMedia';
 
 const BODY_COLOR = '#334155';
 const HEADING_COLOR = '#0f172a';
@@ -76,6 +78,7 @@ export function HtmlContent({
   baseFontSize = 16,
   studyContent = false,
 }: HtmlContentProps) {
+  const navigation = useNavigation<any>();
   const { width } = useWindowDimensions();
   const contentWidth = Math.max(200, width - horizontalInset);
   const source = useMemo(() => {
@@ -96,7 +99,9 @@ export function HtmlContent({
         renderersProps={{
           a: {
             onPress: (_event, href) => {
-              if (href) void Linking.openURL(href);
+              if (!href) return;
+              if (isViewableMediaUrl(href)) openMedia(navigation, { url: href });
+              else void Linking.openURL(href);
             },
           },
         }}

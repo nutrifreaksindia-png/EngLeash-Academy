@@ -130,6 +130,7 @@ function serializeLibraryRow(row, assets = []) {
     response_type: normalizeResponseType(row.response_type),
     header: normalizeHeader(row.header_json),
     recurrence: parseJsonSafe(row.recurrence_json, null),
+    is_public: Number(row.is_public) === 1 ? 1 : 0,
     assets,
   };
 }
@@ -144,4 +145,5 @@ module.exports = {
   expandRecurrenceDates,
   serializeLibraryRow,
   academyToday,
+  addDaysYmd,
 };

@@ -12,7 +12,6 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { API_BASE } from '../config';
@@ -268,7 +267,6 @@ export default function LandingHomeScreen({ navigation, route }: any) {
   if (loading) {
     return (
       <View style={styles.root}>
-        <ScreenPageTitle title="Home" />
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={BRAND_RED} />
         </View>
@@ -278,7 +276,6 @@ export default function LandingHomeScreen({ navigation, route }: any) {
 
   return (
     <View style={[styles.root, { paddingBottom: 8 + insets.bottom }]}>
-      <ScreenPageTitle title="Home" />
       <FlatList style={styles.listFlex}
         data={courses}
         keyExtractor={(item) => String(item.id)}

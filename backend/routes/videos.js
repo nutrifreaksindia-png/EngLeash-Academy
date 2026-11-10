@@ -34,7 +34,14 @@ router.get('/', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => 
   const rows = db.prepare(`
     SELECT v.*, vc.name AS category_name, vc.slug AS category_slug,
       MAX(creator.name) AS creator_name,
-      COUNT(a.id) AS assignment_count
+      COUNT(a.id) AS assignment_count,
+      (
+        SELECT COUNT(*) FROM video_assignments la
+        WHERE la.video_id = v.id AND la.scope_type = 'lesson'
+      ) + (
+        SELECT COUNT(*) FROM lesson_library_items li
+        WHERE li.item_type = 'video' AND li.item_id = v.id
+      ) AS lesson_link_count
     FROM video_library v
     LEFT JOIN users creator ON creator.id = v.created_by
     LEFT JOIN video_categories vc ON vc.id = v.category_id
@@ -42,7 +49,20 @@ router.get('/', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => 
     GROUP BY v.id
     ORDER BY v.updated_at DESC, v.id DESC
   `).all();
-  res.json(stripRows(req.user, filterLibraryRowsForTrainer(req.user, 'video', rows)));
+  res.json(
+    stripRows(
+      req.user,
+      filterLibraryRowsForTrainer(
+        req.user,
+        'video',
+        rows.map((r) => ({
+          ...r,
+          assignment_count: Number(r.assignment_count) || 0,
+          lesson_link_count: Number(r.lesson_link_count) || 0,
+        })),
+      ),
+    ),
+  );
 });
 
 router.get('/categories', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
@@ -127,6 +147,22 @@ router.put('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) 
   res.json(stripCreatorFields(req.user, updated));
 });
 
+function videoLessonLinkCount(videoId) {
+  const fromAssignments = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM video_assignments
+       WHERE video_id = ? AND scope_type = 'lesson'`,
+    )
+    .get(videoId);
+  const fromLessons = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM lesson_library_items
+       WHERE item_type = 'video' AND item_id = ?`,
+    )
+    .get(videoId);
+  return (Number(fromAssignments?.c) || 0) + (Number(fromLessons?.c) || 0);
+}
+
 router.delete('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), async (req, res) => {
   const id = Number(req.params.id);
   const row = db.prepare(`
@@ -137,6 +173,12 @@ router.delete('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), async (r
   `).get(id);
   if (!row) return res.status(404).json({ error: 'Video not found' });
   if (!canMutateLibraryByCreatedBy(req.user, row)) return res.status(403).json({ error: 'Forbidden' });
+
+  if (videoLessonLinkCount(id) > 0) {
+    return res.status(409).json({
+      error: 'This video is attached to a lesson. Remove it from the lesson first, then delete.',
+    });
+  }
 
   if (isSpacesConfigured()) {
     const slug = String(row.category_slug || 'uncategorized').replace(/[^a-z0-9-]+/gi, '-');

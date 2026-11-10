@@ -66,7 +66,7 @@ export default function ReviewInboxPage({
     <div className="stack">
       <SectionCard
         title="Review inbox"
-        subtitle="Assignment submissions from your active batches."
+        subtitle="Legacy PDF homework from batch assignments."
         actions={
           <select value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="pending">Pending</option>
@@ -75,6 +75,13 @@ export default function ReviewInboxPage({
           </select>
         }
       >
+        <p
+          className="studyDraftBanner"
+          style={{ marginTop: 0, marginBottom: 12 }}
+        >
+          Legacy homework — new library sets are graded under{' '}
+          <strong>Assignments → Responses</strong>.
+        </p>
         {loading ? <p className="muted">Loading…</p> : null}
         {error ? <p className="muted">{error}</p> : null}
         <div className="tableWrap">
@@ -133,11 +140,6 @@ export default function ReviewInboxPage({
             </button>
           }
         >
-          <p>
-            <a href={active.file_url} target="_blank" rel="noreferrer">
-              Open PDF
-            </a>
-          </p>
           <iframe className="reviewPdfFrame" title="Assignment PDF" src={active.file_url} />
           <form className="stack" onSubmit={saveReview}>
             <label className="batchCreateLabel">

@@ -149,8 +149,7 @@ function ensureV1Tables(db) {
       student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       file_key TEXT NOT NULL,
       file_url TEXT NOT NULL,
-      submitted_at TEXT DEFAULT (datetime('now')),
-      UNIQUE(assignment_id, student_id)
+      submitted_at TEXT DEFAULT (datetime('now'))
     );
 
     CREATE TABLE IF NOT EXISTS razorpay_course_orders (
@@ -751,6 +750,91 @@ function ensureV1Tables(db) {
   migrateApplyCourseEnquiriesCallback(db);
   migrateTrainerPanel(db);
   migrateAssignmentsOverhaul(db);
+  migrateAssignmentResponseRetention(db);
+  migrateAssignmentSubmissionOccurrenceUnique(db);
+  migrateAssignmentSubmissionFiles(db);
+  safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN feedback_audio_url TEXT');
+  safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN feedback_audio_key TEXT');
+}
+
+/** Multiple media files per student submission (photos, videos, files, voice notes). */
+function migrateAssignmentSubmissionFiles(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS assignment_submission_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      submission_id INTEGER NOT NULL REFERENCES assignment_submissions(id) ON DELETE CASCADE,
+      file_key TEXT NOT NULL,
+      file_url TEXT NOT NULL,
+      mime_type TEXT,
+      kind TEXT,
+      file_name TEXT,
+      sort_order INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_assignment_submission_files_submission ON assignment_submission_files(submission_id)',
+  );
+
+  // Backfill legacy single file_url rows into the files table once.
+  const existing = db
+    .prepare(
+      `SELECT s.id, s.file_key, s.file_url, s.mime_type, s.response_type
+       FROM assignment_submissions s
+       WHERE COALESCE(s.file_url, '') != ''
+         AND NOT EXISTS (
+           SELECT 1 FROM assignment_submission_files f WHERE f.submission_id = s.id
+         )`,
+    )
+    .all();
+  const ins = db.prepare(
+    `INSERT INTO assignment_submission_files
+      (submission_id, file_key, file_url, mime_type, kind, file_name, sort_order)
+     VALUES (?, ?, ?, ?, ?, ?, 0)`,
+  );
+  for (const row of existing) {
+    ins.run(
+      row.id,
+      row.file_key || 'none',
+      row.file_url,
+      row.mime_type || null,
+      row.response_type || 'file',
+      null,
+    );
+  }
+}
+
+/** Admin-configurable Spaces retention for student assignment responses. */
+function migrateAssignmentResponseRetention(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      updated_by INTEGER REFERENCES users(id)
+    );
+  `);
+  const existing = db
+    .prepare("SELECT value FROM app_settings WHERE key = 'assignment_response_retention_days'")
+    .get();
+  if (!existing) {
+    db.prepare(
+      "INSERT INTO app_settings (key, value) VALUES ('assignment_response_retention_days', '20')",
+    ).run();
+  }
+  safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN expires_at TEXT');
+  safeAlter(db, "ALTER TABLE assignment_submissions ADD COLUMN spaces_status TEXT DEFAULT 'active'");
+  // Backfill expiry for existing media submissions (submitted_at + 20 days).
+  try {
+    db.prepare(
+      `UPDATE assignment_submissions
+       SET expires_at = datetime(COALESCE(submitted_at, 'now'), '+20 days'),
+           spaces_status = COALESCE(spaces_status, 'active')
+       WHERE expires_at IS NULL`,
+    ).run();
+  } catch (_) {
+    /* ignore */
+  }
 }
 
 /** Library header/assets/response types + occurrences (replaces ad-hoc batch_assignments). */
@@ -759,6 +843,7 @@ function migrateAssignmentsOverhaul(db) {
   safeAlter(db, "ALTER TABLE assignment_library ADD COLUMN response_type TEXT DEFAULT 'file'");
   safeAlter(db, 'ALTER TABLE assignment_library ADD COLUMN header_json TEXT');
   safeAlter(db, 'ALTER TABLE assignment_library ADD COLUMN recurrence_json TEXT');
+  safeAlter(db, 'ALTER TABLE assignment_library ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0');
   // title stays NOT NULL historically; new rows still get a derived/placeholder title for search.
 
   db.exec(`
@@ -809,6 +894,7 @@ function migrateAssignmentsOverhaul(db) {
   safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN text_body TEXT');
   safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN mime_type TEXT');
   safeAlter(db, "ALTER TABLE assignment_submissions ADD COLUMN status TEXT DEFAULT 'submitted'");
+  safeAlter(db, "ALTER TABLE assignment_occurrences ADD COLUMN status TEXT DEFAULT 'active'");
 
   // Backfill library header_json from title where missing.
   try {
@@ -1241,6 +1327,88 @@ function migratePaymentRecordsForApply(db) {
     db.pragma('foreign_keys = ON');
   }
 
+}
+
+/**
+ * Submissions must be unique per (occurrence, student), not (legacy assignment_id, student).
+ * The old UNIQUE(assignment_id, student_id) made submitting a second occurrence overwrite the first.
+ */
+function assignmentSubmissionsUsesOccurrenceUnique(db) {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'assignment_submissions'")
+    .get();
+  if (!row?.sql) return true;
+  const sql = String(row.sql);
+  return sql.includes('UNIQUE(occurrence_id, student_id)') && !sql.includes('UNIQUE(assignment_id, student_id)');
+}
+
+function migrateAssignmentSubmissionOccurrenceUnique(db) {
+  if (assignmentSubmissionsUsesOccurrenceUnique(db)) {
+    db.exec(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_assignment_submissions_occurrence_student ON assignment_submissions(occurrence_id, student_id)',
+    );
+    return;
+  }
+
+  db.pragma('foreign_keys = OFF');
+  try {
+    const tx = db.transaction(() => {
+      db.exec(`
+        CREATE TABLE assignment_submissions__occ_unique (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          assignment_id INTEGER NOT NULL REFERENCES batch_assignments(id) ON DELETE CASCADE,
+          batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+          student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          file_key TEXT NOT NULL,
+          file_url TEXT NOT NULL,
+          submitted_at TEXT DEFAULT (datetime('now')),
+          score REAL,
+          feedback TEXT,
+          review_status TEXT DEFAULT 'pending',
+          reviewed_by INTEGER REFERENCES users(id),
+          reviewed_at TEXT,
+          occurrence_id INTEGER REFERENCES assignment_occurrences(id) ON DELETE CASCADE,
+          response_type TEXT DEFAULT 'file',
+          text_body TEXT,
+          mime_type TEXT,
+          status TEXT DEFAULT 'submitted',
+          expires_at TEXT,
+          spaces_status TEXT DEFAULT 'active',
+          UNIQUE(occurrence_id, student_id)
+        );
+      `);
+
+      // Keep the newest row per (occurrence_id, student_id); drop orphaned duplicates.
+      db.exec(`
+        INSERT INTO assignment_submissions__occ_unique (
+          id, assignment_id, batch_id, student_id, file_key, file_url, submitted_at,
+          score, feedback, review_status, reviewed_by, reviewed_at,
+          occurrence_id, response_type, text_body, mime_type, status, expires_at, spaces_status
+        )
+        SELECT
+          s.id, s.assignment_id, s.batch_id, s.student_id, s.file_key, s.file_url, s.submitted_at,
+          s.score, s.feedback, s.review_status, s.reviewed_by, s.reviewed_at,
+          s.occurrence_id, s.response_type, s.text_body, s.mime_type, s.status, s.expires_at, s.spaces_status
+        FROM assignment_submissions s
+        WHERE s.id IN (
+          SELECT MAX(id) FROM assignment_submissions
+          GROUP BY COALESCE(occurrence_id, -id), student_id
+        );
+      `);
+
+      db.exec('DROP TABLE assignment_submissions;');
+      db.exec('ALTER TABLE assignment_submissions__occ_unique RENAME TO assignment_submissions;');
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_assignment_submissions_assignment ON assignment_submissions(assignment_id)',
+      );
+      db.exec(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_assignment_submissions_occurrence_student ON assignment_submissions(occurrence_id, student_id)',
+      );
+    });
+    tx();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 /** Expand users.role CHECK to allow Creator (SQLite cannot ALTER CHECK). */

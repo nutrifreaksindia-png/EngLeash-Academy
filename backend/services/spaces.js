@@ -144,6 +144,30 @@ async function uploadToSpaces({ buffer, mimeType, key }) {
  * @param {string} prefix e.g. live-recordings/Live Session Recordings/batch-1/...
  * @returns {Promise<number>} deleted count
  */
+async function deleteObjectKeys(keys) {
+  const client = getSpacesClient();
+  if (!client) {
+    throw new Error('DigitalOcean Spaces is not configured in backend env');
+  }
+  const bucket = process.env.SPACES_BUCKET;
+  const list = (Array.isArray(keys) ? keys : [])
+    .map((k) => String(k || '').replace(/^\/+/, ''))
+    .filter(Boolean);
+  if (!list.length) return 0;
+  let deleted = 0;
+  for (let i = 0; i < list.length; i += 1000) {
+    const chunk = list.slice(i, i + 1000);
+    await client.send(
+      new DeleteObjectsCommand({
+        Bucket: bucket,
+        Delete: { Objects: chunk.map((Key) => ({ Key })), Quiet: true },
+      }),
+    );
+    deleted += chunk.length;
+  }
+  return deleted;
+}
+
 async function deleteObjectsUnderPrefix(prefix) {
   const client = getSpacesClient();
   if (!client) {
@@ -203,6 +227,7 @@ module.exports = {
   uploadLessonTemplateVideoToSpaces,
   uploadToSpaces,
   deleteAllMediaObjectsInSpaces,
+  deleteObjectKeys,
   deleteObjectsUnderPrefix,
   getSignedPlaybackUrl,
   MEDIA_PREFIXES,

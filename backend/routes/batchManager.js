@@ -1418,9 +1418,11 @@ router.post('/:id/assignments/:assignmentId/submit', auth, requireRole('Student'
     key,
   });
 
+  const { expiresAtFromRetentionDays } = require('../lib/appSettings');
+  const expiresAt = expiresAtFromRetentionDays();
   db.prepare(`
-    INSERT INTO assignment_submissions (assignment_id, batch_id, student_id, file_key, file_url, review_status, score, feedback, reviewed_by, reviewed_at)
-    VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL)
+    INSERT INTO assignment_submissions (assignment_id, batch_id, student_id, file_key, file_url, review_status, score, feedback, reviewed_by, reviewed_at, expires_at, spaces_status, response_type, status)
+    VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, 'active', 'file', 'done')
     ON CONFLICT(assignment_id, student_id) DO UPDATE SET
       file_key = excluded.file_key,
       file_url = excluded.file_url,
@@ -1429,8 +1431,11 @@ router.post('/:id/assignments/:assignmentId/submit', auth, requireRole('Student'
       score = NULL,
       feedback = NULL,
       reviewed_by = NULL,
-      reviewed_at = NULL
-  `).run(assignmentId, batchId, req.user.id, uploaded.key, uploaded.publicUrl);
+      reviewed_at = NULL,
+      expires_at = excluded.expires_at,
+      spaces_status = 'active',
+      status = 'done'
+  `).run(assignmentId, batchId, req.user.id, uploaded.key, uploaded.publicUrl, expiresAt);
 
   res.status(201).json({ ok: true, fileUrl: uploaded.publicUrl });
 });

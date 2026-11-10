@@ -9,6 +9,14 @@ function canMutateLibraryByCreatedBy(user, row) {
   return false;
 }
 
+/** Admin may publicize any assignment; trainers may publicize only ones they created. */
+function canSetAssignmentPublic(user, row) {
+  if (!row || !user) return false;
+  if (user.role === 'Admin') return true;
+  if (user.role === 'Trainer' && Number(row.created_by) === Number(user.id)) return true;
+  return false;
+}
+
 function isAuthorRole(user) {
   return user?.role === 'Trainer' || user?.role === 'Creator';
 }
@@ -94,6 +102,7 @@ function stripWorksheetAnswerKeyIfNeeded(user, row) {
 module.exports = {
   isAdmin,
   canMutateLibraryByCreatedBy,
+  canSetAssignmentPublic,
   canViewStudyMaterial,
   canViewAssignment,
   canViewWorksheet,

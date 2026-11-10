@@ -13,7 +13,8 @@ const BRAND_RED = '#c41e3a';
 type LoadedStatus = Extract<AVPlaybackStatus, { isLoaded: true }>;
 
 export default function VideoPlayerScreen({ route, navigation }: any) {
-  const { videoUrl, allowDownload } = route.params;
+  const { videoUrl, allowDownload, title } = route.params || {};
+  const pageTitle = String(title || 'Video');
   const videoRef = useRef<Video | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -49,9 +50,9 @@ export default function VideoPlayerScreen({ route, navigation }: any) {
   if (!videoUrl) {
     return (
       <View style={styles.pageRoot}>
-        <ScreenPageTitle title="Video" />
+        <ScreenPageTitle title={pageTitle} />
         <View style={styles.centered}>
-          <Text style={styles.errorText}>No video for this lesson.</Text>
+          <Text style={styles.errorText}>No video available.</Text>
           <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
             <Text style={styles.backBtnText}>Back</Text>
           </TouchableOpacity>
@@ -79,7 +80,7 @@ export default function VideoPlayerScreen({ route, navigation }: any) {
   return (
     <View style={[styles.container, { paddingBottom: insets.bottom, paddingRight: insets.right }]}>
       <View style={[styles.titleBar, { paddingTop: insets.top }]}>
-        <ScreenPageTitle title="Video" showDivider={false} />
+        <ScreenPageTitle title={pageTitle} showDivider={false} />
       </View>
       {loading && (
         <View style={styles.loadingOverlay}>

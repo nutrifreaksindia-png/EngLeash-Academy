@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import SectionCard from '../components/SectionCard';
 import StudentProgressPanel from '../components/StudentProgressPanel';
+import MediaPreview from '../components/MediaPreview';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -376,9 +377,9 @@ export default function TrainerBatchPage({
 
       {tab === 'assignments' ? (
         <SectionCard title="Assignments">
-          <p className="muted" style={{ marginBottom: 12 }}>
-            Schedule homework from the library via{' '}
-            <strong>Assignments → Set an Assignment</strong>. Legacy batch homework (if any) is listed below.
+          <p className="studyDraftBanner" style={{ marginBottom: 12, marginTop: 0 }}>
+            Legacy homework — new sets live under <strong>Assignments → Set an Assignment</strong>, and grading
+            under <strong>Assignments → Responses</strong>. The list below is older PDF homework only.
           </p>
           <div className="tableWrap">
             <table className="dataTable">
@@ -415,21 +416,25 @@ export default function TrainerBatchPage({
                         <td colSpan={4}>
                           <ul className="batchSubmissionList">
                             {subs[a.id].map((s) => (
-                              <li key={s.id}>
-                                <a href={s.file_url} target="_blank" rel="noreferrer">
-                                  {s.student_name}
-                                </a>
-                                <span className="muted">
-                                  {' '}
-                                  · {s.review_status === 'reviewed' ? `${s.score}/${s.max_score ?? 10}` : 'pending'}
-                                </span>
-                                <button
-                                  type="button"
-                                  className="secondaryBtn"
-                                  onClick={() => setProgressStudentId(s.student_id)}
-                                >
-                                  Student
-                                </button>
+                              <li key={s.id} style={{ marginBottom: 12 }}>
+                                <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                                  <strong>{s.student_name}</strong>
+                                  <span className="muted">
+                                    {s.review_status === 'reviewed'
+                                      ? `${s.score}/${s.max_score ?? 10}`
+                                      : 'pending'}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="secondaryBtn"
+                                    onClick={() => setProgressStudentId(s.student_id)}
+                                  >
+                                    Student
+                                  </button>
+                                </div>
+                                {s.file_url ? (
+                                  <MediaPreview url={s.file_url} typeHint="pdf" title={s.student_name} maxHeight={220} />
+                                ) : null}
                               </li>
                             ))}
                             {subs[a.id].length === 0 ? <li className="muted">No submissions.</li> : null}
@@ -467,11 +472,9 @@ export default function TrainerBatchPage({
                       <tr key={r.id}>
                         <td>{r.liveTitle || `Session ${r.liveSessionId}`}</td>
                         <td>{r.stoppedAt ? new Date(r.stoppedAt).toLocaleString() : '—'}</td>
-                        <td>
+                        <td style={{ minWidth: 280 }}>
                           {playUrl ? (
-                            <a href={playUrl} target="_blank" rel="noreferrer">
-                              Play
-                            </a>
+                            <MediaPreview url={playUrl} typeHint="video" title="Recording" maxHeight={200} />
                           ) : (
                             '—'
                           )}

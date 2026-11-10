@@ -9,7 +9,15 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
 import { HtmlContent } from '../HtmlContent';
+import { isViewableMediaUrl, openMedia } from '../../lib/openMedia';
+
+function openHref(navigation: any, href?: string | null) {
+  if (!href) return;
+  if (isViewableMediaUrl(href)) openMedia(navigation, { url: href });
+  else void Linking.openURL(href);
+}
 
 const BRAND_BLUE = '#1a237e';
 
@@ -216,6 +224,7 @@ function normalizeSpans(block: any, stripMarkers = false): InlineSpan[] {
 }
 
 function InlineText({ spans, baseStyle }: { spans: InlineSpan[]; baseStyle: any }) {
+  const navigation = useNavigation<any>();
   return (
     <Text style={baseStyle}>
       {spans.map((s, i) => (
@@ -227,9 +236,7 @@ function InlineText({ spans, baseStyle }: { spans: InlineSpan[]; baseStyle: any 
             fontStyle: s.italic ? 'italic' : 'normal',
             textDecorationLine: s.underline ? 'underline' : 'none',
           }}
-          onPress={() => {
-            if (s.href) void Linking.openURL(s.href);
-          }}
+          onPress={() => openHref(navigation, s.href)}
         >
           {s.text || ''}
         </Text>
@@ -278,6 +285,7 @@ function ListItemRow({
   depth: number;
   ordered?: boolean;
 }) {
+  const navigation = useNavigation<any>();
   const indent = depth * LIST_LEVEL_INDENT;
   const markerText = `${marker} `;
   return (
@@ -292,9 +300,7 @@ function ListItemRow({
             fontStyle: s.italic ? 'italic' : 'normal',
             textDecorationLine: s.underline ? 'underline' : 'none',
           }}
-          onPress={() => {
-            if (s.href) void Linking.openURL(s.href);
-          }}
+          onPress={() => openHref(navigation, s.href)}
         >
           {s.text || ''}
         </Text>
@@ -316,6 +322,7 @@ function ContentBlocksBody({
   description,
   horizontalInset = 32,
 }: Omit<Props, 'scrollable'>) {
+  const navigation = useNavigation<any>();
   const { width } = useWindowDimensions();
   const contentWidth = Math.max(200, width - horizontalInset);
 
@@ -491,9 +498,16 @@ function ContentBlocksBody({
                 b.align === 'left' ? { alignSelf: 'flex-start' } :
                   b.align === 'center' ? { alignSelf: 'center' } : { alignSelf: 'flex-end' },
               ]}
-              onPress={() => b.url && Linking.openURL(b.url)}
+              onPress={() =>
+                b.url &&
+                openMedia(navigation, {
+                  url: b.url,
+                  title: b.label || 'PDF',
+                  kind: 'pdf',
+                })
+              }
             >
-              <Text style={styles.linkText}>{b.label || 'Download PDF'}</Text>
+              <Text style={styles.linkText}>{b.label || 'View PDF'}</Text>
             </TouchableOpacity>
             </View>
           );
@@ -501,8 +515,18 @@ function ContentBlocksBody({
         if (b.type === 'audioAttachment') {
           return (
             <View key={b.id || `aud-${idx}`} style={styles.blockWrap}>
-            <TouchableOpacity style={styles.linkCard} onPress={() => b.url && Linking.openURL(b.url)}>
-              <Text style={styles.linkText}>{b.title || 'Open Audio File'}</Text>
+            <TouchableOpacity
+              style={styles.linkCard}
+              onPress={() =>
+                b.url &&
+                openMedia(navigation, {
+                  url: b.url,
+                  title: b.title || 'Audio',
+                  kind: 'audio',
+                })
+              }
+            >
+              <Text style={styles.linkText}>{b.title || 'Play audio'}</Text>
             </TouchableOpacity>
             </View>
           );

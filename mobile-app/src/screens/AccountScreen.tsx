@@ -7,7 +7,6 @@ import {
   Alert,
   Image,
   KeyboardAvoidingView,
-  Linking,
   Platform,
   ScrollView,
   StyleSheet,
@@ -18,11 +17,12 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import LoginForm from '../components/LoginForm';
-import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../api/client';
 import { alertApplyPaymentError, payApplyDueWithRazorpay } from '../payments/razorpayApplyBilling';
 import { alertBillingPaymentError, payBillingPackage } from '../payments/razorpayBillingPackage';
+import { clearAllLocalAssignmentResponses } from '../lib/assignmentLocalStore';
+import { openMedia } from '../lib/openMedia';
 
 const BRAND_BLUE = '#1a237e';
 const BRAND_RED = '#c41e3a';
@@ -552,7 +552,11 @@ export default function AccountScreen({ navigation }: any) {
       const data = await api.get(`/payments/my/${paymentRecordId}/invoice-link`);
       const url = String(data?.url || '').trim();
       if (!url) throw new Error('Invoice link not available');
-      await Linking.openURL(url);
+      openMedia(navigation, {
+        url,
+        title: data?.invoiceNumber ? `Invoice ${data.invoiceNumber}` : 'Invoice',
+        kind: 'pdf',
+      });
     } catch (error: any) {
       Alert.alert('Invoice', error?.message || 'Could not open invoice PDF');
     } finally {
@@ -563,7 +567,6 @@ export default function AccountScreen({ navigation }: any) {
   if (user) {
     return (
       <View style={styles.profileRoot}>
-        <ScreenPageTitle title="My Account" />
         <ScrollView style={styles.container} contentContainerStyle={[styles.profileContent, { paddingBottom: 24 + insets.bottom }]}>
           <View style={styles.heroCard}>
             <View style={styles.avatarWrap}>
@@ -894,6 +897,29 @@ export default function AccountScreen({ navigation }: any) {
               })
             )}
           </View>
+          <TouchableOpacity
+            style={styles.secondaryBtn}
+            onPress={() => {
+              Alert.alert(
+                'Clear saved assignment responses?',
+                'Removes copies stored on this phone. Cloud copies (if still within retention) are not deleted.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: 'Clear',
+                    style: 'destructive',
+                    onPress: () => {
+                      void clearAllLocalAssignmentResponses()
+                        .then(() => Alert.alert('Cleared', 'Device assignment responses removed.'))
+                        .catch((e) => Alert.alert('Error', e?.message || 'Could not clear'));
+                    },
+                  },
+                ],
+              );
+            }}
+          >
+            <Text style={styles.secondaryBtnText}>Clear saved assignment responses</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.logoutBtn} onPress={() => logout()}>
             <Text style={styles.logoutText}>Log out</Text>
           </TouchableOpacity>
@@ -904,7 +930,6 @@ export default function AccountScreen({ navigation }: any) {
 
   return (
     <View style={styles.loginRoot}>
-      <ScreenPageTitle title="My Account" />
       <KeyboardAvoidingView style={[styles.loginWrap, { paddingBottom: insets.bottom }]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView contentContainerStyle={styles.loginScroll} keyboardShouldPersistTaps="handled">
           <Text style={styles.signInTitle}>Sign in</Text>
@@ -1126,6 +1151,16 @@ const styles = StyleSheet.create({
   primaryActionBtnText: { color: '#fff', fontWeight: '800' },
   refreshBtn: { marginTop: 6, paddingVertical: 12, alignItems: 'center' },
   refreshText: { color: BRAND_BLUE, fontWeight: '700' },
+  secondaryBtn: {
+    marginTop: 16,
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    paddingVertical: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+  },
+  secondaryBtnText: { color: '#475569', fontWeight: '700', fontSize: 15 },
   logoutBtn: {
     marginTop: 8,
     backgroundColor: BRAND_RED,

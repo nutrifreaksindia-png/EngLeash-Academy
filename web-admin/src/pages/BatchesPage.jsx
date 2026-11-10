@@ -1460,9 +1460,9 @@ export default function BatchesPage({
           <p className="muted">Loading…</p>
         ) : (
           <div className="stack batchModalBody">
-            <p className="muted">
-              Schedule from the library via <strong>Assignments → Set an Assignment</strong>. Legacy homework for
-              this batch is listed below.
+            <p className="studyDraftBanner" style={{ marginTop: 0 }}>
+              Legacy homework — new sets live under <strong>Assignments → Set an Assignment</strong>, and grading
+              under <strong>Assignments → Responses</strong>. The list below is older PDF homework only.
             </p>
             <div className="tableWrap">
               <table>
@@ -1490,11 +1490,25 @@ export default function BatchesPage({
                           <td colSpan={3}>
                             <ul className="batchSubmissionList">
                               {submissionCache[a.id].map((s) => (
-                                <li key={s.id}>
-                                  <a href={s.file_url} target="_blank" rel="noreferrer">
-                                    {s.student_name}
-                                  </a>
-                                  <span className="muted"> · {s.submitted_at || ''}</span>
+                                <li key={s.id} style={{ marginBottom: 12 }}>
+                                  <div>
+                                    <strong>{s.student_name}</strong>
+                                    <span className="muted"> · {s.submitted_at || ''}</span>
+                                  </div>
+                                  {s.file_url ? (
+                                    <iframe
+                                      title={`${s.student_name} submission`}
+                                      src={s.file_url}
+                                      style={{
+                                        width: '100%',
+                                        height: 220,
+                                        border: '1px solid #e2e8f0',
+                                        borderRadius: 8,
+                                        marginTop: 6,
+                                        background: '#fff',
+                                      }}
+                                    />
+                                  ) : null}
                                 </li>
                               ))}
                               {submissionCache[a.id].length === 0 && <li className="muted">No submissions.</li>}
@@ -1605,11 +1619,6 @@ export default function BatchesPage({
                 preload="metadata"
                 playsInline
               />
-              <div className="row">
-                <a href={recordingPreview.url} target="_blank" rel="noopener noreferrer">
-                  Open source URL
-                </a>
-              </div>
             </div>
           ) : null}
           {batchRecordingsLoading ? (

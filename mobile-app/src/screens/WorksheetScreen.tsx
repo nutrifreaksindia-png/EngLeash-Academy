@@ -1,6 +1,7 @@
 import React from 'react';
-import { Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
+import { openMedia } from '../lib/openMedia';
 
 const BRAND_RED = '#c41e3a';
 
@@ -9,25 +10,25 @@ type Worksheet = { id: number; title: string; fileUrl: string };
 export default function WorksheetScreen({ route, navigation }: any) {
   const { worksheets } = route.params as { worksheets: Worksheet[] };
 
-  const openPdf = (url: string) => {
-    Linking.openURL(url).catch(() => {});
-  };
-
   return (
     <View style={styles.pageRoot}>
       <ScreenPageTitle title="Worksheet" />
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.subtitle}>Tap to view or download (opens in browser)</Text>
-      {worksheets.map((w) => (
-        <TouchableOpacity key={w.id} style={styles.card} onPress={() => openPdf(w.fileUrl)}>
-          <Text style={styles.cardTitle}>{w.title}</Text>
-          <Text style={styles.cardSub}>View / Download PDF</Text>
+        <Text style={styles.subtitle}>Tap to view in the app</Text>
+        {worksheets.map((w) => (
+          <TouchableOpacity
+            key={w.id}
+            style={styles.card}
+            onPress={() => openMedia(navigation, { url: w.fileUrl, title: w.title, kind: 'pdf' })}
+          >
+            <Text style={styles.cardTitle}>{w.title}</Text>
+            <Text style={styles.cardSub}>View PDF</Text>
+          </TouchableOpacity>
+        ))}
+        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
+          <Text style={styles.backBtnText}>Back</Text>
         </TouchableOpacity>
-      ))}
-      <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
-        <Text style={styles.backBtnText}>Back</Text>
-      </TouchableOpacity>
-    </ScrollView>
+      </ScrollView>
     </View>
   );
 }

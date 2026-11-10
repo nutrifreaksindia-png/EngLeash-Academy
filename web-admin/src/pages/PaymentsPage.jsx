@@ -1,5 +1,6 @@
 import React from 'react';
 import SectionCard from '../components/SectionCard';
+import { MediaPreviewModal } from '../components/MediaPreview';
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -43,6 +44,7 @@ export default function PaymentsPage({
   const [expandedProfileId, setExpandedProfileId] = React.useState(null);
   const [manualForm, setManualForm] = React.useState(null);
   const [scheduleForm, setScheduleForm] = React.useState(null);
+  const [invoicePreview, setInvoicePreview] = React.useState(null);
 
   const refreshRows = React.useCallback(async () => {
     try {
@@ -83,7 +85,13 @@ export default function PaymentsPage({
     if (!row?.id) return;
     try {
       setInvoiceBusyId(row.id);
-      await openInvoice(row.id);
+      const result = await openInvoice(row.id);
+      const url = typeof result === 'string' ? result : result?.url;
+      if (!url) throw new Error('Invoice link not available');
+      setInvoicePreview({
+        url,
+        title: result?.title || (result?.invoiceNumber ? `Invoice ${result.invoiceNumber}` : 'Invoice'),
+      });
     } catch (error) {
       pushToast(error?.message || 'Could not open invoice', 'error');
     } finally {
@@ -119,7 +127,7 @@ export default function PaymentsPage({
       setManualForm(null);
       await Promise.all([refreshRows(), refreshApplyRows()]);
       if (payment?.id) {
-        await openInvoice(payment.id);
+        await handleOpenInvoice(payment);
       }
     } catch (error) {
       pushToast(error?.message || 'Could not record manual payment', 'error');
@@ -184,7 +192,7 @@ export default function PaymentsPage({
       <h1 style={{ margin: '0 0 20px', fontWeight: '800', color: 'var(--ink, #0f172a)' }}>Payments &amp; invoices</h1>
       <SectionCard
         title="Revenue ledger"
-        subtitle="Successful purchase, subscription, and apply-course payments with invoice downloads."
+        subtitle="Successful purchase, subscription, and apply-course payments — view invoices in the panel."
         actions={(
           <>
             <input
@@ -535,6 +543,14 @@ export default function PaymentsPage({
           </form>
         </div>
       ) : null}
+
+      <MediaPreviewModal
+        open={Boolean(invoicePreview?.url)}
+        url={invoicePreview?.url}
+        title={invoicePreview?.title || 'Invoice'}
+        typeHint="pdf"
+        onClose={() => setInvoicePreview(null)}
+      />
     </>
   );
 }

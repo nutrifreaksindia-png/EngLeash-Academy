@@ -1402,9 +1402,24 @@ function Preview({ blocks, cropDrafts, variant = 'mobile', onBlockClick, selecte
           return wrapBlock(
             b,
             <div style={{ textAlign: b.align || 'right' }}>
-              <a href={b.url || '#'} target="_blank" rel="noreferrer" className="studyPreviewLink">
-                {b.label || 'Download PDF'}
-              </a>
+              <div className="studyPreviewLink" style={{ marginBottom: 8 }}>
+                {b.label || 'PDF'}
+              </div>
+              {b.url ? (
+                <iframe
+                  title={b.label || 'PDF'}
+                  src={b.url}
+                  style={{
+                    width: '100%',
+                    height: 320,
+                    border: '1px solid #e2e8f0',
+                    borderRadius: 10,
+                    background: '#fff',
+                  }}
+                />
+              ) : (
+                <span className="muted">No PDF URL</span>
+              )}
             </div>,
           );
         }
@@ -1933,13 +1948,13 @@ export default function WorksheetsPage({
     undoStackRef.current = [];
     setEditorMode('worksheet');
     setEditingId(null);
-    setTitle('');
+    setTitle('Untitled draft');
     setDescription('');
     setDoc(emptyDoc);
     setPasteInput('');
     setPasteNotice('');
-    setEditorIsDraft(false);
-    setDraftNotice('');
+    setEditorIsDraft(true);
+    setDraftNotice('Saving draft…');
     setPreviewPopup(null);
     setOpenBlockId('');
     setAutosaveStatus('idle');
@@ -1951,7 +1966,7 @@ export default function WorksheetsPage({
     setCreatingDraft(true);
     try {
       const created = await onCreateRef.current({
-        title: '',
+        title: 'Untitled draft',
         description: '',
         contentJson: emptyDoc,
         isDraft: true,
@@ -1961,7 +1976,14 @@ export default function WorksheetsPage({
       if (!created?.id) throw new Error('Could not create draft');
       setEditingId(created.id);
       setEditorIsDraft(true);
-      lastPersistedSnapshotRef.current = normalizedEditorSnapshot('', '', emptyDoc, true);
+      setTitle(String(created.title || 'Untitled draft'));
+      setDraftNotice('Draft saved');
+      lastPersistedSnapshotRef.current = normalizedEditorSnapshot(
+        String(created.title || 'Untitled draft'),
+        '',
+        emptyDoc,
+        true,
+      );
     } catch (err) {
       if (newWorksheetSessionRef.current === session) {
         window.alert(err?.message || 'Could not create draft. Try again.');
