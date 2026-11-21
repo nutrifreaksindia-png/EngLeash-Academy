@@ -779,7 +779,7 @@ export default function LiveClassroomPage({ token }) {
    */
   const tryPictureInPicture = useCallback(
     async (opts = {}) => {
-      const preferRemoteVideo = opts.preferRemoteVideo ?? screenSharing;
+      const preferRemoteVideo = opts.preferRemoteVideo ?? false;
       const silent = opts.silent ?? false;
       const allowFallbackLocal = opts.allowFallbackLocal ?? !silent;
       const toast = (msg, ms = 5000) => {
@@ -829,7 +829,7 @@ export default function LiveClassroomPage({ token }) {
         setMenuOpen(false);
       }
     },
-    [screenSharing]
+    []
   );
 
   function toggleMic() {
@@ -1134,8 +1134,6 @@ export default function LiveClassroomPage({ token }) {
         onClick={toggleCam}
         aria-pressed={camOn}
         aria-label={camOn ? 'Turn camera off' : 'Turn camera on'}
-        disabled={screenSharing}
-        title={screenSharing ? 'Stop screen sharing to use the camera toggle' : undefined}
       >
         {camOn ? (
           <LiveSvg>
