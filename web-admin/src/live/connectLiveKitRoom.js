@@ -62,6 +62,7 @@ export async function connectLiveKitRoom({
   onRemotePresence,
   onActiveSpeaker,
   onLocalTracks,
+  onDeviceWarning,
 }) {
   const room = new Room({
     adaptiveStream: true,
@@ -92,13 +93,49 @@ export async function connectLiveKitRoom({
 
   await room.connect(url, token, { autoSubscribe: true });
 
-  let localTracks = [];
+  // Publish mic and camera independently so a dead/virtual camera (e.g. a disconnected
+  // Windows Phone Link device) does not block joining with audio.
+  const localTracks = [];
+  let micError = null;
+  let camError = null;
   try {
-    localTracks = await room.localParticipant.enableCameraAndMicrophone();
-    onLocalTracks?.(localTracks);
+    const pub = await room.localParticipant.setMicrophoneEnabled(true);
+    if (pub?.track) localTracks.push(pub.track);
   } catch (e) {
-    throw new Error(e?.message || 'Camera/microphone permission denied or no device found.');
+    micError = e;
   }
+  try {
+    const pub = await room.localParticipant.setCameraEnabled(true);
+    if (pub?.track) localTracks.push(pub.track);
+  } catch (e) {
+    camError = e;
+    try {
+      const cams = await Room.getLocalDevices('videoinput', true);
+      for (const cam of cams) {
+        try {
+          const pub = await room.localParticipant.setCameraEnabled(true, { deviceId: cam.deviceId });
+          if (pub?.track) {
+            localTracks.push(pub.track);
+            camError = null;
+            break;
+          }
+        } catch {
+          /* try next camera */
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  if (micError && camError) {
+    await disconnectWithTimeout(room);
+    throw new Error(micError?.message || 'Camera/microphone permission denied or no device found.');
+  }
+  const warnings = [];
+  if (camError) warnings.push('No working camera found — you joined without video. Check your camera or pick another one.');
+  if (micError) warnings.push('No working microphone found — you joined without audio.');
+  onDeviceWarning?.(warnings.join(' '));
+  onLocalTracks?.(localTracks);
 
   onConnectionState?.('connected');
   syncRemoteLiveKitAudio(room);

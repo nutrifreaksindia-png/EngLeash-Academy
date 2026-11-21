@@ -528,7 +528,43 @@ export default function LiveClassroomPage({ token }) {
     let cancelled = false;
     void (async () => {
       try {
-        const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        let s;
+        try {
+          s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        } catch (firstErr) {
+          // Default camera may be dead/virtual (e.g. disconnected Windows Phone Link device).
+          // Get audio first (also unlocks device labels), then try each camera in turn.
+          let audioStream = null;
+          try {
+            audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          } catch {
+            /* mic unavailable too */
+          }
+          let videoStream = null;
+          try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            for (const d of devices.filter((x) => x.kind === 'videoinput' && x.deviceId)) {
+              try {
+                videoStream = await navigator.mediaDevices.getUserMedia({
+                  video: { deviceId: { exact: d.deviceId } },
+                });
+                break;
+              } catch {
+                /* try next camera */
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+          if (!audioStream && !videoStream) throw firstErr;
+          s = new MediaStream([
+            ...(videoStream ? videoStream.getVideoTracks() : []),
+            ...(audioStream ? audioStream.getAudioTracks() : []),
+          ]);
+          if (!videoStream) {
+            setDeviceHint('No working camera found (the default camera may be a disconnected phone). You can still join with audio.');
+          }
+        }
         if (cancelled) {
           s.getTracks().forEach((t) => t.stop());
           return;
@@ -981,6 +1017,9 @@ export default function LiveClassroomPage({ token }) {
             setRtcPresenceTick((x) => x + 1);
           },
           onActiveSpeaker: (uid) => setActiveSpeakerUid(uid),
+          onDeviceWarning: (msg) => {
+            if (msg) setDeviceHint(msg);
+          },
           onLocalTracks: (tracks) => {
             localTracksRef.current = tracks;
             setLocalTracksVersion((v) => v + 1);
