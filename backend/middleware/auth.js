@@ -1,7 +1,16 @@
 const jwt = require('jsonwebtoken');
 const db = require('../db');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
+const DEV_FALLBACK_SECRET = 'dev-secret-change-in-production';
+let JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  if (process.env.NODE_ENV === 'development') {
+    console.warn('[auth] JWT_SECRET not set; using insecure dev fallback (NODE_ENV=development).');
+    JWT_SECRET = DEV_FALLBACK_SECRET;
+  } else {
+    throw new Error('JWT_SECRET must be set (use NODE_ENV=development for a local-only fallback).');
+  }
+}
 
 function auth(req, res, next) {
   const header = req.headers.authorization;
