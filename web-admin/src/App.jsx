@@ -888,6 +888,22 @@ export default function App() {
     }
   }
 
+  async function changeFutureSessionTiming(batchId, { startTime, endTime }) {
+    try {
+      const res = await apiFetch(`/batch-manager/${batchId}/future-timing`, token, {
+        method: 'PUT',
+        body: JSON.stringify({ startTime, endTime }),
+      });
+      await loadAll();
+      pushToast(`Updated timing for ${res.updatedSessions} upcoming session(s)`, 'success');
+      return res;
+    } catch (err) {
+      setError(err.message);
+      pushToast(err.message, 'error');
+      return null;
+    }
+  }
+
   async function deleteBatch(batchId, options = {}) {
     const full = Boolean(options.full);
     try {
@@ -1929,6 +1945,7 @@ export default function App() {
         trainerMode={false}
         onCreateBatch={createBatch}
         onUpdateBatch={updateBatch}
+        onChangeFutureTiming={changeFutureSessionTiming}
         courses={courses}
         batches={batches}
         fetchSubscribePackagesForCourse={fetchSubscribePackagesForCourse}

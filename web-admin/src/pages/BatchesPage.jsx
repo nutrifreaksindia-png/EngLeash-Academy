@@ -122,6 +122,7 @@ function packageOptionLabel(p) {
 export default function BatchesPage({
   onCreateBatch,
   onUpdateBatch,
+  onChangeFutureTiming,
   courses = [],
   batches,
   fetchSubscribePackagesForCourse,
@@ -504,6 +505,32 @@ export default function BatchesPage({
       },
     });
     if (updated) setModalBatch(updated);
+  }
+
+  async function handleChangeFutureTiming() {
+    if (!modalBatch || !onChangeFutureTiming) return;
+    const start = schedStart.trim();
+    const end = schedEnd.trim();
+    if (!start || !end) {
+      window.alert('Choose both a start and an end time.');
+      return;
+    }
+    if (end <= start) {
+      window.alert('End time must be after the start time.');
+      return;
+    }
+    if (
+      !window.confirm(
+        `Change all upcoming sessions of "${modalBatch.title || modalBatch.name}" to ${start} – ${end}?\n\nSessions that have already happened, are live now, or were cancelled are not changed.`,
+      )
+    ) {
+      return;
+    }
+    const res = await onChangeFutureTiming(modalBatch.id, { startTime: start, endTime: end });
+    if (res) {
+      setModalBatch({ ...modalBatch, training_schedule_json: JSON.stringify(res.trainingSchedule) });
+      await onLoadSessions(modalBatch.id);
+    }
   }
 
   async function handleSaveBatchEdit(e) {
@@ -1054,6 +1081,27 @@ export default function BatchesPage({
                   </div>
                 </div>
               </>
+            ) : null}
+            {isBatchStarted(modalBatch) && !trainerMode && onChangeFutureTiming ? (
+              <div className="batchScheduleEditor">
+                <p className="batchModalSubhead">Change timing for upcoming sessions</p>
+                <p className="muted">
+                  Applies only to sessions that haven&apos;t started yet. Past, live and cancelled sessions keep their time.
+                </p>
+                <div className="row">
+                  <label className="batchCreateLabel">
+                    New start
+                    <input type="time" value={schedStart} onChange={(e) => setSchedStart(e.target.value)} />
+                  </label>
+                  <label className="batchCreateLabel">
+                    New end
+                    <input type="time" value={schedEnd} onChange={(e) => setSchedEnd(e.target.value)} />
+                  </label>
+                  <button type="button" onClick={handleChangeFutureTiming}>
+                    Apply to upcoming sessions
+                  </button>
+                </div>
+              </div>
             ) : null}
             {batchHasRun(modalBatch) ? (
               <div className="tableWrap">

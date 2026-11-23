@@ -15,7 +15,7 @@ const {
   refreshBatchLinkedAccessEnds,
 } = require('../lib/courseAccess');
 const { syncApplyBillingDatesForBatch } = require('../lib/applyBilling');
-const { academyToday } = require('../lib/academyDate');
+const { academyToday, academyOffsetMinutes } = require('../lib/academyDate');
 const { markBatchCompleted, reopenBatch } = require('../services/batchCompletion');
 
 /** Started or completed: sessions exist and the class schedule is fixed. */
@@ -744,6 +744,73 @@ router.put('/:id(\\d+)', auth, requireRole('Admin'), (req, res) => {
   }
 
   res.json({ ...updated, batchCourses });
+});
+
+/**
+ * Change the time of day for a started batch's FUTURE sessions only.
+ * Touches only sessions that are still 'scheduled' (batch + live) and have not started yet,
+ * plus the batch's default class time. Ended/live/cancelled/past sessions are left alone.
+ */
+router.put('/:id(\\d+)/future-timing', auth, requireRole('Admin'), (req, res) => {
+  const batchId = Number(req.params.id);
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
+  if (batch.batch_status !== 'started') {
+    return res.status(409).json({
+      error:
+        batch.batch_status === 'completed'
+          ? 'This batch is completed; its session timing can no longer be changed.'
+          : 'Batch has not started yet. Edit the class schedule instead.',
+    });
+  }
+
+  const hhmm = /^([01]\d|2[0-3]):([0-5]\d)$/;
+  const startTime = String(req.body?.startTime || '').trim();
+  const endTime = String(req.body?.endTime || '').trim();
+  if (!hhmm.test(startTime) || !hhmm.test(endTime)) {
+    return res.status(400).json({ error: 'startTime and endTime must be HH:MM (24-hour)' });
+  }
+  if (endTime <= startTime) {
+    return res.status(400).json({ error: 'End time must be after start time' });
+  }
+
+  const nowLocal = new Date(Date.now() + academyOffsetMinutes() * 60 * 1000).toISOString().slice(0, 16);
+
+  const result = db.transaction(() => {
+    const candidates = db
+      .prepare(
+        `SELECT bs.id AS bs_id, bs.session_date, bs.starts_at, ls.id AS ls_id
+         FROM batch_sessions bs
+         LEFT JOIN live_sessions ls ON ls.batch_session_id = bs.id
+         WHERE bs.batch_id = ?
+           AND bs.status = 'scheduled'
+           AND (ls.id IS NULL OR ls.status = 'scheduled')`,
+      )
+      .all(batchId)
+      .filter((r) => `${r.session_date}T${String(r.starts_at || '00:00').slice(0, 5)}` >= nowLocal);
+
+    const updBs = db.prepare(
+      "UPDATE batch_sessions SET starts_at = ?, ends_at = ?, updated_at = datetime('now') WHERE id = ?",
+    );
+    const updLs = db.prepare('UPDATE live_sessions SET starts_at = ?, ends_at = ? WHERE id = ?');
+    for (const r of candidates) {
+      updBs.run(startTime, endTime, r.bs_id);
+      if (r.ls_id) updLs.run(`${r.session_date}T${startTime}:00`, `${r.session_date}T${endTime}:00`, r.ls_id);
+    }
+
+    let schedule = {};
+    try {
+      schedule = batch.training_schedule_json ? JSON.parse(batch.training_schedule_json) : {};
+    } catch (_) {
+      schedule = {};
+    }
+    schedule.startTime = startTime;
+    schedule.endTime = endTime;
+    db.prepare('UPDATE batches SET training_schedule_json = ? WHERE id = ?').run(JSON.stringify(schedule), batchId);
+    return { updatedSessions: candidates.length, trainingSchedule: schedule };
+  })();
+
+  res.json({ ok: true, ...result });
 });
 
 router.delete('/:id(\\d+)', auth, requireRole('Admin'), async (req, res) => {
