@@ -146,9 +146,13 @@ export default function CourseSubscribePackagesScreen({ route, navigation }: any
             <Text style={styles.hint}>Choose a subscription period (includes a 7-day renewal grace window after expiry).</Text>
             {subs.length === 0 ? <Text style={styles.empty}>No subscription packages configured yet.</Text> : subs.map((p) => renderPkg(p, 'sub'))}
 
-            <Text style={[styles.section, { marginTop: 28 }]}>Renewal</Text>
-            <Text style={styles.hint}>Available while your access is active or within the grace period.</Text>
-            {rens.length === 0 ? <Text style={styles.empty}>No renewal packages configured.</Text> : rens.map((p) => renderPkg(p, 'renew'))}
+            {rens.length > 0 ? (
+              <>
+                <Text style={[styles.section, { marginTop: 28 }]}>Renewal</Text>
+                <Text style={styles.hint}>Available while your access is active or within the grace period.</Text>
+                {rens.map((p) => renderPkg(p, 'renew'))}
+              </>
+            ) : null}
           </>
         )}
       </ScrollView>
