@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -53,6 +53,27 @@ function formatInr(n?: number) {
   return `₹${Number(n).toLocaleString('en-IN')}`;
 }
 
+export type BillingPkg = {
+  id: number;
+  duration_unit?: string;
+  duration_count?: number;
+  fee_inr?: number;
+  discount_inr?: number;
+  sort_order?: number;
+};
+
+export function firstPackage(list?: BillingPkg[]): BillingPkg | null {
+  if (!Array.isArray(list) || list.length === 0) return null;
+  return [...list].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.id - b.id)[0];
+}
+
+export function packageDurationLabel(pkg: BillingPkg) {
+  const n = Number(pkg.duration_count) || 1;
+  const u = String(pkg.duration_unit || '').toLowerCase();
+  if (u !== 'day' && u !== 'month' && u !== 'year') return '';
+  return `${n} ${u}${n === 1 ? '' : 's'}`;
+}
+
 function resolveAssetUrl(url?: string | null) {
   if (!url) return null;
   if (url.startsWith('http://') || url.startsWith('https://')) return url;
@@ -80,6 +101,8 @@ export default function LandingHomeScreen({ navigation, route }: any) {
   const [applyNavId, setApplyNavId] = useState<number | null>(null);
   const [applyEnquiries, setApplyEnquiries] = useState<Record<number, ApplyEnquiry>>({});
   const subscribeResumeKeyRef = useRef<string | null>(null);
+  /** Per subscribe-course: first subscription package and first renewal package (renewals only if eligible). */
+  const [pkgByCourse, setPkgByCourse] = useState<Record<number, { sub: BillingPkg | null; ren: BillingPkg | null }>>({});
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -115,6 +138,35 @@ export default function LandingHomeScreen({ navigation, route }: any) {
       load();
     }, [load])
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    const subscribeCourses = courses.filter((c) => String(c.enrollment_type || '').toLowerCase() === 'subscribe');
+    if (subscribeCourses.length === 0) {
+      setPkgByCourse({});
+      return undefined;
+    }
+    void Promise.all(
+      subscribeCourses.map(async (c) => {
+        try {
+          const path = `/billing/public/course/${c.id}`;
+          // Signed-in: the API only includes renewal packages when the learner is eligible to renew.
+          const d: any = await (user?.id ? api.get(path) : api.publicGet(path));
+          return [
+            c.id,
+            { sub: firstPackage(d?.subscriptionPackages), ren: firstPackage(d?.renewalPackages) },
+          ] as const;
+        } catch {
+          return [c.id, { sub: null, ren: null }] as const;
+        }
+      }),
+    ).then((pairs) => {
+      if (!cancelled) setPkgByCourse(Object.fromEntries(pairs));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [courses, user?.id]);
 
   useFocusEffect(
     useCallback(() => {
@@ -291,11 +343,17 @@ export default function LandingHomeScreen({ navigation, route }: any) {
           const type = (item.enrollment_type || 'free').toLowerCase();
           const isActive = !!item.enrolled;
           const isJoined = !!item.joined && !isActive;
+          const isSubscribeCourse = type === 'subscribe';
+          const pkgInfo = isSubscribeCourse ? pkgByCourse[item.id] : undefined;
+          const canRenew = !!pkgInfo?.ren;
+          const shownPkg = isSubscribeCourse ? (pkgInfo?.ren ?? pkgInfo?.sub ?? null) : null;
           const primaryLabel = isActive
             ? 'Go to Course'
             : isJoined
               ? 'Joined'
-              : applyPrimaryLabel(item.enrollment_type, !!applyEnquiries[item.id]);
+              : isSubscribeCourse && canRenew
+                ? 'Renew'
+                : applyPrimaryLabel(item.enrollment_type, !!applyEnquiries[item.id]);
           return (
             <View style={styles.card}>
               {resolveAssetUrl(item.image_url) ? (
@@ -311,7 +369,24 @@ export default function LandingHomeScreen({ navigation, route }: any) {
                   {item.description}
                 </Text>
               ) : null}
-              {fee > 0 ? (
+              {isSubscribeCourse ? (
+                shownPkg ? (
+                  <Text style={styles.price}>
+                    {(shownPkg.discount_inr ?? 0) > 0 ? (
+                      <>
+                        <Text style={styles.strike}>{formatInr(shownPkg.fee_inr)}</Text>{' '}
+                        {formatInr(Math.max(0, (shownPkg.fee_inr ?? 0) - (shownPkg.discount_inr ?? 0)))}
+                      </>
+                    ) : (
+                      formatInr(shownPkg.fee_inr)
+                    )}
+                    {packageDurationLabel(shownPkg) ? ` · ${packageDurationLabel(shownPkg)}` : ''}
+                    {canRenew ? ' (renewal)' : ''}
+                  </Text>
+                ) : pkgInfo ? null : (
+                  <Text style={styles.price}> </Text>
+                )
+              ) : fee > 0 ? (
                 <Text style={styles.price}>
                   {disc > 0 ? (
                     <>
@@ -346,6 +421,11 @@ export default function LandingHomeScreen({ navigation, route }: any) {
                     </Text>
                   )}
                 </TouchableOpacity>
+                {isActive && canRenew ? (
+                  <TouchableOpacity style={styles.btnPrimary} onPress={() => onSubscribe(item)}>
+                    <Text style={styles.btnPrimaryText}>Renew</Text>
+                  </TouchableOpacity>
+                ) : null}
                 <TouchableOpacity
                   style={styles.btnOutline}
                   onPress={() =>

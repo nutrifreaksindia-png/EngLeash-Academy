@@ -5,7 +5,8 @@ import { HtmlContent, htmlHasVisibleContent } from '../components/HtmlContent';
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
-import type { PublicCourse } from './LandingHomeScreen';
+import type { BillingPkg, PublicCourse } from './LandingHomeScreen';
+import { firstPackage, packageDurationLabel } from './LandingHomeScreen';
 import { API_BASE } from '../config';
 import { applyPrimaryLabel, fetchActiveApplyEnquiry, navigateApplyForCourse } from '../lib/applyNavigation';
 import type { ApplyEnquiry } from '../lib/applyNavigation';
@@ -77,6 +78,8 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
   const [busy, setBusy] = useState(false);
   const [coverAspect, setCoverAspect] = useState<number | null>(null);
   const [applyEnquiry, setApplyEnquiry] = useState<ApplyEnquiry | null>(null);
+  /** Subscribe courses: first subscription package, and first renewal package (only if the learner can renew). */
+  const [pkgInfo, setPkgInfo] = useState<{ sub: BillingPkg | null; ren: BillingPkg | null } | null>(null);
 
   const coverUri = resolveAssetUrl(course?.image_url);
 
@@ -102,6 +105,18 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
       }
       const next = detail ? { ...detail, enrolled } : null;
       setCourse(next);
+      if (next && String(next.enrollment_type || '').toLowerCase() === 'subscribe') {
+        try {
+          const path = `/billing/public/course/${courseId}`;
+          // Signed-in: the API only includes renewal packages when the learner is eligible to renew.
+          const d: any = await (user?.id ? api.get(path) : api.publicGet(path));
+          setPkgInfo({ sub: firstPackage(d?.subscriptionPackages), ren: firstPackage(d?.renewalPackages) });
+        } catch {
+          setPkgInfo({ sub: null, ren: null });
+        }
+      } else {
+        setPkgInfo(null);
+      }
       if (user?.id && next && String(next.enrollment_type || '').toLowerCase() === 'apply') {
         setApplyEnquiry(await fetchActiveApplyEnquiry(courseId));
       } else {
@@ -184,13 +199,29 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
   const disc = course.discount_inr ?? 0;
   const eff = Math.max(0, fee - disc);
   const cta = primaryCta(course.enrollment_type);
-  const showCoursePrice = cta.kind !== 'subscribe';
+  const isSubscribeCourse = cta.kind === 'subscribe';
+  const showCoursePrice = !isSubscribeCourse;
   const isActive = !!course.enrolled;
+  const canRenew = isSubscribeCourse && !!pkgInfo?.ren;
+  const shownPkg = isSubscribeCourse ? (pkgInfo?.ren ?? pkgInfo?.sub ?? null) : null;
   const primaryLabel = isActive
     ? 'Go to Course'
     : cta.kind === 'apply'
       ? applyPrimaryLabel(course.enrollment_type, !!applyEnquiry)
-      : cta.label;
+      : canRenew
+        ? 'Renew'
+        : cta.label;
+  const goSubscribePackages = () => {
+    if (!user) {
+      navigation.navigate('Signup', {
+        redirectAfterSignup: 'subscribe',
+        courseId: course.id,
+        courseName: course.name,
+      });
+      return;
+    }
+    navigation.navigate('CourseSubscribePackages', { courseId: course.id, courseName: course.name });
+  };
   const onPrimaryAction = async () => {
     if (isActive) {
       goToCourse(course);
@@ -267,7 +298,22 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
         ) : null}
         {course.description ? <Text style={styles.desc}>{course.description}</Text> : null}
         {!showCoursePrice ? (
-          <Text style={styles.price}>See packages</Text>
+          shownPkg ? (
+            <Text style={styles.price}>
+              {(shownPkg.discount_inr ?? 0) > 0 ? (
+                <>
+                  <Text style={styles.strike}>{formatInr(shownPkg.fee_inr)}</Text>{' '}
+                  {formatInr(Math.max(0, (shownPkg.fee_inr ?? 0) - (shownPkg.discount_inr ?? 0)))}
+                </>
+              ) : (
+                formatInr(shownPkg.fee_inr)
+              )}
+              {packageDurationLabel(shownPkg) ? ` · ${packageDurationLabel(shownPkg)}` : ''}
+              {canRenew ? ' (renewal)' : ''}
+            </Text>
+          ) : (
+            <Text style={styles.price}>See packages</Text>
+          )
         ) : fee > 0 ? (
           <Text style={styles.price}>
             {disc > 0 ? (
@@ -320,6 +366,11 @@ export default function PublicCourseDetailScreen({ route, navigation }: any) {
           <TouchableOpacity style={styles.btnPrimary} onPress={() => void onPrimaryAction()} disabled={busy}>
             <Text style={styles.btnPrimaryText}>{busy ? 'Please wait…' : primaryLabel}</Text>
           </TouchableOpacity>
+          {isActive && canRenew ? (
+            <TouchableOpacity style={styles.btnPrimary} onPress={goSubscribePackages} disabled={busy}>
+              <Text style={styles.btnPrimaryText}>Renew</Text>
+            </TouchableOpacity>
+          ) : null}
           <TouchableOpacity
             style={styles.btnOutline}
             onPress={() => {

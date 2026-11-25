@@ -34,6 +34,16 @@ target 'EngLeashAcademy' do
       # :ccache_enabled => true
     )
 
+    # Some pods (and their resource bundles) still declare iOS 13.x, which newer Xcode rejects.
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each do |build_config|
+        current = build_config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'].to_s
+        if !current.empty? && Gem::Version.new(current) < Gem::Version.new('15.1')
+          build_config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.1'
+        end
+      end
+    end
+
     # Xcode 26+ rejects fmt 11.x consteval format strings; compile fmt as C++17.
     installer.pods_project.targets.each do |target|
       next unless target.name == 'fmt'
