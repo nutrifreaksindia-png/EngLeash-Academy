@@ -224,7 +224,8 @@ export default function AccountScreen({ navigation }: any) {
           const packagePairs = await Promise.all(
             courseIds.map(async (courseId) => {
               try {
-                const data = await api.publicGet(`/billing/public/course/${courseId}`);
+                // Authenticated: the API only returns renewal packages to eligible subscribers.
+                const data = await api.get(`/billing/public/course/${courseId}`);
                 return [String(courseId), Array.isArray(data?.renewalPackages) ? data.renewalPackages : []] as const;
               } catch {
                 return [String(courseId), []] as const;

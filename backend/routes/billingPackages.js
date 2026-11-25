@@ -1,6 +1,22 @@
 const express = require('express');
 const db = require('../db');
-const { auth, requireRole } = require('../middleware/auth');
+const jwt = require('jsonwebtoken');
+const { auth, requireRole, JWT_SECRET } = require('../middleware/auth');
+const { userEligibleForRenewal } = require('../lib/courseAccess');
+
+/** Best-effort user id from a Bearer token (valid JWT + current session); null for anonymous/invalid. */
+function optionalUserId(req) {
+  try {
+    const header = req.headers.authorization;
+    if (!header || !header.startsWith('Bearer ')) return null;
+    const payload = jwt.verify(header.slice(7), JWT_SECRET);
+    const session = db.prepare('SELECT token_jti FROM sessions WHERE user_id = ?').get(payload.userId);
+    if (!session || session.token_jti !== (payload.jti || '')) return null;
+    return Number(payload.userId);
+  } catch (_) {
+    return null;
+  }
+}
 
 const router = express.Router();
 
@@ -273,9 +289,13 @@ router.get('/public/course/:courseId', (req, res) => {
     )
     .all(courseId);
 
+  // Renewal packages are only for learners who already have (or recently had) a subscription.
+  const uid = optionalUserId(req);
+  const canRenew = uid != null && userEligibleForRenewal(uid, courseId);
+
   res.json({
     subscriptionPackages: subs,
-    renewalPackages: rens,
+    renewalPackages: canRenew ? rens : [],
   });
 });
 
@@ -303,10 +323,14 @@ router.get('/public/combo/:comboId', (req, res) => {
     )
     .all(comboId);
 
+  // Same rule as checkout: renewal only when eligible for every course in the bundle.
+  const uid = optionalUserId(req);
+  const canRenew = uid != null && members.length > 0 && members.every((cid) => userEligibleForRenewal(uid, cid));
+
   res.json({
     combo: { id: combo.id, name: combo.name, courseIds: members },
     subscriptionPackages: subs,
-    renewalPackages: rens,
+    renewalPackages: canRenew ? rens : [],
   });
 });
 

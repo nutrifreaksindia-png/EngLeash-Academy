@@ -45,8 +45,9 @@ export default function CourseSubscribePackagesScreen({ route, navigation }: any
   const [payingId, setPayingId] = useState<number | null>(null);
 
   useEffect(() => {
-    api
-      .publicGet(`/billing/public/course/${courseId}`)
+    // Signed-in learners send their token so the API can include renewal packages only if they're eligible.
+    const path = `/billing/public/course/${courseId}`;
+    (user ? api.get(path) : api.publicGet(path))
       .then((d: any) => {
         setSubs(Array.isArray(d?.subscriptionPackages) ? d.subscriptionPackages : []);
         setRens(Array.isArray(d?.renewalPackages) ? d.renewalPackages : []);
@@ -56,7 +57,7 @@ export default function CourseSubscribePackagesScreen({ route, navigation }: any
         setRens([]);
       })
       .finally(() => setLoading(false));
-  }, [courseId]);
+  }, [courseId, user?.id]);
 
   function goLoginForPurchase() {
     navigation.getParent()?.navigate?.('Account', {
