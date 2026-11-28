@@ -446,6 +446,25 @@ function ensureV1Tables(db) {
     /* ignore */
   }
 
+  // Waiting room: who asked to enter, and whether a host has activated the meeting.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS live_session_admissions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      live_session_id INTEGER NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK(status IN ('waiting', 'admitted', 'denied')),
+      requested_at TEXT DEFAULT (datetime('now')),
+      decided_at TEXT,
+      decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      UNIQUE(live_session_id, user_id)
+    );
+    CREATE TABLE IF NOT EXISTS live_session_activations (
+      live_session_id INTEGER PRIMARY KEY REFERENCES live_sessions(id) ON DELETE CASCADE,
+      activated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      activated_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS live_chat_messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -755,6 +774,84 @@ function ensureV1Tables(db) {
   migrateAssignmentSubmissionFiles(db);
   safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN feedback_audio_url TEXT');
   safeAlter(db, 'ALTER TABLE assignment_submissions ADD COLUMN feedback_audio_key TEXT');
+  migrateAdminAssignmentAndOfflinePayments(db);
+}
+
+/**
+ * Admin-initiated batch assignment marker and offline (cash / bank / UPI) payment recording.
+ * Additive only: new tables and columns, plus a payment_records rebuild that widens two CHECK lists.
+ */
+function migrateAdminAssignmentAndOfflinePayments(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS admin_batch_assignments (
+      batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+      student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (batch_id, student_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS student_course_fees (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+      agreed_fee_paise INTEGER NOT NULL,
+      updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, course_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS manual_payment_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      course_id INTEGER REFERENCES courses(id) ON DELETE SET NULL,
+      batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL,
+      amount_paise INTEGER NOT NULL,
+      payment_method TEXT NOT NULL,
+      reference_text TEXT,
+      note_text TEXT,
+      paid_at TEXT NOT NULL,
+      request_key TEXT NOT NULL UNIQUE,
+      recorded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_manual_payment_entries_user ON manual_payment_entries(user_id, course_id);
+  `);
+  safeAlter(db, 'ALTER TABLE manual_apply_due_entries ADD COLUMN payment_method TEXT');
+  safeAlter(db, 'ALTER TABLE manual_apply_due_entries ADD COLUMN request_key TEXT');
+  db.exec(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_apply_due_entries_request ON manual_apply_due_entries(request_key) WHERE request_key IS NOT NULL',
+  );
+  migratePaymentRecordsForOffline(db);
+}
+
+function migratePaymentRecordsForOffline(db) {
+  const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'payment_records'").get();
+  if (!table?.sql || table.sql.includes("'manual_payment_entries'")) return;
+
+  const nextSql = table.sql
+    .replace(/CREATE TABLE\s+"?payment_records"?/i, 'CREATE TABLE payment_records__offline_next')
+    .replace("'apply_installment'", "'apply_installment','offline'")
+    .replace("'manual_apply_due_entries'", "'manual_apply_due_entries','manual_payment_entries'");
+  if (!nextSql.includes("'offline'") || !nextSql.includes("'manual_payment_entries'") || !nextSql.includes('__offline_next')) {
+    throw new Error('payment_records has an unexpected definition; offline payment migration aborted');
+  }
+  const indexes = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'payment_records' AND sql IS NOT NULL")
+    .all();
+
+  // Foreign keys must be off so dropping the old table does not cascade into invoice_records.
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.transaction(() => {
+      db.exec(nextSql);
+      db.exec('INSERT INTO payment_records__offline_next SELECT * FROM payment_records');
+      db.exec('DROP TABLE payment_records');
+      db.exec('ALTER TABLE payment_records__offline_next RENAME TO payment_records');
+      for (const index of indexes) db.exec(index.sql);
+    })();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 /** Multiple media files per student submission (photos, videos, files, voice notes). */

@@ -21,7 +21,7 @@ function isConfigured() {
   );
 }
 
-async function buildJoinCredentials({ roomName, userId, displayName }) {
+async function buildJoinCredentials({ roomName, userId, displayName, ttlSeconds: requestedTtl }) {
   const url = livekitWsUrl();
   const apiKey = process.env.LIVEKIT_API_KEY;
   const apiSecret = process.env.LIVEKIT_API_SECRET;
@@ -42,7 +42,7 @@ async function buildJoinCredentials({ roomName, userId, displayName }) {
   }
 
   const identity = String(userId);
-  const ttlSeconds = Number(process.env.LIVEKIT_TOKEN_EXPIRY_SECONDS || 3600);
+  const ttlSeconds = requestedTtl || Number(process.env.LIVEKIT_TOKEN_EXPIRY_SECONDS || 3600);
   const at = new AccessToken(apiKey, apiSecret, {
     identity,
     name: displayName ? String(displayName).slice(0, 120) : identity,

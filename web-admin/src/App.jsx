@@ -812,6 +812,18 @@ export default function App() {
     return Array.isArray(data?.subscriptions) ? data.subscriptions : [];
   }
 
+  const offlinePaymentsApi = {
+    statement: (userId) => apiFetch(`/payments/admin/offline/students/${userId}`, token),
+    account: (userId, courseId) => apiFetch(`/payments/admin/offline/students/${userId}/courses/${courseId}`, token),
+    setFee: (userId, courseId, agreedFeeInr) =>
+      apiFetch(`/payments/admin/offline/students/${userId}/courses/${courseId}/fee`, token, {
+        method: 'PUT',
+        body: JSON.stringify({ agreedFeeInr }),
+      }),
+    record: (payload) =>
+      apiFetch('/payments/admin/offline/payments', token, { method: 'POST', body: JSON.stringify(payload) }),
+  };
+
   async function fetchAdminPayments(filters = {}) {
     const params = new URLSearchParams();
     if (filters.search) params.set('search', String(filters.search));
@@ -1343,12 +1355,24 @@ export default function App() {
     const bid = batchId ?? selectedBatchId;
     if (!bid || !studentId) return;
     try {
-      await apiFetch(`/batch-manager/${bid}/members`, token, {
+      const result = await apiFetch(`/batch-manager/${bid}/members`, token, {
         method: 'POST',
         body: JSON.stringify({ studentId: Number(studentId) }),
       });
       await reloadBatchRoster(bid);
-      pushToast('Student added to batch', 'success');
+      const notes = (result?.access || []).filter((a) => a.reason);
+      const why = {
+        batch_not_started: 'opens when the batch is started',
+        course_not_published: 'course is not published, so the app hides it',
+        no_access: 'no access was granted',
+      };
+      const head = result?.alreadyMember ? 'Student is already in this batch' : 'Student added to batch';
+      pushToast(
+        notes.length
+          ? `${head}. ${notes.map((a) => `${a.courseName}: ${why[a.reason] || a.reason}`).join('; ')}`
+          : `${head} with course access`,
+        'success',
+      );
     } catch (err) {
       setError(err.message);
       pushToast(err.message, 'error');
@@ -1993,6 +2017,10 @@ export default function App() {
   } else if (currentPage === 'payments' && currentUser?.role === 'Admin') {
     page = (
       <PaymentsPage
+        students={studentAccounts}
+        courses={courses}
+        batches={batches}
+        offlineApi={offlinePaymentsApi}
         loadPayments={fetchAdminPayments}
         loadApplyBilling={fetchAdminApplyBilling}
         openInvoice={openAdminInvoice}

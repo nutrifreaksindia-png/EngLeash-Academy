@@ -2,6 +2,18 @@ const db = require('../db');
 const { removeBatchStudentAccess } = require('../lib/courseAccess');
 const { listOverdueDueItems, markBillingRemovedOverdue } = require('../lib/applyBilling');
 
+/** True when an Admin directly assigned this learner to a batch that teaches the course. */
+function hasAdminAssignment(userId, courseId) {
+  return !!db
+    .prepare(
+      `SELECT 1 FROM admin_batch_assignments a
+       JOIN batches b ON b.id = a.batch_id
+       WHERE a.student_id = ?
+         AND (b.course_id = ? OR EXISTS (SELECT 1 FROM batch_courses bc WHERE bc.batch_id = b.id AND bc.course_id = ?))`,
+    )
+    .get(userId, courseId, courseId);
+}
+
 function runApplyOverdueEnforcementSweep(nowMs = Date.now()) {
   const overdueItems = listOverdueDueItems(nowMs);
   let removedLearners = 0;
@@ -15,6 +27,9 @@ function runApplyOverdueEnforcementSweep(nowMs = Date.now()) {
          WHERE id = ? AND due_status != 'paid'`,
       ).run(due.id);
       markedOverdue += 1;
+
+      // The balance stays overdue, but Admin-granted access is never removed automatically.
+      if (hasAdminAssignment(due.user_id, due.course_id)) return;
 
       const membership = db.prepare(
         'SELECT 1 FROM batch_members WHERE batch_id = ? AND student_id = ?',

@@ -1,4 +1,5 @@
-import { Room, RoomEvent, Track } from 'livekit-client';
+import { AudioPresets, ConnectionQuality, Room, RoomEvent, Track } from 'livekit-client';
+import { startAudioFirst } from './audioFirst.js';
 
 function disconnectWithTimeout(room, ms = 3000) {
   return Promise.race([
@@ -62,11 +63,17 @@ export async function connectLiveKitRoom({
   onRemotePresence,
   onActiveSpeaker,
   onLocalTracks,
+  onLocalVideoChange,
   onDeviceWarning,
+  onWeakConnection,
+  onNetworkChange,
 }) {
   const room = new Room({
+    // Video layers follow tile size and visibility, and unused layers are not sent.
     adaptiveStream: true,
     dynacast: true,
+    // Speech preset needs half the bandwidth of the default; redundancy and silence saving stay on.
+    publishDefaults: { audioPreset: AudioPresets.speech, red: true, dtx: true, simulcast: true },
   });
 
   room.on(RoomEvent.ConnectionStateChanged, (state) => {
@@ -84,12 +91,31 @@ export async function connectLiveKitRoom({
   room.on(RoomEvent.TrackUnsubscribed, bumpPresence);
   room.on(RoomEvent.TrackMuted, bumpPresence);
   room.on(RoomEvent.TrackUnmuted, bumpPresence);
+  room.on(RoomEvent.TrackPublished, bumpPresence);
+  room.on(RoomEvent.TrackUnpublished, bumpPresence);
+
+  /** Own tracks can appear or change after join (camera enabled later), so refresh the self preview. */
+  const bumpLocal = () => {
+    onLocalVideoChange?.();
+  };
+  room.on(RoomEvent.LocalTrackPublished, bumpLocal);
+  room.on(RoomEvent.LocalTrackUnpublished, bumpLocal);
+  room.on(RoomEvent.TrackUnmuted, (_pub, participant) => {
+    if (participant === room.localParticipant) bumpLocal();
+  });
+
+  room.on(RoomEvent.ConnectionQualityChanged, (quality, participant) => {
+    if (participant !== room.localParticipant) return;
+    onWeakConnection?.(quality === ConnectionQuality.Poor || quality === ConnectionQuality.Lost);
+  });
 
   room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
     const first = speakers?.[0];
     const id = first?.identity != null ? Number(first.identity) : null;
     onActiveSpeaker?.(Number.isFinite(id) ? id : null);
   });
+
+  const network = startAudioFirst(room, () => onNetworkChange?.());
 
   await room.connect(url, token, { autoSubscribe: true });
 
@@ -143,10 +169,12 @@ export async function connectLiveKitRoom({
 
   return {
     room,
+    network,
     roomName,
     kind: 'livekit',
     async disconnect() {
       try {
+        network.stop();
         detachAllLiveKitRemoteAudio();
         for (const pub of room.localParticipant.trackPublications.values()) {
           const t = pub.track;
@@ -185,6 +213,26 @@ export async function connectLiveKitRoom({
       await room.engine.client.handleTokenRefresh(nextToken);
     },
   };
+}
+
+const tileVideos = new WeakMap();
+
+/**
+ * Keep one <video> per tile. The element is only replaced when the tile's track changes, so repeated
+ * UI refreshes (speaker changes, roster polling) never remount a playing video.
+ * Pass a null track to remove the video.
+ */
+export function syncLiveKitTileVideo(container, track) {
+  if (!container) return;
+  const current = tileVideos.get(container);
+  if (current && current.track === track && current.el.parentNode === container) return;
+  if (current) {
+    current.detach();
+    tileVideos.delete(container);
+  }
+  if (!track) return;
+  const detach = attachLiveKitVideo(track, container);
+  tileVideos.set(container, { track, detach, el: container.lastChild });
 }
 
 export function attachLiveKitVideo(track, container) {

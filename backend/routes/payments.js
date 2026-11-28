@@ -53,6 +53,13 @@ const {
   validateCallbackSlotForDate,
 } = require('../lib/callbackBookingRules');
 const { streamInvoicePdf } = require('../lib/invoicePdf');
+const {
+  PAYMENT_METHODS,
+  getAccount,
+  getStudentStatement,
+  recordOfflinePayment,
+  setAgreedFee,
+} = require('../lib/offlinePayments');
 
 const router = express.Router();
 
@@ -798,6 +805,23 @@ router.patch('/admin/apply-billing/:profileId(\\d+)/parts', auth, requireRole('A
 
 router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin'), (req, res) => {
   const dueItemId = Number(req.params.dueItemId);
+  const method = String(req.body?.method || 'cash').trim().toLowerCase();
+  if (!PAYMENT_METHODS.includes(method)) {
+    return res.status(400).json({ error: `method must be one of: ${PAYMENT_METHODS.join(', ')}` });
+  }
+  const requestKey = String(req.body?.requestKey || '').trim() || null;
+  if (requestKey) {
+    const previous = db.prepare('SELECT id, due_item_id FROM manual_apply_due_entries WHERE request_key = ?').get(requestKey);
+    if (previous) {
+      if (Number(previous.due_item_id) !== dueItemId) {
+        return res.status(409).json({ error: 'requestKey was already used for a different payment' });
+      }
+      const row = db
+        .prepare("SELECT id FROM payment_records WHERE source_order_table = 'manual_apply_due_entries' AND source_order_row_id = ?")
+        .get(previous.id);
+      return res.json({ ok: true, duplicate: true, payment: row ? getPaymentRecordById(row.id) : null });
+    }
+  }
   const dueRow = loadDueItemWithProfile(dueItemId);
   if (!dueRow) return res.status(404).json({ error: 'Due item not found' });
   if (String(dueRow.due_status || '').toLowerCase() === 'paid') {
@@ -819,8 +843,8 @@ router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin
   const tx = db.transaction(() => {
     const entry = db.prepare(
       `INSERT INTO manual_apply_due_entries (
-        due_item_id, billing_profile_id, user_id, amount_paise, currency, reference_text, note_text, recorded_by, paid_at, created_at
-      ) VALUES (?, ?, ?, ?, 'INR', ?, ?, ?, ?, datetime('now'))`,
+        due_item_id, billing_profile_id, user_id, amount_paise, currency, reference_text, note_text, recorded_by, paid_at, payment_method, request_key, created_at
+      ) VALUES (?, ?, ?, ?, 'INR', ?, ?, ?, ?, ?, ?, datetime('now'))`,
     ).run(
       dueItemId,
       Number(dueRow.billing_profile_id),
@@ -830,6 +854,8 @@ router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin
       req.body?.noteText || null,
       req.user.id,
       paidAtIso,
+      method,
+      requestKey,
     );
 
     settleDueItem({
@@ -853,6 +879,7 @@ router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin
       gatewayPaymentId: `manual_payment_${entry.lastInsertRowid}`,
       manualReference: req.body?.referenceText || null,
       manualRecordedBy: req.user.id,
+      paymentMethod: method,
       sourceOrderTable: 'manual_apply_due_entries',
       sourceOrderRowId: Number(entry.lastInsertRowid),
       paidAtIso,
@@ -865,6 +892,40 @@ router.post('/admin/apply-due/:dueItemId(\\d+)/manual', auth, requireRole('Admin
   } catch (error) {
     res.status(400).json({ error: error?.message || 'Could not record manual payment' });
   }
+});
+
+/* ---- Admin offline payments (independent of course access) ---- */
+
+function sendOffline(res, work, status = 200) {
+  try {
+    res.status(status).json(work());
+  } catch (error) {
+    if (!error.statusCode) console.error('[offline-payments]', error);
+    res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : 'Offline payment request failed' });
+  }
+}
+
+router.get('/admin/offline/students/:userId(\\d+)', auth, requireRole('Admin'), (req, res) => {
+  sendOffline(res, () => getStudentStatement(Number(req.params.userId)));
+});
+
+router.get('/admin/offline/students/:userId(\\d+)/courses/:courseId(\\d+)', auth, requireRole('Admin'), (req, res) => {
+  sendOffline(res, () => getAccount(Number(req.params.userId), Number(req.params.courseId)));
+});
+
+router.put('/admin/offline/students/:userId(\\d+)/courses/:courseId(\\d+)/fee', auth, requireRole('Admin'), (req, res) => {
+  sendOffline(res, () =>
+    setAgreedFee({
+      userId: Number(req.params.userId),
+      courseId: Number(req.params.courseId),
+      agreedFeeInr: req.body?.agreedFeeInr,
+      adminId: req.user.id,
+    }),
+  );
+});
+
+router.post('/admin/offline/payments', auth, requireRole('Admin'), (req, res) => {
+  sendOffline(res, () => ({ ok: true, ...recordOfflinePayment(req.body, req.user.id) }), 201);
 });
 
 router.get('/my', auth, requireRole('Student', 'Lab', 'Trainer', 'Admin'), (req, res) => {

@@ -2,8 +2,8 @@
 
 const livekit = require('./livekitProvider');
 
-async function buildJoinCredentials({ roomName, userId, displayName }) {
-  return livekit.buildJoinCredentials({ roomName, userId, displayName });
+async function buildJoinCredentials({ roomName, userId, displayName, ttlSeconds }) {
+  return livekit.buildJoinCredentials({ roomName, userId, displayName, ttlSeconds });
 }
 
 function isRtcConfigured() {

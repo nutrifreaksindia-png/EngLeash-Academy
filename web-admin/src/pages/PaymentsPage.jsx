@@ -1,6 +1,7 @@
 import React from 'react';
 import SectionCard from '../components/SectionCard';
 import { MediaPreviewModal } from '../components/MediaPreview';
+import OfflinePaymentsPanel, { METHOD_OPTIONS, newRequestKey } from '../components/OfflinePaymentsPanel';
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -24,6 +25,10 @@ function fmtAmount(amountInr, currency = 'INR') {
 }
 
 export default function PaymentsPage({
+  students = [],
+  courses = [],
+  batches = [],
+  offlineApi,
   loadPayments,
   loadApplyBilling,
   openInvoice,
@@ -104,6 +109,8 @@ export default function PaymentsPage({
     setManualForm({
       profileId: profile.id,
       dueId: due.id,
+      method: 'cash',
+      requestKey: newRequestKey(),
       amountInr: Number(due.amountDueNowInr || 0).toFixed(2),
       paidAt: new Date().toISOString().slice(0, 10),
       referenceText: '',
@@ -122,6 +129,8 @@ export default function PaymentsPage({
         paidAt: due.paidAt,
         referenceText: due.referenceText,
         noteText: due.noteText,
+        method: due.method,
+        requestKey: due.requestKey,
       });
       pushToast('Manual payment recorded', 'success');
       setManualForm(null);
@@ -207,6 +216,7 @@ export default function PaymentsPage({
               <option value="subscribe">Subscribe</option>
               <option value="renewal">Renewal</option>
               <option value="combo">Combo</option>
+              <option value="offline">Offline</option>
               <option value="apply_registration">Apply registration</option>
               <option value="apply_single_payment">Apply single payment</option>
               <option value="apply_installment">Apply part payment</option>
@@ -288,6 +298,18 @@ export default function PaymentsPage({
           </div>
         )}
       </SectionCard>
+
+      {offlineApi ? (
+        <OfflinePaymentsPanel
+          students={students}
+          courses={courses}
+          batches={batches}
+          api={offlineApi}
+          onRecorded={refreshRows}
+          onOpenInvoice={handleOpenInvoice}
+          pushToast={pushToast}
+        />
+      ) : null}
 
       <SectionCard
         title="Apply course dues"
@@ -463,6 +485,16 @@ export default function PaymentsPage({
                 value={manualForm.amountInr}
                 onChange={(e) => setManualForm((f) => ({ ...f, amountInr: e.target.value }))}
               />
+            </label>
+            <label>
+              Payment method
+              <select value={manualForm.method} onChange={(e) => setManualForm((f) => ({ ...f, method: e.target.value }))}>
+                {METHOD_OPTIONS.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
             </label>
             <label>
               Payment date

@@ -116,6 +116,14 @@ function paymentKindForApplyDue(dueKind) {
   return 'apply_installment';
 }
 
+function paymentMethodFromMeta(raw) {
+  try {
+    return JSON.parse(raw || '{}')?.paymentMethod || '';
+  } catch {
+    return '';
+  }
+}
+
 function mapPaymentRow(row) {
   if (!row) return null;
   return {
@@ -136,6 +144,7 @@ function mapPaymentRow(row) {
     gatewayPaymentId: row.gateway_payment_id,
     manualReference: row.manual_reference || '',
     manualRecordedBy: row.manual_recorded_by || null,
+    paymentMethod: paymentMethodFromMeta(row.meta_json),
     sourceOrderTable: row.source_order_table,
     sourceOrderRowId: row.source_order_row_id,
     applyBillingProfileId: row.apply_billing_profile_id || null,
@@ -416,6 +425,7 @@ function ensureApplyDuePaymentRecord({
   sourceOrderRowId,
   manualReference = null,
   manualRecordedBy = null,
+  paymentMethod = null,
   paidAtIso = new Date().toISOString(),
 }) {
   const customer = loadCustomerSnapshot(dueRow.user_id);
@@ -459,6 +469,7 @@ function ensureApplyDuePaymentRecord({
         dueKind: dueRow.due_kind,
         paymentSource,
         manualReference,
+        paymentMethod,
       },
       {},
     ),
@@ -471,6 +482,52 @@ function ensureApplyDuePaymentRecord({
         unitRatePaise: Number(amountPaise || 0),
         amountPaise: Number(amountPaise || 0),
         metaJson: safeJsonStringify({ dueItemId: dueRow.id, billingProfileId: dueRow.billing_profile_id }, {}),
+      },
+    ],
+  });
+}
+
+/** Ledger row + invoice for an Admin-recorded offline payment. No Razorpay identifiers are involved. */
+function ensurePaymentLedgerForManualEntry(entry) {
+  const courseTitle = loadCourseTitle(entry.course_id);
+  const batch = entry.batch_id
+    ? db.prepare('SELECT batch_number, title, name FROM batches WHERE id = ?').get(entry.batch_id)
+    : null;
+  const batchLabel = batch ? (batch.batch_number ? `Batch #${batch.batch_number}` : batch.title || batch.name) : '';
+  const label = ['Offline payment', batchLabel].filter(Boolean).join(' · ');
+  return ensurePaymentWithInvoice({
+    userId: Number(entry.user_id),
+    paymentKind: 'offline',
+    orderKind: 'offline',
+    courseId: entry.course_id,
+    comboId: null,
+    billingPackageId: null,
+    courseTitle,
+    comboTitle: '',
+    packageLabel: label,
+    gateway: 'manual',
+    paymentSource: 'cash_manual',
+    gatewayOrderId: `offline_order_${entry.id}`,
+    gatewayPaymentId: `offline_payment_${entry.id}`,
+    manualReference: entry.reference_text,
+    manualRecordedBy: entry.recorded_by,
+    sourceOrderTable: 'manual_payment_entries',
+    sourceOrderRowId: Number(entry.id),
+    amountPaise: Number(entry.amount_paise),
+    currency: 'INR',
+    paidAt: entry.paid_at,
+    customer: loadCustomerSnapshot(entry.user_id),
+    academy: loadAcademySnapshot(),
+    metaJson: safeJsonStringify({ paymentMethod: entry.payment_method, batchId: entry.batch_id }, {}),
+    notesText: 'Thank you for your payment.',
+    lineItems: [
+      {
+        itemName: courseTitle || 'Course fee',
+        description: label,
+        quantity: 1,
+        unitRatePaise: Number(entry.amount_paise),
+        amountPaise: Number(entry.amount_paise),
+        metaJson: safeJsonStringify({ manualPaymentEntryId: entry.id }, {}),
       },
     ],
   });
@@ -583,6 +640,7 @@ module.exports = {
   ensureApplyDuePaymentRecord,
   ensurePaymentLedgerForCourseOrder,
   ensurePaymentLedgerForBillingOrder,
+  ensurePaymentLedgerForManualEntry,
   formatPackageLabel,
   getInvoiceBundleByPaymentId,
   getPaymentRecordById,

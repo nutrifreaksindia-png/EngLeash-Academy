@@ -8,6 +8,15 @@ const { buildPublicUrl, getSignedPlaybackUrl, isSpacesConfigured } = require('..
 
 const router = express.Router();
 
+const admission = require('../services/liveAdmission');
+const roomControl = require('../services/liveRtc/roomControl');
+
+/**
+ * An admitted participant's token only needs to last long enough to connect: the video server renews it
+ * while they stay connected. Keeping it short limits reuse after a class ends or someone is removed.
+ */
+const PARTICIPANT_TOKEN_TTL_SECONDS = Number(process.env.LIVEKIT_PARTICIPANT_TOKEN_TTL_SECONDS || 600);
+
 const REACTION_KINDS = new Set(['thumbsup', 'clap', 'heart', 'laugh', 'think']);
 const liveRateBuckets = new Map();
 
@@ -96,6 +105,16 @@ function joinTimeAllows(session) {
   return { ok: true };
 }
 
+/** The answer for someone who is not (yet) allowed into the room. No credentials are included. */
+function sendWaiting(res, sessionId, userId) {
+  const denied = admission.admissionStatus(sessionId, userId) === 'denied';
+  const hostPresent = admission.isHostPresent(sessionId);
+  let error = 'The trainer has not started the class yet. You are in the waiting room.';
+  if (denied) error = 'The trainer did not admit you to this class.';
+  else if (admission.isMeetingActive(sessionId)) error = 'Waiting for the trainer to let you in.';
+  return res.status(403).json({ error, code: denied ? 'ENTRY_DENIED' : 'WAITING_FOR_APPROVAL', hostPresent });
+}
+
 function logSessionEvent(sessionId, userId, eventType, detail) {
   try {
     db.prepare(
@@ -161,6 +180,7 @@ async function buildRtcJoinPayload(session, user) {
     roomName: sessionRoomName(session),
     userId: user.id,
     displayName: user.name || user.email || String(user.id),
+    ttlSeconds: admission.isHost(user, session.batch_id) ? undefined : PARTICIPANT_TOKEN_TTL_SECONDS,
   });
   const recordingConfigured = liveRecording.isRecordingApiConfigured();
   let recordingWarning = null;
@@ -172,6 +192,12 @@ async function buildRtcJoinPayload(session, user) {
   }
   return { creds, recordingConfigured, recordingWarning };
 }
+
+/**
+ * Newest first in SQL, so that if the cap is ever reached it is the oldest classes that drop off.
+ * The response itself stays oldest-first.
+ */
+const SESSION_LIST_CAP = 5000;
 
 router.get('/sessions', auth, (req, res) => {
   const { role, id: userId } = req.user;
@@ -209,8 +235,8 @@ router.get('/sessions', auth, (req, res) => {
       JOIN batches b ON b.id = ls.batch_id
       JOIN users u ON u.id = b.trainer_id
       LEFT JOIN batch_sessions bs ON bs.id = ls.batch_session_id
-      ORDER BY ls.starts_at ASC
-      LIMIT 100
+      ORDER BY ls.starts_at DESC, ls.id DESC
+      LIMIT ${SESSION_LIST_CAP}
     `).all();
   } else if (role === 'Trainer') {
     rows = db.prepare(`
@@ -248,8 +274,8 @@ router.get('/sessions', auth, (req, res) => {
       WHERE b.trainer_id = ? OR EXISTS (
         SELECT 1 FROM batch_trainers bt WHERE bt.batch_id = b.id AND bt.trainer_id = ?
       )
-      ORDER BY ls.starts_at ASC
-      LIMIT 100
+      ORDER BY ls.starts_at DESC, ls.id DESC
+      LIMIT ${SESSION_LIST_CAP}
     `).all(userId, userId);
   } else {
     rows = db.prepare(`
@@ -286,11 +312,11 @@ router.get('/sessions', auth, (req, res) => {
       LEFT JOIN batch_sessions bs ON bs.id = ls.batch_session_id
       JOIN batch_members bm ON bm.batch_id = b.id
       WHERE bm.student_id = ?
-      ORDER BY ls.starts_at ASC
-      LIMIT 100
+      ORDER BY ls.starts_at DESC, ls.id DESC
+      LIMIT ${SESSION_LIST_CAP}
     `).all(userId);
   }
-  const reconciled = rows.map((row) => reconcileLiveSessionLifecycle(row));
+  const reconciled = rows.reverse().map((row) => reconcileLiveSessionLifecycle(row));
   res.json(liveRecording.enrichLiveSessionsList(reconciled));
 });
 
@@ -382,8 +408,18 @@ router.get('/sessions/:id/state', auth, (req, res) => {
       .get(sessionId);
     if (fr?.error_text) recordingFailureHint = String(fr.error_text).slice(0, 400);
   }
+  const host = admission.isHost(req.user, session.batch_id);
+  if (host) {
+    void liveRecording
+      .maybeStartRecordingAfterJoin(sessionId)
+      .catch((e) => console.warn('maybeStartRecordingAfterJoin', sessionId, e?.message || e));
+  }
   res.json({
     status: session.status,
+    isHost: host,
+    meetingActive: admission.isMeetingActive(sessionId),
+    hostPresent: admission.isHostPresent(sessionId),
+    waitingRoom: host ? admission.listWaiting(sessionId) : [],
     sessionType: session.session_type,
     promotedUserIds: promoted.map((r) => r.user_id),
     handRaisedUserIds: hands.map((r) => r.user_id),
@@ -435,6 +471,7 @@ router.get('/sessions/:id/messages', auth, (req, res) => {
   if (!isUserAllowedForSession(session, req.user)) {
     return res.status(403).json({ error: 'You are not part of this live session' });
   }
+  if (!admission.mayParticipate(sessionId, session.batch_id, req.user)) return sendWaiting(res, sessionId, req.user.id);
   const rawAfter = req.query.afterId;
   const afterId = rawAfter == null || rawAfter === '' ? 0 : Number(rawAfter);
   const safeAfter = Number.isFinite(afterId) && afterId >= 0 ? afterId : 0;
@@ -465,6 +502,7 @@ router.post('/sessions/:id/messages', auth, (req, res) => {
   if (!isUserAllowedForSession(session, req.user)) {
     return res.status(403).json({ error: 'You are not part of this live session' });
   }
+  if (!admission.mayParticipate(sessionId, session.batch_id, req.user)) return sendWaiting(res, sessionId, req.user.id);
   if (session.status === 'ended' || session.status === 'cancelled') {
     return res.status(409).json({ error: 'Session is not accepting messages' });
   }
@@ -503,6 +541,7 @@ router.get('/sessions/:id/reactions', auth, (req, res) => {
   if (!isUserAllowedForSession(session, req.user)) {
     return res.status(403).json({ error: 'You are not part of this live session' });
   }
+  if (!admission.mayParticipate(sessionId, session.batch_id, req.user)) return sendWaiting(res, sessionId, req.user.id);
   const rawAfter = req.query.afterId;
   const afterId = rawAfter == null || rawAfter === '' ? 0 : Number(rawAfter);
   const safeAfter = Number.isFinite(afterId) && afterId >= 0 ? afterId : 0;
@@ -533,6 +572,7 @@ router.post('/sessions/:id/reactions', auth, (req, res) => {
   if (!isUserAllowedForSession(session, req.user)) {
     return res.status(403).json({ error: 'You are not part of this live session' });
   }
+  if (!admission.mayParticipate(sessionId, session.batch_id, req.user)) return sendWaiting(res, sessionId, req.user.id);
   if (session.status === 'ended' || session.status === 'cancelled') {
     return res.status(409).json({ error: 'Session is not accepting reactions' });
   }
@@ -648,6 +688,7 @@ router.post('/sessions/:id/hand', auth, (req, res) => {
   if (!isUserAllowedForSession(session, req.user)) {
     return res.status(403).json({ error: 'You are not part of this live session' });
   }
+  if (!admission.mayParticipate(sessionId, session.batch_id, req.user)) return sendWaiting(res, sessionId, req.user.id);
   if (req.user.role !== 'Student' && req.user.role !== 'Lab') {
     return res.status(400).json({ error: 'Only students use raise hand' });
   }
@@ -769,7 +810,7 @@ router.post('/sessions/:id/start', auth, requireRole('Admin', 'Trainer'), (req, 
 router.post('/sessions/:id/end', auth, requireRole('Admin', 'Trainer'), async (req, res) => {
   const sessionId = Number(req.params.id);
   const session = db.prepare(`
-    SELECT ls.id, ls.status, ls.batch_id, b.trainer_id
+    SELECT ls.id, ls.status, ls.batch_id, ls.room_name, b.trainer_id
     FROM live_sessions ls
     JOIN batches b ON b.id = ls.batch_id
     WHERE ls.id = ?
@@ -778,17 +819,60 @@ router.post('/sessions/:id/end', auth, requireRole('Admin', 'Trainer'), async (r
   if (req.user.role === 'Trainer' && !isStaffForBatch(req.user.id, session.batch_id)) {
     return res.status(403).json({ error: 'You can only end your own session' });
   }
-  void liveRecording.forceStopRecordingForSession(sessionId).catch((e) =>
-    console.warn('liveRecording.forceStopRecordingForSession', sessionId, e?.message || e)
-  );
+  void liveRecording
+    .forceStopRecordingForSession(sessionId)
+    .catch((e) => console.warn('liveRecording.forceStopRecordingForSession', sessionId, e?.message || e))
+    .then(() => roomControl.closeRoom(session.room_name));
   const endedAt = new Date(session.ends_at || '').getTime();
   const shouldBeEnded = !Number.isNaN(endedAt) && Date.now() > endedAt;
   db.prepare('UPDATE live_session_participants SET left_at = datetime(\'now\') WHERE live_session_id = ? AND left_at IS NULL').run(sessionId);
   db.prepare("UPDATE live_sessions SET status = ? WHERE id = ?").run(shouldBeEnded ? 'ended' : 'scheduled', sessionId);
   db.prepare('DELETE FROM live_session_speakers WHERE live_session_id = ?').run(sessionId);
   db.prepare('DELETE FROM live_session_hands WHERE live_session_id = ?').run(sessionId);
+  admission.resetSession(sessionId);
   logSessionEvent(sessionId, req.user.id, 'session_force_leave', null);
   res.json({ ok: true, status: shouldBeEnded ? 'ended' : 'scheduled' });
+});
+
+/** Own place in the waiting room. Polling this does not create or renew a request. */
+router.get('/sessions/:id/admission', auth, (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = db.prepare('SELECT id, batch_id, status FROM live_sessions WHERE id = ?').get(sessionId);
+  if (!session) return res.status(404).json({ error: 'Live session not found' });
+  if (!isUserAllowedForSession(session, req.user)) {
+    return res.status(403).json({ error: 'You are not part of this live session' });
+  }
+  res.json({
+    sessionStatus: session.status,
+    status: admission.admissionStatus(sessionId, req.user.id),
+    meetingActive: admission.isMeetingActive(sessionId),
+    hostPresent: admission.isHostPresent(sessionId),
+    canEnter: admission.mayParticipate(sessionId, session.batch_id, req.user),
+  });
+});
+
+/** Trainer or admin: admit or deny one person, or admit everyone who is waiting (userId "all"). */
+router.post('/sessions/:id/admissions/:userId', auth, requireRole('Admin', 'Trainer'), (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = db.prepare('SELECT id, batch_id, status, room_name FROM live_sessions WHERE id = ?').get(sessionId);
+  if (!session) return res.status(404).json({ error: 'Live session not found' });
+  if (!admission.isHost(req.user, session.batch_id)) {
+    return res.status(403).json({ error: 'Only the trainer or an admin can admit people' });
+  }
+  const decision = req.body?.decision;
+  const all = req.params.userId === 'all';
+  const userId = all ? null : Number(req.params.userId);
+  if (!['admit', 'deny'].includes(decision) || (all && decision !== 'admit') || (!all && !Number.isInteger(userId))) {
+    return res.status(400).json({ error: 'Invalid admission decision' });
+  }
+  const changed = admission.decide(sessionId, userId, decision === 'admit' ? 'admitted' : 'denied', req.user.id);
+  if (!all && !changed) return res.status(404).json({ error: 'That person has not asked to join' });
+  if (decision === 'deny') {
+    db.prepare("UPDATE live_session_participants SET left_at = datetime('now') WHERE live_session_id = ? AND user_id = ? AND left_at IS NULL").run(sessionId, userId);
+    void roomControl.removeParticipant(session.room_name, userId);
+  }
+  logSessionEvent(sessionId, req.user.id, decision === 'admit' ? 'entry_admitted' : 'entry_denied', all ? 'all' : String(userId));
+  res.json({ ok: true, changed, waitingRoom: admission.listWaiting(sessionId) });
 });
 
 router.post('/sessions/:id/join', auth, async (req, res) => {
@@ -825,6 +909,14 @@ router.post('/sessions/:id/join', auth, async (req, res) => {
     });
   }
 
+  const host = admission.isHost(req.user, session.batch_id);
+  if (!host && !admission.mayParticipate(sessionId, session.batch_id, req.user)) {
+    const before = admission.admissionStatus(sessionId, req.user.id);
+    admission.requestEntry(sessionId, req.user.id);
+    if (before !== 'waiting' && before !== 'admitted') logSessionEvent(sessionId, req.user.id, 'entry_requested', null);
+    return sendWaiting(res, sessionId, req.user.id);
+  }
+
   const { creds, recordingConfigured, recordingWarning } = await buildRtcJoinPayload(session, req.user);
   const rtcReady = creds.livekitReady;
 
@@ -834,6 +926,7 @@ router.post('/sessions/:id/join', auth, async (req, res) => {
     ON CONFLICT(live_session_id, user_id) DO UPDATE SET joined_at = datetime('now'), left_at = NULL
   `).run(sessionId, req.user.id);
 
+  if (host) admission.activateMeeting(sessionId, req.user.id);
   if (session.status === 'scheduled') {
     db.prepare("UPDATE live_sessions SET status = 'live' WHERE id = ?").run(sessionId);
   }
@@ -893,6 +986,10 @@ router.post('/sessions/:id/token', auth, async (req, res) => {
     });
   }
 
+  if (!admission.mayParticipate(sessionId, session.batch_id, req.user)) {
+    return sendWaiting(res, sessionId, req.user.id);
+  }
+
   const { creds, recordingWarning } = await buildRtcJoinPayload(session, req.user);
   const rtcReady = creds.livekitReady;
   if (!rtcReady) {
@@ -917,12 +1014,14 @@ router.post('/sessions/:id/token', auth, async (req, res) => {
 
 router.post('/sessions/:id/leave', auth, (req, res) => {
   const sessionId = Number(req.params.id);
-  db.prepare(`
+  const left = db.prepare(`
     UPDATE live_session_participants
     SET left_at = datetime('now')
     WHERE live_session_id = ? AND user_id = ? AND left_at IS NULL
   `).run(sessionId, req.user.id);
   logSessionEvent(sessionId, req.user.id, 'leave', null);
+  // An empty room needs a host again before anyone else can enter.
+  if (left.changes && countActiveParticipants(sessionId) === 0) admission.deactivateMeeting(sessionId);
 
   void liveRecording.maybeStopRecordingAfterLeave(sessionId).catch((e) =>
     console.warn('maybeStopRecordingAfterLeave', sessionId, e?.message || e)

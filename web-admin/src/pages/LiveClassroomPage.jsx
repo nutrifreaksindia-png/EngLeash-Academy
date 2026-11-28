@@ -2,10 +2,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom';
 import { Track } from 'livekit-client';
 import {
-  attachLiveKitVideo,
   connectLiveKitRoom,
   detachAllLiveKitRemoteAudio,
+  syncLiveKitTileVideo,
 } from '../live/connectLiveKitRoom.js';
+import WaitingRoomPanel from '../live/WaitingRoomPanel.jsx';
+import { pagedGrid } from '../live/videoGrid.js';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
 
@@ -66,7 +68,11 @@ async function liveApi(path, token, options = {}) {
       signal: controller?.signal,
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || 'Request failed');
+    if (!res.ok) {
+      const failure = new Error(data.error || 'Request failed');
+      failure.code = data.code;
+      throw failure;
+    }
     return data;
   } catch (e) {
     if (e?.name === 'AbortError') throw new Error('Request timed out');
@@ -74,6 +80,22 @@ async function liveApi(path, token, options = {}) {
   } finally {
     if (timer != null) window.clearTimeout(timer);
   }
+}
+
+function removeRemoteTile(el) {
+  try {
+    syncLiveKitTileVideo(el.querySelector(':scope > .liveMeetCellMedia'), null);
+    el.remove();
+  } catch {
+    /* ignore */
+  }
+}
+
+const TILE_GAP = 8;
+
+function initialsOf(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  return ((parts[0]?.[0] || '?') + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
 }
 
 /** Request layout pass after DOM / RTC state updates. */
@@ -128,16 +150,26 @@ export default function LiveClassroomPage({ token }) {
   const navigate = useNavigate();
   const id = Number(liveSessionId);
   const [readyToEnter, setReadyToEnter] = useState(readSkipPreJoin);
-  const [phase, setPhase] = useState(() => (readSkipPreJoin() ? 'loading' : 'preJoin')); // preJoin | loading | inRoom | error | leaving | left
+  const [phase, setPhase] = useState(() => (readSkipPreJoin() ? 'loading' : 'preJoin')); // preJoin | loading | waiting | inRoom | error | leaving | left
+  /** Set while this person is waiting to be admitted. */
+  const [waitingInfo, setWaitingInfo] = useState({ message: '', denied: false });
+  const [admitBusy, setAdmitBusy] = useState(false);
   const [preJoinMeta, setPreJoinMeta] = useState(null);
   const [sessionRunId, setSessionRunId] = useState(0);
   const suppressJoinRef = useRef(false);
   const leaveInProgressRef = useRef(false);
+  const sessionOverRef = useRef(() => {});
   const [error, setError] = useState('');
   const [hint, setHint] = useState('');
   const [deviceHint, setDeviceHint] = useState('');
   const [joinMeta, setJoinMeta] = useState(null);
   const [rtcState, setRtcState] = useState('');
+  const [weakConnection, setWeakConnection] = useState(false);
+  /** Bumped when the network level or paused videos change. */
+  const [networkTick, setNetworkTick] = useState(0);
+  /** Size of the area available to video tiles. */
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+  const [tilePage, setTilePage] = useState(0);
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   /** Bump after local tracks are published so the “play preview” effect runs (tracks weren’t ready on first inRoom paint). */
@@ -187,6 +219,7 @@ export default function LiveClassroomPage({ token }) {
   const remoteLayoutRootRef = useRef(null);
   const localJoinUidRef = useRef(null);
   const repositionRef = useRef(() => {});
+  const layoutRef = useRef({ perPage: 25, pages: 1 });
   const remoteElsRef = useRef(new Map());
   /** After layout mounts (phase === inRoom), attach local camera preview — refs are null if play() runs inside join() before React paints. Do not stop() here; teardown stops tracks on leave. */
   useEffect(() => {
@@ -329,10 +362,18 @@ export default function LiveClassroomPage({ token }) {
   useEffect(() => {
     if (phase !== 'inRoom' || !Number.isFinite(id)) return;
     let cancelled = false;
+    let inactiveChecks = 0;
     const loadState = async () => {
       try {
         const s = await liveApi(`/live/sessions/${id}/state`, token);
-        if (!cancelled) setRoomState(s);
+        if (cancelled || leaveInProgressRef.current) return;
+        setRoomState(s);
+        // Two checks in a row, so a momentary gap while (re)joining does not remove anyone.
+        inactiveChecks = s?.participantActive === false ? inactiveChecks + 1 : 0;
+        if (inactiveChecks >= 2 || s?.status === 'ended' || s?.status === 'cancelled') {
+          cancelled = true;
+          sessionOverRef.current();
+        }
       } catch {
         if (!cancelled) setRoomState(null);
       }
@@ -364,17 +405,20 @@ export default function LiveClassroomPage({ token }) {
       const remotes = client.getRemoteParticipants();
       const solo = remotes.length === 0;
       if (solo || !mount) {
-        for (const [, el] of [...remoteElsRef.current.entries()]) {
-          try {
-            el.remove();
-          } catch {
-            /* ignore */
-          }
-        }
+        for (const el of remoteElsRef.current.values()) removeRemoteTile(el);
         remoteElsRef.current.clear();
         return;
       }
       const validKeys = new Set(remotes.map((p) => String(p.identity)));
+      // Stable order: you, then hosts, then everyone else as they joined. Speaking never reorders.
+      const hostIds = new Set(participants.filter((x) => x.role === 'Trainer' || x.role === 'Admin').map((x) => Number(x.id)));
+      const ordered = [
+        ...remotes.filter((p) => hostIds.has(Number(p.identity))),
+        ...remotes.filter((p) => !hostIds.has(Number(p.identity))),
+      ];
+      const hands = new Set((roomState?.handRaisedUserIds || []).map(Number));
+      client.network.setAlwaysShow([...hostIds].map(String));
+      const { perPage } = layoutRef.current;
       for (const p of remotes) {
         const uidKey = String(p.identity);
         const uid = client.identityToUid(p.identity);
@@ -392,11 +436,14 @@ export default function LiveClassroomPage({ token }) {
           media.className = 'liveMeetCellMedia';
           const blackout = document.createElement('div');
           blackout.className = 'liveMeetCellBlackout';
+          const av = document.createElement('div');
+          av.className = 'liveMeetAvatar';
           const bn = document.createElement('div');
           bn.className = 'liveMeetBlackoutName';
           const bh = document.createElement('div');
           bh.className = 'liveMeetBlackoutHint';
           bh.textContent = 'Camera Off';
+          blackout.appendChild(av);
           blackout.appendChild(bn);
           blackout.appendChild(bh);
           const namebar = document.createElement('div');
@@ -411,23 +458,29 @@ export default function LiveClassroomPage({ token }) {
         }
         const media = el.querySelector(':scope > .liveMeetCellMedia');
         const blackout = el.querySelector(':scope > .liveMeetCellBlackout');
-        const bn = el.querySelector(':scope > .liveMeetBlackoutName');
+        const bn = el.querySelector('.liveMeetBlackoutName');
         const namebar = el.querySelector(':scope > .liveMeetCellNamebar');
         const mic = el.querySelector(':scope > .liveMeetCellMic');
-        if (bn) bn.textContent = label;
-        if (namebar) namebar.textContent = label;
+        const shown = hands.has(Number(uid)) ? `✋ ${label}` : label;
+        const avatar = el.querySelector('.liveMeetAvatar');
+        if (avatar) avatar.textContent = initialsOf(label);
+        if (bn) bn.textContent = shown;
+        if (namebar) namebar.textContent = shown;
+        // CSS order and display, never moving the element: moving a playing video pauses it.
+        const position = 1 + ordered.indexOf(p);
+        el.style.order = String(position);
+        el.style.display = Math.floor(position / perPage) === tilePage ? '' : 'none';
         if (mic) {
           mic.classList.toggle('liveMeetCellMic--muted', !micLive);
         }
-        if (blackout) blackout.classList.toggle('liveMeetCellBlackout--visible', !camLive);
-        if (namebar) namebar.classList.toggle('liveMeetCellNamebar--visible', camLive);
-        if (media) {
-          media.innerHTML = '';
-          if (camLive && camPub?.track) {
-            attachLiveKitVideo(camPub.track, media);
-          }
-        }
+        const paused = camLive && client.network.isVideoPaused(String(p.identity));
+        const shownLive = camLive && !paused;
+        const hintEl = el.querySelector('.liveMeetBlackoutHint');
+        if (hintEl) hintEl.textContent = paused ? 'Video paused to keep audio clear' : 'Camera Off';
+        if (blackout) blackout.classList.toggle('liveMeetCellBlackout--visible', !shownLive);
+        if (namebar) namebar.classList.toggle('liveMeetCellNamebar--visible', shownLive);
         if (el.parentNode !== mount) mount.appendChild(el);
+        syncLiveKitTileVideo(media, shownLive ? camPub.track : null);
         el.classList.toggle(
           'liveMeetCellSpeaking',
           activeSpeakerUid != null && uid != null && Number(uid) === Number(activeSpeakerUid)
@@ -435,24 +488,20 @@ export default function LiveClassroomPage({ token }) {
       }
       for (const [key, el] of [...remoteElsRef.current.entries()]) {
         if (!validKeys.has(key)) {
-          try {
-            el.remove();
-          } catch {
-            /* ignore */
-          }
+          removeRemoteTile(el);
           remoteElsRef.current.delete(key);
         }
       }
       return;
     }
-  }, [phase, activeSpeakerUid, displayNameForUid]);
+  }, [phase, activeSpeakerUid, displayNameForUid, participants, roomState?.handRaisedUserIds, tilePage, networkTick]);
 
   repositionRef.current = repositionRemoteVideoTiles;
 
   useEffect(() => {
     if (phase !== 'inRoom') return;
     bumpRemoteLayout(repositionRef);
-  }, [phase, activeSpeakerUid, repositionRemoteVideoTiles, remotePeerCount, remoteVideoCount, participants]);
+  }, [phase, activeSpeakerUid, repositionRemoteVideoTiles, remotePeerCount, remoteVideoCount, participants, stageSize]);
 
   useEffect(() => {
     if (phase !== 'inRoom') return;
@@ -460,28 +509,34 @@ export default function LiveClassroomPage({ token }) {
     if (!el) return;
     const client = clientRef.current;
     if (!client || client.kind !== 'livekit') return undefined;
-    if (!camOn) {
-      el.innerHTML = '';
-      return undefined;
-    }
-    const track = client.getLocalVideoTrack?.();
-    if (!track) return undefined;
+    // Keeps the same <video> while the track is unchanged, so people joining or leaving never remount it.
+    const track = camOn ? client.getLocalVideoTrack?.() : null;
+    if (camOn && !track) return undefined;
     try {
-      livekitLocalDetachRef.current?.();
-      livekitLocalDetachRef.current = attachLiveKitVideo(track, el);
-      setDeviceHint('');
+      syncLiveKitTileVideo(el, track);
+      livekitLocalDetachRef.current = () => syncLiveKitTileVideo(el, null);
+      if (track) setDeviceHint('');
     } catch (e) {
       setDeviceHint(e?.message || 'Could not show camera preview.');
     }
-    return () => {
-      try {
-        livekitLocalDetachRef.current?.();
-      } catch {
-        /* ignore */
-      }
-      livekitLocalDetachRef.current = null;
-    };
+    return undefined;
   }, [phase, localTracksVersion, camOn, remotePeerCount]);
+
+  useEffect(() => {
+    const last = Math.max(0, layoutRef.current.pages - 1);
+    if (tilePage > last) setTilePage(last);
+  }, [tilePage, stageSize, remotePeerCount]);
+
+  useEffect(() => {
+    const stage = remoteLayoutRootRef.current;
+    if (!stage || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      setStageSize({ width: Math.floor(width), height: Math.floor(height) });
+    });
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [phase]);
 
   /** Dev / ?liveDebug=1: periodic LiveKit snapshot. */
   useEffect(() => {
@@ -707,18 +762,22 @@ export default function LiveClassroomPage({ token }) {
       }
     }
     localTracksRef.current = [];
-    remoteElsRef.current.forEach((el) => {
-      try {
-        el?.remove?.();
-      } catch {
-        /* ignore */
-      }
-    });
+    remoteElsRef.current.forEach(removeRemoteTile);
     remoteElsRef.current.clear();
     if (client?.kind === 'livekit') {
       void withTimeout(client.disconnect(), 3000);
     }
   }, []);
+
+  sessionOverRef.current = () => {
+    suppressJoinRef.current = true;
+    void exitPictureInPictureWithTimeout(1500);
+    void teardown();
+    setParticipantPanelOpen(false);
+    setChatOpen(false);
+    setError('This class has ended or you were removed by the host.');
+    setPhase('error');
+  };
 
   const finishLeaveNavigate = useCallback(() => {
     if (window.history.length > 1) navigate(-1);
@@ -726,7 +785,7 @@ export default function LiveClassroomPage({ token }) {
   }, [navigate]);
 
   const exitClassroom = useCallback(
-    async (mode) => {
+    async (mode, { confirmText, goHome } = {}) => {
       if (leaveInProgressRef.current) return;
       leaveInProgressRef.current = true;
       setHangupMenuOpen(false);
@@ -736,6 +795,11 @@ export default function LiveClassroomPage({ token }) {
           'End this session for everyone? All participants will be disconnected from the classroom.'
         )
       ) {
+        leaveInProgressRef.current = false;
+        return;
+      }
+
+      if (mode === 'leave' && confirmText && !window.confirm(confirmText)) {
         leaveInProgressRef.current = false;
         return;
       }
@@ -773,15 +837,30 @@ export default function LiveClassroomPage({ token }) {
           setParticipantPanelOpen(false);
           setChatOpen(false);
           setSessionRunId((x) => x + 1);
-          finishLeaveNavigate();
+          if (goHome) navigate('/');
+          else finishLeaveNavigate();
         }
         leaveInProgressRef.current = false;
       }
     },
-    [finishLeaveNavigate, id, teardown, token]
+    [finishLeaveNavigate, id, navigate, teardown, token]
   );
 
   const leaveRoom = useCallback(() => exitClassroom('leave'), [exitClassroom]);
+
+  const confirmLeaveRoom = useCallback(
+    () => exitClassroom('leave', { confirmText: 'Leave this class? It continues for everyone else.' }),
+    [exitClassroom]
+  );
+  /** The web classroom cannot stay connected on another page, so say so before navigating. */
+  const navigateAway = useCallback(
+    (goHome) =>
+      exitClassroom('leave', {
+        confirmText: 'Going to another page disconnects you from this class. It continues for everyone else. Leave now?',
+        goHome,
+      }),
+    [exitClassroom]
+  );
 
   const endSessionForAll = useCallback(() => exitClassroom('end'), [exitClassroom]);
 
@@ -960,9 +1039,11 @@ export default function LiveClassroomPage({ token }) {
     }
 
     let cancelled = false;
+    // A request that only reached the waiting room has nothing to leave or tear down.
+    let heldInWaitingRoom = false;
 
     async function run() {
-      setPhase('loading');
+      setPhase((current) => (current === 'waiting' ? current : 'loading'));
       setError('');
       setDeviceHint('');
       try {
@@ -1017,6 +1098,9 @@ export default function LiveClassroomPage({ token }) {
             setRtcPresenceTick((x) => x + 1);
           },
           onActiveSpeaker: (uid) => setActiveSpeakerUid(uid),
+          onWeakConnection: setWeakConnection,
+          onNetworkChange: () => setNetworkTick((x) => x + 1),
+          onLocalVideoChange: () => setLocalTracksVersion((v) => v + 1),
           onDeviceWarning: (msg) => {
             if (msg) setDeviceHint(msg);
           },
@@ -1049,10 +1133,15 @@ export default function LiveClassroomPage({ token }) {
           }
         }, 10 * 60 * 1000);
       } catch (e) {
-        if (!cancelled) {
-          setPhase('error');
-          setError(e.message || 'Could not join');
+        if (cancelled) return;
+        if (e.code === 'WAITING_FOR_APPROVAL' || e.code === 'ENTRY_DENIED') {
+          heldInWaitingRoom = true;
+          setWaitingInfo({ message: e.message, denied: e.code === 'ENTRY_DENIED' });
+          setPhase('waiting');
+          return;
         }
+        setPhase('error');
+        setError(e.message || 'Could not join');
       }
     }
 
@@ -1060,7 +1149,7 @@ export default function LiveClassroomPage({ token }) {
 
     return () => {
       cancelled = true;
-      if (suppressJoinRef.current) return;
+      if (suppressJoinRef.current || heldInWaitingRoom) return;
       void (async () => {
         try {
           await liveApi(`/live/sessions/${id}/leave`, token, { method: 'POST', body: '{}' });
@@ -1077,6 +1166,58 @@ export default function LiveClassroomPage({ token }) {
     };
   }, [id, teardown, token, readyToEnter, sessionRunId]);
 
+  /** While waiting, watch for the trainer's decision and enter as soon as it allows. */
+  useEffect(() => {
+    if (phase !== 'waiting' || waitingInfo.denied || !Number.isFinite(id)) return undefined;
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const a = await liveApi(`/live/sessions/${id}/admission`, token);
+        if (cancelled) return;
+        if (a.sessionStatus === 'ended' || a.sessionStatus === 'cancelled') {
+          setError('This session has ended.');
+          setPhase('error');
+        } else if (a.status === 'denied') {
+          setWaitingInfo({ message: 'The trainer did not admit you to this class.', denied: true });
+        } else if (a.canEnter || !a.status) {
+          setSessionRunId((n) => n + 1);
+        } else {
+          setWaitingInfo({
+            message: a.meetingActive
+              ? 'Waiting for the trainer to let you in.'
+              : 'The trainer has not started the class yet. You are in the waiting room.',
+            denied: false,
+          });
+        }
+      } catch {
+        /* keep waiting through a brief connection problem */
+      }
+    }, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [phase, waitingInfo.denied, id, token]);
+
+  const decideAdmission = useCallback(
+    async (userId, decision) => {
+      setAdmitBusy(true);
+      try {
+        const result = await liveApi(`/live/sessions/${id}/admissions/${userId}`, token, {
+          method: 'POST',
+          body: JSON.stringify({ decision }),
+        });
+        setRoomState((current) => (current ? { ...current, waitingRoom: result.waitingRoom } : current));
+      } catch (e) {
+        setHint(e.message || 'Could not update the waiting room');
+        window.setTimeout(() => setHint(''), 5000);
+      } finally {
+        setAdmitBusy(false);
+      }
+    },
+    [id, token]
+  );
+
   const isPublisher = joinMeta?.role === 'publisher';
   const canEndSession = joinMeta?.canEndSession === true;
   const showStage = phase === 'inRoom' || phase === 'leaving';
@@ -1090,10 +1231,15 @@ export default function LiveClassroomPage({ token }) {
   const rtcHuman = (() => {
     const s = String(rtcState || '').toLowerCase();
     if (!s) return '';
-    if (s.includes('connected')) return 'Connected';
     if (s.includes('reconnect')) return 'Reconnecting…';
-    if (s.includes('connecting')) return 'Connecting…';
     if (s.includes('disconnected') || s.includes('failed') || s.includes('abort')) return 'Offline';
+    if (s.includes('connecting')) return 'Connecting…';
+    if (s.includes('connected')) {
+      const level = networkTick >= 0 ? clientRef.current?.network?.level() || 0 : 0;
+      if (level === 2) return 'Very weak network: some videos paused';
+      if (level === 1) return 'Weak network: video reduced';
+      return weakConnection ? 'Weak connection' : 'Connected';
+    }
     return rtcState;
   })();
 
@@ -1134,6 +1280,14 @@ export default function LiveClassroomPage({ token }) {
   const inCallUi = showStage && (phase === 'inRoom' || phase === 'leaving');
   const soloInMeeting = phase === 'inRoom' && remotePeerCount === 0;
   const videoStageTier = soloInMeeting ? 'solo' : 'meet';
+  const tileCount = 1 + (phase === 'inRoom' ? remotePeerCount : 0);
+  const layout = pagedGrid(
+    tileCount,
+    Math.max(1, stageSize.width - TILE_GAP * 2),
+    Math.max(1, stageSize.height - TILE_GAP * 2),
+    { gap: TILE_GAP, minTileWidth: 120, minTileHeight: 140, maxPerPage: 25 }
+  );
+  layoutRef.current = layout;
 
   const selfVideoLabel = useMemo(() => {
     const uid = joinMeta?.uid;
@@ -1145,7 +1299,7 @@ export default function LiveClassroomPage({ token }) {
     <>
       <button
         type="button"
-        className={`liveIconBtn ${!micOn ? 'liveIconBtn--off' : ''}`}
+        className={`liveIconBtn liveIconBtn--labeled ${!micOn ? 'liveIconBtn--off' : ''}`}
         onClick={toggleMic}
         aria-pressed={micOn}
         aria-label={micOn ? 'Mute microphone' : 'Unmute microphone'}
@@ -1166,10 +1320,11 @@ export default function LiveClassroomPage({ token }) {
             <line x1="8" y1="23" x2="16" y2="23" />
           </LiveSvg>
         )}
+        <span className="liveCtlLabel">{micOn ? 'Mic on' : 'Mic off'}</span>
       </button>
       <button
         type="button"
-        className={`liveIconBtn ${!camOn ? 'liveIconBtn--off' : ''}`}
+        className={`liveIconBtn liveIconBtn--labeled ${!camOn ? 'liveIconBtn--off' : ''}`}
         onClick={toggleCam}
         aria-pressed={camOn}
         aria-label={camOn ? 'Turn camera off' : 'Turn camera on'}
@@ -1187,6 +1342,7 @@ export default function LiveClassroomPage({ token }) {
             <path d="M16 16l5-3v6" />
           </LiveSvg>
         )}
+        <span className="liveCtlLabel">{camOn ? 'Cam on' : 'Cam off'}</span>
       </button>
     </>
   );
@@ -1206,6 +1362,9 @@ export default function LiveClassroomPage({ token }) {
               ) : null}
               {phase === 'loading' ? (
                 <span className="liveStatusChip liveStatusChipConnecting">Connecting…</span>
+              ) : null}
+              {phase === 'waiting' ? (
+                <span className="liveStatusChip liveStatusChipConnecting">Waiting room</span>
               ) : null}
               {phase === 'leaving' ? (
                 <span className="liveStatusChip liveStatusChipConnecting">Leaving…</span>
@@ -1268,7 +1427,7 @@ export default function LiveClassroomPage({ token }) {
               type="button"
               className={`liveBarBtn${phase === 'left' ? '' : ' liveBarBtnLeave'}`}
               onClick={() => {
-                if (phase === 'preJoin') {
+                if (phase === 'preJoin' || phase === 'waiting') {
                   stopPreJoinPreview();
                   navigate(-1);
                 } else if (phase === 'left') {
@@ -1288,7 +1447,7 @@ export default function LiveClassroomPage({ token }) {
                       : 'Leave live session'
               }
             >
-              {phase === 'preJoin' ? 'Back' : phase === 'leaving' ? 'Leaving…' : phase === 'left' ? 'Done' : 'Leave'}
+              {phase === 'preJoin' || phase === 'waiting' ? 'Back' : phase === 'leaving' ? 'Leaving…' : phase === 'left' ? 'Done' : 'Leave'}
             </button>
           </div>
         </header>
@@ -1336,6 +1495,29 @@ export default function LiveClassroomPage({ token }) {
         </div>
       ) : null}
 
+      {phase === 'waiting' ? (
+        <div className="liveEndScreen" role="status" aria-live="polite">
+          <h2 className="liveEndTitle">{waitingInfo.denied ? 'Not admitted' : 'Waiting room'}</h2>
+          <p className="liveEndSub">{waitingInfo.message}</p>
+          {waitingInfo.denied ? (
+            <div className="liveEndActions">
+              <button
+                type="button"
+                className="liveBarBtn liveBarBtnPrimary"
+                onClick={() => {
+                  setWaitingInfo({ message: 'Asking again…', denied: false });
+                  setSessionRunId((n) => n + 1);
+                }}
+              >
+                Ask again
+              </button>
+            </div>
+          ) : (
+            <p className="liveEndSub">Keep this page open. You will join automatically once you are admitted.</p>
+          )}
+        </div>
+      ) : null}
+
       {showLeftEnd ? (
         <div className="liveEndScreen" role="region" aria-labelledby="live-end-title">
           <h2 className="liveEndTitle" id="live-end-title">
@@ -1355,7 +1537,30 @@ export default function LiveClassroomPage({ token }) {
 
       {showStage ? (
         <div className="liveCallChrome">
+          {phase === 'inRoom' && canEndSession ? (
+            <WaitingRoomPanel waiting={roomState?.waitingRoom} busy={admitBusy} onDecide={decideAdmission} />
+          ) : null}
           <header className="liveCallBar liveCallBar--top" role="banner">
+            {phase === 'inRoom' ? (
+              <nav className="liveCallBarCluster" aria-label="Classroom navigation">
+                <button type="button" className="liveBarBtn liveBarBtnGhost" onClick={() => void navigateAway(false)}>
+                  ← Back
+                </button>
+                <button type="button" className="liveBarBtn liveBarBtnGhost" onClick={() => void navigateAway(true)}>
+                  Home
+                </button>
+                {pipSupported ? (
+                  <button
+                    type="button"
+                    className="liveBarBtn liveBarBtnGhost"
+                    onClick={() => void tryPictureInPicture({ preferRemoteVideo: true, allowFallbackLocal: true })}
+                    title="Show the class video in a floating window"
+                  >
+                    Minimise
+                  </button>
+                ) : null}
+              </nav>
+            ) : null}
             <div className="liveCallBarCluster liveCallBarCluster--left">
               <span className="liveCallBarTitle" id="live-room-title">
                 {joinMeta?.title || 'Live class'}
@@ -1393,10 +1598,16 @@ export default function LiveClassroomPage({ token }) {
                   {rtcHuman}
                 </span>
               ) : null}
+              {phase === 'inRoom' ? <span className="liveCallRtcPill">{remotePeerCount + 1} in class</span> : null}
             </div>
           </header>
 
-          <main id="live-main-stage" className="liveCallStage" role="main" aria-labelledby="live-room-title">
+          <main
+            id="live-main-stage"
+            className={`liveCallStage${chatOpen || participantPanelOpen ? ' liveCallStage--withPanel' : ''}`}
+            role="main"
+            aria-labelledby="live-room-title"
+          >
             <span className="liveVisuallyHidden" id="live-remote-label">
               Participant video
             </span>
@@ -1407,14 +1618,30 @@ export default function LiveClassroomPage({ token }) {
               aria-labelledby="live-remote-label"
               aria-label="Live video"
             >
-              <div className={`liveMeetGrid${soloInMeeting ? ' liveMeetGrid--solo' : ''}`}>
-                <div className={`liveMeetCell liveMeetCell--local${soloInMeeting ? ' liveMeetCell--soloFill' : ''}`}>
+              <div
+                className={`liveMeetGrid${soloInMeeting ? ' liveMeetGrid--solo' : ''}`}
+                style={{
+                  '--tile-w': `${layout.tileWidth}px`,
+                  '--tile-h': `${layout.tileHeight}px`,
+                  width: `${layout.columns * layout.tileWidth + (layout.columns - 1) * TILE_GAP + TILE_GAP * 2}px`,
+                }}
+              >
+                <div
+                  className={`liveMeetCell liveMeetCell--local${soloInMeeting ? ' liveMeetCell--soloFill' : ''}${
+                    activeSpeakerUid != null && Number(joinMeta?.uid) === Number(activeSpeakerUid) ? ' liveMeetCellSpeaking' : ''
+                  }`}
+                  style={{ order: 0, display: tilePage === 0 ? undefined : 'none' }}
+                >
                   <div className="liveLocalVideoShell">
                     <div ref={localVideoRef} className="liveLocalVideo liveLocalVideo--stage" role="region" aria-label="Your camera preview" />
                     {camOn ? (
-                      <div className="liveMeetCellNamebar liveMeetCellNamebar--visible">{selfVideoLabel}</div>
+                      <div className="liveMeetCellNamebar liveMeetCellNamebar--visible">
+                        {handsSet.has(Number(joinMeta?.uid)) ? '✋ ' : ''}
+                        {selfVideoLabel}
+                      </div>
                     ) : (
                       <div className="liveMeetCellBlackout liveMeetCellBlackout--visible liveMeetCellBlackout--local">
+                        <div className="liveMeetAvatar">{initialsOf(selfVideoLabel)}</div>
                         <div className="liveMeetBlackoutName">{selfVideoLabel}</div>
                         <div className="liveMeetBlackoutHint">Camera Off</div>
                       </div>
@@ -1440,11 +1667,22 @@ export default function LiveClassroomPage({ token }) {
                 </div>
                 {!soloInMeeting ? <div ref={galleryRemoteSlotRef} className="liveMeetGridRemotes" /> : null}
               </div>
-              {phase === 'inRoom' && remotePeerCount >= 1 && remoteVideoCount === 0 && participants.length > 1 ? (
-                <div className="liveRemoteEmpty liveRemoteEmptyOverlay" aria-live="polite">
-                  <p className="liveRemoteEmptyTitle">Waiting for video</p>
-                  <p className="liveRemoteEmptySub">Others are in the call but have not turned their camera on yet.</p>
-                </div>
+              {layout.pages > 1 ? (
+                <nav className="liveTilePager" aria-label="Participant pages">
+                  <button type="button" onClick={() => setTilePage((p) => Math.max(0, p - 1))} disabled={tilePage === 0}>
+                    ‹ Previous
+                  </button>
+                  <span>
+                    Page {Math.min(tilePage, layout.pages - 1) + 1} of {layout.pages}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setTilePage((p) => Math.min(layout.pages - 1, p + 1))}
+                    disabled={tilePage >= layout.pages - 1}
+                  >
+                    Next ›
+                  </button>
+                </nav>
               ) : null}
             </div>
 
@@ -1628,7 +1866,7 @@ export default function LiveClassroomPage({ token }) {
                 </button>
                 <button
                   type="button"
-                  className="liveIconBtn"
+                  className="liveIconBtn liveIconBtn--labeled"
                   onClick={() => setParticipantPanelOpen((o) => !o)}
                   aria-expanded={participantPanelOpen}
                   aria-controls="live-participant-panel"
@@ -1641,10 +1879,11 @@ export default function LiveClassroomPage({ token }) {
                     <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
                     <path d="M16 3.13a4 4 0 0 1 0 7.75" />
                   </LiveSvg>
+                  <span className="liveCtlLabel">People</span>
                 </button>
                 <button
                   type="button"
-                  className="liveIconBtn"
+                  className="liveIconBtn liveIconBtn--labeled"
                   onClick={() => setChatOpen((o) => !o)}
                   aria-expanded={chatOpen}
                   aria-controls="live-chat-panel"
@@ -1654,11 +1893,12 @@ export default function LiveClassroomPage({ token }) {
                   <LiveSvg>
                     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                   </LiveSvg>
+                  <span className="liveCtlLabel">Chat</span>
                 </button>
                 <div className="liveReactionMenuWrap" ref={reactionMenuRef}>
                   <button
                     type="button"
-                    className="liveIconBtn"
+                    className="liveIconBtn liveIconBtn--labeled"
                     onClick={() => {
                       setReactionMenuOpen((o) => {
                         const next = !o;
@@ -1680,6 +1920,7 @@ export default function LiveClassroomPage({ token }) {
                       <circle cx="9" cy="9" r="1.5" fill="currentColor" stroke="none" />
                       <circle cx="15" cy="9" r="1.5" fill="currentColor" stroke="none" />
                     </LiveSvg>
+                    <span className="liveCtlLabel">React</span>
                   </button>
                   {reactionMenuOpen ? (
                     <div className="liveReactionMenu" role="menu" aria-label="Reaction menu">
@@ -1704,58 +1945,33 @@ export default function LiveClassroomPage({ token }) {
                     </div>
                   ) : null}
                 </div>
-                <div className="liveHangupMenuWrap" ref={hangupMenuRef}>
+                <button
+                  type="button"
+                  className="liveIconBtn liveIconBtn--labeled liveIconBtn--leave"
+                  onClick={() => void confirmLeaveRoom()}
+                  disabled={phase === 'leaving'}
+                >
+                  <LiveSvg>
+                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                    <path d="M16 17l5-5-5-5" />
+                    <path d="M21 12H9" />
+                  </LiveSvg>
+                  <span className="liveCtlLabel">Leave</span>
+                </button>
+                {canEndSession ? (
                   <button
                     type="button"
-                    className="liveIconBtn liveIconBtn--leave"
-                    aria-label="Leave or end session"
-                    aria-haspopup="true"
-                    aria-expanded={hangupMenuOpen}
+                    className="liveIconBtn liveIconBtn--labeled liveIconBtn--end"
+                    onClick={() => void endSessionForAll()}
                     disabled={phase === 'leaving'}
-                    onClick={() => {
-                      setHangupMenuOpen((o) => {
-                        const next = !o;
-                        if (next) {
-                          setMenuOpen(false);
-                          setReactionMenuOpen(false);
-                        }
-                        return next;
-                      });
-                    }}
                   >
                     <LiveSvg>
-                      <g transform="rotate(135 12 12)">
-                        <path
-                          d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"
-                          fill="currentColor"
-                          stroke="none"
-                        />
-                      </g>
+                      <circle cx="12" cy="12" r="10" />
+                      <rect x="9" y="9" width="6" height="6" />
                     </LiveSvg>
+                    <span className="liveCtlLabel">End session</span>
                   </button>
-                  {hangupMenuOpen ? (
-                    <div className="liveHangupMenu" role="menu" aria-label="End call options">
-                      <button
-                        type="button"
-                        className="liveHangupMenuItem"
-                        role="menuitem"
-                        onClick={() => void leaveRoom()}
-                      >
-                        Leave session
-                      </button>
-                      {canEndSession ? (
-                        <button
-                          type="button"
-                          className="liveHangupMenuItem liveHangupMenuItem--danger"
-                          role="menuitem"
-                          onClick={() => void endSessionForAll()}
-                        >
-                          End session
-                        </button>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
+                ) : null}
                 <div className="liveOverflowWrap liveOverflowWrap--dark liveOverflowWrap--dropUp" ref={menuRef}>
                   <button
                     type="button"

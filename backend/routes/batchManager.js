@@ -13,6 +13,7 @@ const {
   removeBatchStudentAccess,
   purgeAllMembersAccessForDeletingBatch,
   refreshBatchLinkedAccessEnds,
+  learnerHasCourseAccess,
 } = require('../lib/courseAccess');
 const { syncApplyBillingDatesForBatch } = require('../lib/applyBilling');
 const { academyToday, academyOffsetMinutes } = require('../lib/academyDate');
@@ -1278,24 +1279,53 @@ router.get('/:id/members', auth, requireRole('Admin', 'Trainer'), (req, res) => 
   res.json(members);
 });
 
+/** Per-course access for one batch member, so the Admin can see why a course is not visible yet. */
+function memberCourseAccess(batchId, batch, studentId) {
+  const started = batch.batch_status === 'started' || batch.batch_status === 'completed' || !!batch.actual_start_date;
+  return batchCourseIds(batchId, batch).map((courseId) => {
+    const course = db
+      .prepare('SELECT name, enrollment_type, is_published, course_status FROM courses WHERE id = ?')
+      .get(courseId);
+    const hasAccess = learnerHasCourseAccess(studentId, courseId);
+    const type = String(course?.enrollment_type || 'free').toLowerCase();
+    let reason = null;
+    if (!course?.is_published || (course.course_status && course.course_status !== 'Active')) reason = 'course_not_published';
+    else if (!hasAccess && !started && (type === 'apply' || type === 'subscribe')) reason = 'batch_not_started';
+    else if (!hasAccess) reason = 'no_access';
+    return { courseId, courseName: course?.name || '', hasAccess, reason };
+  });
+}
+
 router.post('/:id/members', auth, requireRole('Admin'), (req, res) => {
   const batchId = Number(req.params.id);
   const studentId = Number(req.body.studentId);
   if (!studentId) return res.status(400).json({ error: 'studentId is required' });
-  if (batchHasApplyCourses(batchId)) {
-    return res.status(409).json({
-      error: 'Add learners to apply-course batches through the paid application approval flow, not the batch roster editor.',
-    });
-  }
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(batchId);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
   const user = db.prepare("SELECT id, role FROM users WHERE id = ? AND role IN ('Student','Lab')").get(studentId);
   if (!user) return res.status(404).json({ error: 'Student/Lab user not found' });
-  db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(batchId, studentId);
+  const alreadyMember = !!db
+    .prepare('SELECT 1 FROM batch_members WHERE batch_id = ? AND student_id = ?')
+    .get(batchId, studentId);
   try {
-    syncBatchMemberCourseAccess(batchId, studentId);
-  } catch (_) {
-    /* best-effort */
+    db.transaction(() => {
+      if (!alreadyMember) {
+        db.prepare('INSERT INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(batchId, studentId);
+        // Marks a direct Admin assignment: the apply overdue sweep must not remove these learners.
+        db.prepare(
+          'INSERT OR REPLACE INTO admin_batch_assignments (batch_id, student_id, assigned_by) VALUES (?, ?, ?)',
+        ).run(batchId, studentId, req.user.id);
+      }
+      // Re-adding a member who already has every course must not create further grants.
+      if (!alreadyMember || batchCourseIds(batchId, batch).some((cid) => !learnerHasCourseAccess(studentId, cid))) {
+        syncBatchMemberCourseAccess(batchId, studentId);
+      }
+    })();
+  } catch (e) {
+    console.error('[batch-member-add]', batchId, studentId, e);
+    return res.status(500).json({ error: 'Could not add the student and grant course access' });
   }
-  res.status(201).json({ ok: true });
+  res.status(201).json({ ok: true, alreadyMember, access: memberCourseAccess(batchId, batch, studentId) });
 });
 
 router.delete('/:id/members/:studentId', auth, requireRole('Admin'), (req, res) => {
@@ -1307,6 +1337,7 @@ router.delete('/:id/members/:studentId', auth, requireRole('Admin'), (req, res) 
     console.error('removeBatchStudentAccess', batchId, studentId, e);
   }
   db.prepare('DELETE FROM batch_members WHERE batch_id = ? AND student_id = ?').run(batchId, studentId);
+  db.prepare('DELETE FROM admin_batch_assignments WHERE batch_id = ? AND student_id = ?').run(batchId, studentId);
   res.status(204).end();
 });
 

@@ -3,6 +3,12 @@
 const crypto = require('crypto');
 const db = require('../db');
 const livekitEgress = require('./livekitEgress');
+const admission = require('./liveAdmission');
+const roomControl = require('./liveRtc/roomControl');
+
+/** After a failed start, wait this long before trying again, and give up after a few attempts. */
+const RETRY_AFTER_MS = Number(process.env.LIVE_RECORDING_RETRY_MS || 20_000);
+const MAX_FAILED_STARTS = 10;
 
 const RETENTION_DAYS = Number(process.env.LIVE_RECORDING_RETENTION_DAYS || 14);
 
@@ -108,13 +114,32 @@ async function startLiveKitSegment(session, sessionId, segmentId, storagePrefix)
 
 async function maybeStartRecordingAfterJoin(sessionId) {
   if (!isRecordingApiConfigured()) return;
-  if (countActiveParticipants(sessionId) < 1) return;
+  // Never on participant count: a host must have activated the meeting and be in the room.
+  if (!admission.isMeetingActive(sessionId)) return;
+  const hostIds = admission.presentHostIds(sessionId);
+  if (!hostIds.length) return;
 
   const session = db
     .prepare(`SELECT ls.id, ls.batch_id, ls.room_name, ls.status FROM live_sessions ls WHERE ls.id = ?`)
     .get(sessionId);
   if (!session || session.status === 'ended' || session.status === 'cancelled') return;
   if (getActiveRecordingSegment(sessionId)) return;
+
+  const failures = db
+    .prepare(
+      `SELECT COUNT(*) AS n, MAX(updated_at) AS last FROM live_session_recordings
+       WHERE live_session_id = ? AND status = 'failed'`
+    )
+    .get(sessionId);
+  if (failures.n >= MAX_FAILED_STARTS) return;
+  if (failures.last && Date.now() - Date.parse(`${failures.last.replace(' ', 'T')}Z`) < RETRY_AFTER_MS) return;
+
+  // The video room only exists once someone connects, which is after the join request. Recording is
+  // therefore started when a host is actually connected; the host's status checks try again until then.
+  const connected = await roomControl.connectedIdentities(session.room_name);
+  if (!hostIds.some((id) => connected.includes(String(id)))) return;
+  // Things may have changed while asking; from here to the insert nothing else can run.
+  if (!admission.isMeetingActive(sessionId) || getActiveRecordingSegment(sessionId)) return;
 
   const recordingUid = pickRecordingUidString();
   const startedAt = new Date().toISOString();

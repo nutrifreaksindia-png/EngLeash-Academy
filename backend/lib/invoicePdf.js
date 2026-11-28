@@ -227,8 +227,12 @@ function streamInvoicePdf(res, bundle) {
   const paymentHeight = drawInfoBox(doc, 307, y, 238, 'Payment Details', [
     payment.courseTitle || payment.comboTitle || payment.title,
     payment.packageLabel,
-    `Razorpay Order ID: ${payment.gatewayOrderId}`,
-    `Razorpay Payment ID: ${payment.gatewayPaymentId}`,
+    ...(payment.paymentSource === 'cash_manual'
+      ? [
+          `Payment Method: ${String(payment.paymentMethod || 'cash').replace(/_/g, ' ').toUpperCase()}`,
+          payment.manualReference ? `Reference: ${payment.manualReference}` : '',
+        ]
+      : [`Razorpay Order ID: ${payment.gatewayOrderId}`, `Razorpay Payment ID: ${payment.gatewayPaymentId}`]),
     `Paid At: ${formatDate(payment.paidAtIso)}`,
   ]);
   y += Math.max(billHeight, paymentHeight) + 20;
