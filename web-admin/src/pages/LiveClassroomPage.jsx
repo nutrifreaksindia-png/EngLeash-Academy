@@ -1931,7 +1931,7 @@ export default function LiveClassroomPage({ token }) {
                 {joinMeta?.canEndSession && typeof navigator.mediaDevices?.getDisplayMedia === 'function' ? (
                   <button
                     type="button"
-                    className={`liveIconBtn${screenSharing && clientRef.current?.room?.localParticipant?.isScreenShareEnabled ? ' liveIconBtn--recordOn' : ''}`}
+                    className={`liveIconBtn liveIconBtn--labeled${screenSharing && clientRef.current?.room?.localParticipant?.isScreenShareEnabled ? ' liveIconBtn--recordOn' : ''}`}
                     onClick={() => void toggleScreenShare()}
                     aria-label="Share screen"
                     title="Share screen"
@@ -1941,12 +1941,13 @@ export default function LiveClassroomPage({ token }) {
                       <rect x="2" y="3" width="20" height="14" rx="2" />
                       <path d="M8 21h8M12 17v4M9 10l3-3 3 3M12 7v6" />
                     </LiveSvg>
+                    <span className="liveCtlLabel">{screenSharing && clientRef.current?.room?.localParticipant?.isScreenShareEnabled ? 'Stop share' : 'Share'}</span>
                   </button>
                 ) : null}
                 {!joinMeta?.canEndSession ? (
                   <button
                     type="button"
-                    className={`liveIconBtn${handRaisedSelf ? ' liveIconBtn--recordOn' : ''}`}
+                    className={`liveIconBtn liveIconBtn--labeled${handRaisedSelf ? ' liveIconBtn--recordOn' : ''}`}
                     onClick={() => void toggleHand()}
                     aria-pressed={handRaisedSelf}
                     aria-label={handRaisedSelf ? 'Lower hand' : 'Raise hand'}
@@ -1954,6 +1955,7 @@ export default function LiveClassroomPage({ token }) {
                     disabled={phase === 'leaving'}
                   >
                     <span aria-hidden>✋</span>
+                    <span className="liveCtlLabel">{handRaisedSelf ? 'Lower' : 'Raise'}</span>
                   </button>
                 ) : null}
                 <div className="liveReactionMenuWrap" ref={reactionMenuRef}>
