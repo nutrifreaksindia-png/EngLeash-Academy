@@ -424,6 +424,15 @@ function ensureV1Tables(db) {
   safeAlter(db, "ALTER TABLE study_material_library ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0");
   safeAlter(db, "ALTER TABLE worksheet_library ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0");
   safeAlter(db, 'ALTER TABLE worksheet_library ADD COLUMN answer_key_json TEXT');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS worksheet_submissions (
+      worksheet_id INTEGER NOT NULL REFERENCES worksheet_library(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      response_text TEXT NOT NULL,
+      submitted_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (worksheet_id, user_id)
+    )
+  `);
 
   safeAlter(
     db,

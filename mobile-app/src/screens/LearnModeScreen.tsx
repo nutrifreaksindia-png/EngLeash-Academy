@@ -26,6 +26,7 @@ import { ContentBlocksView } from '../components/learn/ContentBlocksView';
 import CelebrationMoment from '../components/learn/CelebrationMoment';
 import LessonCompleteCelebration from '../components/learn/LessonCompleteCelebration';
 import MatchingDragBoard from '../components/learn/MatchingDragBoard';
+import { WorksheetSubmitCard } from '../components/learn/WorksheetSubmitCard';
 import {
   buildLessonSlides,
   findStartSlideIndex,
@@ -582,22 +583,29 @@ export default function LearnModeScreen({ route, navigation }: any) {
           </View>
         );
 
-      case 'text':
+      case 'text': {
+        // The submit card sits under the last page of a worksheet.
+        const submitCard =
+          item.contentType === 'worksheet' && item.pageIndex === item.pageCount - 1 ? (
+            <WorksheetSubmitCard worksheetId={Number(item.contentId)} />
+          ) : null;
         return (
           <View style={[styles.page, pagePad]}>
             {(!item.blocks || item.blocks.length === 0) && item.description ? (
-              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.textScroll}>
+              <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={styles.textScroll}>
                 <Text style={styles.fallbackText}>{item.description}</Text>
+                {submitCard}
               </ScrollView>
             ) : !item.blocks?.length ? (
-              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.textScroll}>
+              <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={styles.textScroll}>
                 <Text style={styles.fallbackText}>No body text for this section.</Text>
+                {submitCard}
               </ScrollView>
             ) : (
               <ScrollView
                 style={styles.textBlocksScroll}
                 contentContainerStyle={styles.textBlocksContent}
-                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}
               >
                 <ContentBlocksView
                   blocks={item.blocks}
@@ -605,10 +613,12 @@ export default function LearnModeScreen({ route, navigation }: any) {
                   scrollable={false}
                   horizontalInset={40}
                 />
+                {submitCard}
               </ScrollView>
             )}
           </View>
         );
+      }
 
       case 'quizzes_list':
         return <View style={[styles.page, pagePad]} />;
@@ -1199,6 +1209,7 @@ export default function LearnModeScreen({ route, navigation }: any) {
           <FlatList
             ref={flatListRef}
             data={slides}
+            keyboardShouldPersistTaps="handled"
             horizontal
             pagingEnabled
             keyExtractor={(s) => s.key}

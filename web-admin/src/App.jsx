@@ -869,6 +869,13 @@ export default function App() {
     return data?.profile || null;
   }
 
+  async function updateAdminApplyGrace(profileId, graceDays) {
+    await apiFetch(`/payments/admin/apply-billing/${profileId}/grace`, token, {
+      method: 'PATCH',
+      body: JSON.stringify({ graceDays }),
+    });
+  }
+
   async function deleteSubscriptionGrant(grantId) {
     try {
       await apiFetch(`/subscriptions/admin/grants/${grantId}`, token, { method: 'DELETE' });
@@ -2026,6 +2033,7 @@ export default function App() {
         openInvoice={openAdminInvoice}
         recordManualApplyPayment={recordAdminApplyManualPayment}
         updateApplyPartSchedule={updateAdminApplyPartSchedule}
+        updateApplyGrace={updateAdminApplyGrace}
         pushToast={pushToast}
       />
     );

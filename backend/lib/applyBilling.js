@@ -1081,7 +1081,7 @@ function preparePartSchedule(profileId, { parts = null, requireStartedBatch = fa
   const batchStartDate = startedBatchStartDateForBilling(profile);
   const course = loadApplyCourse(profile.course_id);
   if (!course) throw new Error('Course not found');
-  const graceDays = Number(profile.grace_days || course.apply_grace_days || 0);
+  const graceDays = Number(profile.grace_days ?? course.apply_grace_days ?? 0);
   let nextParts;
   if (parts) {
     nextParts = normalizeManualPartSchedule(parts, outstandingPaise, graceDays);
@@ -1136,6 +1136,29 @@ function preparePartSchedule(profileId, { parts = null, requireStartedBatch = fa
     };
   });
   return tx();
+}
+
+/** Per-learner grace period: applies to this profile's unpaid dues and any dues created later. */
+function setProfileGraceDays(profileId, graceDays) {
+  const days = Number(graceDays);
+  if (!Number.isInteger(days) || days < 0 || days > 365) throw new Error('Grace days must be a whole number from 0 to 365');
+  const profile = loadProfileById(profileId);
+  if (!profile) throw new Error('Apply billing profile not found');
+  if (['cancelled', 'removed_overdue'].includes(String(profile.status || ''))) {
+    throw new Error('This billing profile is no longer active');
+  }
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE apply_course_billing_profiles SET grace_days = ?, updated_at = datetime('now') WHERE id = ?`,
+    ).run(days, profileId);
+    for (const due of dueRowsForProfile(profileId)) {
+      if (['paid', 'cancelled'].includes(String(due.due_status || '').toLowerCase()) || !due.due_date) continue;
+      db.prepare(
+        `UPDATE apply_course_due_items SET grace_end_date = ?, due_status = 'scheduled', updated_at = datetime('now') WHERE id = ?`,
+      ).run(addDaysYmd(due.due_date, days), due.id);
+    }
+  })();
+  return loadProfileById(profileId);
 }
 
 function listActiveApplyEnquiriesForUser(userId) {
@@ -1377,6 +1400,7 @@ module.exports = {
   markBillingRemovedOverdue,
   prepareFullRemainingDue,
   preparePartSchedule,
+  setProfileGraceDays,
   recomputeProfileStatus,
   selectedPlanLabel,
   serializeDueItem,

@@ -126,6 +126,52 @@ router.get('/:id', auth, (req, res) => {
   res.json({ ...base, assets, assignments });
 });
 
+function loadViewableWorksheet(req) {
+  const id = Number(req.params.id);
+  const row = db.prepare('SELECT * FROM worksheet_library WHERE id = ?').get(id);
+  if (!row || !canViewWorksheet(req.user, row) || !trainerCanViewLibraryItem(req.user, 'worksheet', id)) return null;
+  return row;
+}
+
+/** The answer key is included only after this learner has submitted the worksheet. */
+function submissionPayload(row, userId) {
+  const mine = db
+    .prepare('SELECT response_text, submitted_at FROM worksheet_submissions WHERE worksheet_id = ? AND user_id = ?')
+    .get(row.id, userId);
+  let hasAnswerKey = false;
+  try {
+    hasAnswerKey = (JSON.parse(row.answer_key_json || '{}').blocks || []).length > 0;
+  } catch (_) {
+    hasAnswerKey = false;
+  }
+  return {
+    hasAnswerKey,
+    submitted: Boolean(mine),
+    responseText: mine?.response_text || '',
+    submittedAt: mine?.submitted_at || null,
+    answerKeyJson: mine && hasAnswerKey ? row.answer_key_json : null,
+  };
+}
+
+router.get('/:id/submission', auth, (req, res) => {
+  const row = loadViewableWorksheet(req);
+  if (!row) return res.status(404).json({ error: 'Worksheet not found' });
+  res.json(submissionPayload(row, req.user.id));
+});
+
+router.post('/:id/submit', auth, (req, res) => {
+  const row = loadViewableWorksheet(req);
+  if (!row) return res.status(404).json({ error: 'Worksheet not found' });
+  const responseText = String(req.body?.responseText || '').trim();
+  if (!responseText) return res.status(400).json({ error: 'Write your answers before submitting' });
+  if (responseText.length > 20000) return res.status(400).json({ error: 'Answers are too long' });
+  // First submission wins, so answers cannot be rewritten after seeing the key.
+  db.prepare(
+    'INSERT OR IGNORE INTO worksheet_submissions (worksheet_id, user_id, response_text) VALUES (?, ?, ?)',
+  ).run(row.id, req.user.id, responseText);
+  res.status(201).json(submissionPayload(row, req.user.id));
+});
+
 router.put('/:id', auth, requireRole('Admin', 'Trainer', 'Creator'), (req, res) => {
   const id = Number(req.params.id);
   const row = db.prepare('SELECT * FROM worksheet_library WHERE id = ?').get(id);

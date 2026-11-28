@@ -371,6 +371,21 @@ router.get('/batches/:id', auth, requireRole('Admin', 'Trainer'), (req, res) => 
   res.json({ ...batch, members });
 });
 
+/** Trainers of the batch plus any admin in the room; clients keep their video in view. */
+function hostUserIdsForSession(session) {
+  return db
+    .prepare(
+      `SELECT b.trainer_id AS id FROM batches b WHERE b.id = ?
+       UNION SELECT bt.trainer_id FROM batch_trainers bt WHERE bt.batch_id = ?
+       UNION SELECT p.user_id FROM live_session_participants p
+             JOIN users u ON u.id = p.user_id
+             WHERE p.live_session_id = ? AND u.role = 'Admin'`,
+    )
+    .all(session.batch_id, session.batch_id, session.id)
+    .map((r) => r.id)
+    .filter((n) => n != null);
+}
+
 router.get('/sessions/:id/state', auth, (req, res) => {
   const sessionId = Number(req.params.id);
   let session = db.prepare(`
@@ -422,6 +437,7 @@ router.get('/sessions/:id/state', auth, (req, res) => {
     waitingRoom: host ? admission.listWaiting(sessionId) : [],
     sessionType: session.session_type,
     promotedUserIds: promoted.map((r) => r.user_id),
+    hostUserIds: hostUserIdsForSession(session),
     handRaisedUserIds: hands.map((r) => r.user_id),
     participantActive: Boolean(meActive),
     recordingActive: liveRecording.isRecordingActive(sessionId),

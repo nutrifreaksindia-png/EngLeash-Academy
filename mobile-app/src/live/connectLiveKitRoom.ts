@@ -14,6 +14,7 @@ type ConnectArgs = {
   onRemotePresence?: () => void;
   onActiveSpeaker?: (uid: number | null) => void;
   onJoined?: () => void;
+  onMediaWarning?: (message: string, available: { mic: boolean; cam: boolean }) => void;
 };
 
 export type LiveKitClient = {
@@ -27,6 +28,9 @@ export type LiveKitClient = {
   getRemoteParticipants: () => RemoteParticipant[];
   getLocalVideoTrack: () => VideoTrack | null;
   getRemoteVideoTrack: (uid: number) => VideoTrack | null;
+  getScreenShareTrack: () => VideoTrack | null;
+  isScreenSharing: () => boolean;
+  setScreenShareEnabled: (on: boolean) => Promise<void>;
   identityToUid: (identity: string) => number | null;
 };
 
@@ -38,6 +42,7 @@ export async function connectLiveKitRoom({
   onRemotePresence,
   onActiveSpeaker,
   onJoined,
+  onMediaWarning,
 }: ConnectArgs): Promise<LiveKitClient> {
   const room = new Room({
     adaptiveStream: true,
@@ -55,6 +60,8 @@ export async function connectLiveKitRoom({
   room.on(RoomEvent.TrackUnsubscribed, () => onRemotePresence?.());
   room.on(RoomEvent.TrackMuted, () => onRemotePresence?.());
   room.on(RoomEvent.TrackUnmuted, () => onRemotePresence?.());
+  room.on(RoomEvent.LocalTrackPublished, () => onRemotePresence?.());
+  room.on(RoomEvent.LocalTrackUnpublished, () => onRemotePresence?.());
 
   room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
     const first = speakers?.[0];
@@ -64,12 +71,20 @@ export async function connectLiveKitRoom({
 
   await room.connect(url, token, { autoSubscribe: true });
 
-  try {
-    await AudioSession.startAudioSession();
-    await room.localParticipant.enableCameraAndMicrophone();
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : 'Camera/microphone permission denied or no device found.';
-    throw new Error(msg);
+  await AudioSession.startAudioSession();
+  // Publish separately: a blocked or missing camera/mic must not stop someone watching the class.
+  const [mic, cam] = await Promise.allSettled([
+    room.localParticipant.setMicrophoneEnabled(true),
+    room.localParticipant.setCameraEnabled(true),
+  ]);
+  const missing = [mic.status === 'rejected' ? 'microphone' : null, cam.status === 'rejected' ? 'camera' : null]
+    .filter(Boolean)
+    .join(' and ');
+  if (missing) {
+    onMediaWarning?.(`Joined without your ${missing}. Allow access in Settings to use it.`, {
+      mic: mic.status === 'fulfilled',
+      cam: cam.status === 'fulfilled',
+    });
   }
 
   onConnectionState?.('connected');
@@ -131,6 +146,20 @@ export async function connectLiveKitRoom({
         if (pub?.track && !pub.isMuted) return asVideoTrack(pub.track);
       }
       return null;
+    },
+    getScreenShareTrack() {
+      // Only other people's screens: rendering your own share would mirror endlessly.
+      for (const p of room.remoteParticipants.values()) {
+        const pub = p.getTrackPublication(Track.Source.ScreenShare);
+        if (pub?.track && !pub.isMuted) return asVideoTrack(pub.track);
+      }
+      return null;
+    },
+    isScreenSharing() {
+      return room.localParticipant.isScreenShareEnabled;
+    },
+    async setScreenShareEnabled(on: boolean) {
+      await room.localParticipant.setScreenShareEnabled(on);
     },
     identityToUid(identity: string) {
       const n = Number(identity);

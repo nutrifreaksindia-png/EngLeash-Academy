@@ -446,6 +446,7 @@ router.get('/:id', auth, (req, res) => {
         OR (a.scope_type = 'course' AND a.scope_id = ?))
      ORDER BY a.order_index, a.id`
   ).all(lesson.id, lesson.course_id);
+  if (!staffBypass) delete lesson.worksheet_answer_key_html;
   const allowVideoDownload = req.user.role === 'Admin';
   const videoUrl = lesson.video_url
     ? (lesson.video_url.startsWith('http') ? lesson.video_url : `${baseUrl}${lesson.video_url}`)

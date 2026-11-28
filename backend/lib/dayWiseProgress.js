@@ -21,10 +21,11 @@ function maxUnlockedLessonDay(userId, courseId) {
     .all(userId, courseId);
 
   let maxDay = 0;
+  // Cancelled slots keep their session_day, so count the classes not cancelled (matches the lesson remap).
   for (const { id } of batchIds) {
     const r = db
       .prepare(
-        `SELECT MAX(bs.session_day) AS mx
+        `SELECT COUNT(*) AS mx
          FROM batch_sessions bs
          WHERE bs.batch_id = ?
            AND bs.session_date <= ?
@@ -76,7 +77,12 @@ function myCourseScheduleHint(userId, course) {
        JOIN batch_members bm ON bm.batch_id = b.id AND bm.student_id = ?
        JOIN course_lessons cl
          ON cl.course_id = b.course_id
-        AND cl.day_number = bs.session_day
+        AND cl.day_number = (
+          SELECT COUNT(*) FROM batch_sessions prior
+          WHERE prior.batch_id = bs.batch_id
+            AND prior.session_day <= bs.session_day
+            AND COALESCE(prior.status, '') != 'cancelled'
+        )
         AND COALESCE(cl.sequence_in_day, 1) = 1
        JOIN lesson_library ll ON ll.id = cl.lesson_id
        WHERE bs.session_date = ? AND COALESCE(bs.status, '') != 'cancelled'
