@@ -60,6 +60,19 @@ class MainActivity : ReactActivity() {
     super.invokeDefaultOnBackPressed()
   }
 
+  override fun onUserLeaveHint() {
+    super.onUserLeaveHint()
+    if (!EngleashPipModule.autoEnter || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    if (!packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE)) return
+    try {
+      enterPictureInPictureMode(
+        android.app.PictureInPictureParams.Builder().setAspectRatio(android.util.Rational(16, 9)).build()
+      )
+    } catch (_: Exception) {
+      // device refused; stay full screen
+    }
+  }
+
   override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
     super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
     val app = application as? ReactApplication ?: return

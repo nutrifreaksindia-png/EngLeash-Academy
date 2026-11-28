@@ -278,6 +278,37 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
     }
   }
 
+  function requestCash(batch: OpenBatch, selectedPlan: 'registration' | 'single_payment' | 'first_installment') {
+    if (!course || !user) return;
+    const amount = formatInr(applyPlanAmount(course, selectedPlan));
+    Alert.alert(
+      'Pay in cash',
+      `Request to pay ${amount} (${applyPlanLabel(selectedPlan)}) in cash? Your enrollment stays pending until the academy receives it and approves.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Send request',
+          onPress: async () => {
+            setApplyBusyKey(`${batch.id}:${selectedPlan}`);
+            try {
+              await api.post('/payments/apply/cash-request', {
+                course_id: course.id,
+                batch_id: batch.id,
+                selected_plan: selectedPlan,
+              });
+              Alert.alert('Request sent', 'Pay the academy in cash. You will get access once an admin approves it.');
+              navigation.goBack();
+            } catch (e: any) {
+              Alert.alert('Pay in cash', e?.message || 'Could not send the request');
+            } finally {
+              setApplyBusyKey(null);
+            }
+          },
+        },
+      ],
+    );
+  }
+
   if (!course?.id) {
     return (
       <View style={styles.centered}>
@@ -375,6 +406,14 @@ export default function ApplyCourseBatchesScreen({ navigation, route }: any) {
                             {busy ? 'Opening…' : `${applyPlanLabel(plan)} ${formatInr(applyPlanAmount(course, plan))}`}
                           </Text>
                           <Text style={styles.planCardCopy}>{paymentDescription(course, b, plan)}</Text>
+                          <TouchableOpacity
+                            style={styles.cashBtn}
+                            disabled={!!applyBusyKey}
+                            onPress={() => requestCash(b, plan)}
+                            accessibilityRole="button"
+                          >
+                            <Text style={styles.enquiryText}>Pay in cash instead</Text>
+                          </TouchableOpacity>
                         </TouchableOpacity>
                       );
                     })}
@@ -421,6 +460,7 @@ const styles = StyleSheet.create({
   planCard: { borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10, padding: 12, backgroundColor: '#f8fafc' },
   planBtnDisabled: { opacity: 0.55 },
   planCardTitle: { color: BRAND_BLUE, fontWeight: '800', fontSize: 14 },
+  cashBtn: { marginTop: 10, borderWidth: 1.5, borderColor: BRAND_BLUE, borderRadius: 8, paddingVertical: 8, alignItems: 'center' },
   planCardCopy: { color: '#475569', fontSize: 12, lineHeight: 18, marginTop: 6 },
   enquiryBtn: {
     borderWidth: 1.5,

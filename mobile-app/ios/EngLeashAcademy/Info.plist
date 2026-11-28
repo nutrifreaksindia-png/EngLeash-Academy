@@ -46,6 +46,12 @@
 	</dict>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string></string>
+	<key>NSCameraUsageDescription</key>
+	<string>EngLeash Academy uses the camera so others can see you in live classes.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>EngLeash Academy uses the microphone for live classes and spoken assignments.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>EngLeash Academy needs your photos to upload a profile picture or assignment.</string>
 	<key>RCTNewArchEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

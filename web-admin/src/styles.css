@@ -6312,3 +6312,22 @@ th {
   border-radius: 12px;
   padding: 8px;
 }
+
+.liveScreenShare {
+  flex: 3;
+  min-height: 0;
+  width: 100%;
+  background: #000;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.liveVideoStage:has(.liveScreenShare) {
+  display: flex;
+  flex-direction: column;
+}
+
+.liveVideoStage:has(.liveScreenShare) .liveMeetGrid {
+  flex: 1;
+  overflow: auto;
+}

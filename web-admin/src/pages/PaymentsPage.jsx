@@ -29,6 +29,7 @@ export default function PaymentsPage({
   openInvoice,
   recordManualApplyPayment,
   updateApplyPartSchedule,
+  updateApplyGrace,
   pushToast = () => {},
 }) {
   const [rows, setRows] = React.useState([]);
@@ -133,6 +134,21 @@ export default function PaymentsPage({
       pushToast(error?.message || 'Could not record manual payment', 'error');
     } finally {
       setManualBusyDueId(null);
+    }
+  }
+
+  async function editGraceDays(profile) {
+    const input = window.prompt(
+      `Grace days after each due date for ${profile.userName || profile.userEmail}:`,
+      String(profile.graceDays ?? 0),
+    );
+    if (input == null || input.trim() === '') return;
+    try {
+      await updateApplyGrace(profile.id, Number(input));
+      pushToast('Grace period updated', 'success');
+      await refreshApplyRows();
+    } catch (error) {
+      pushToast(error?.message || 'Could not update grace period', 'error');
     }
   }
 
@@ -350,7 +366,12 @@ export default function PaymentsPage({
                         </div>
                       </td>
                       <td>{row.selectedPlanLabel || row.selectedPlan || '—'}</td>
-                      <td>{row.status || '—'}</td>
+                      <td>
+                        {row.status || '—'}
+                        {row.status === 'awaiting_initial_payment' && (row.dueItems || []).some((d) => d.meta?.cashRequestedAt) ? (
+                          <div style={{ color: '#b45309', fontWeight: 700, fontSize: '0.82rem' }}>Cash payment requested</div>
+                        ) : null}
+                      </td>
                       <td>{fmtAmount(row.remainingBalanceInr, 'INR')}</td>
                       <td>
                         {due ? (
@@ -430,6 +451,15 @@ export default function PaymentsPage({
                                   Available after the batch has started.
                                 </span>
                               ) : null}
+                              <button
+                                type="button"
+                                className="secondaryBtn"
+                                style={{ marginLeft: 8 }}
+                                disabled={!updateApplyGrace}
+                                onClick={() => void editGraceDays(row)}
+                              >
+                                Grace period: {row.graceDays ?? 0} days
+                              </button>
                             </div>
                           </div>
                         </td>

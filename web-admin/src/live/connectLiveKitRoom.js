@@ -84,6 +84,7 @@ export async function connectLiveKitRoom({
   room.on(RoomEvent.TrackUnsubscribed, bumpPresence);
   room.on(RoomEvent.TrackMuted, bumpPresence);
   room.on(RoomEvent.TrackUnmuted, bumpPresence);
+  room.on(RoomEvent.LocalTrackUnpublished, bumpPresence);
 
   room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
     const first = speakers?.[0];

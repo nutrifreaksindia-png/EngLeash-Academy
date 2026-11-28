@@ -41,6 +41,7 @@ const {
   listApplyEnquiriesForAdmin,
   prepareFullRemainingDue,
   preparePartSchedule,
+  setProfileGraceDays,
   settleDueItem,
   updateApplyEnquiryStatus,
   deleteApplyEnquiry,
@@ -652,6 +653,90 @@ router.delete('/admin/apply-enquiries/:id', auth, requireRole('Admin'), (req, re
   res.json({ ok: true });
 });
 
+/** Validates a new apply-course application and creates (or reuses) its initial due. */
+function prepareNewApplyDue(userId, payload) {
+  const courseId = Number(payload?.course_id);
+  const batchId = Number(payload?.batch_id);
+  const selectedPlan = String(payload?.selected_plan || '').trim().toLowerCase();
+  if (!Number.isFinite(courseId) || !Number.isFinite(batchId) || !selectedPlan) {
+    return { status: 400, error: 'course_id, batch_id and selected_plan are required' };
+  }
+
+  const course = loadApplyCourse(courseId);
+  if (!course) return { status: 404, error: 'Course not found' };
+  if (!course.is_published || String(course.course_status || 'Active') !== 'Active') {
+    return { status: 400, error: 'Course is not available' };
+  }
+  if (String(course.enrollment_type || '').toLowerCase() !== 'apply') {
+    return { status: 400, error: 'This course does not use batch applications' };
+  }
+  if (userHasCourseAccess(userId, courseId)) {
+    return { status: 409, error: 'You already have active access to this course' };
+  }
+
+  const batchMeta = batchContainsCourse(batchId, courseId);
+  if (!batchMeta) return { status: 404, error: 'Batch not found for course' };
+  if ((batchMeta.enrollment_open_status || 'closed') !== 'open') {
+    return { status: 409, error: 'Batch is currently closed for applications' };
+  }
+  const batch = loadApplyBatch(batchId) || batchMeta;
+  const allowedPlans = allowedInitialApplyPlans(batch);
+  if (!allowedPlans.includes(selectedPlan)) {
+    return { status: 400, error: 'Selected payment option is not available for this batch timing' };
+  }
+
+  try {
+    const prepared = createOrReuseInitialProfile({
+      userId: userId,
+      course,
+      batch,
+      selectedPlan,
+    });
+    return { dueRow: loadDueItemWithProfile(prepared.initialDue.id) };
+  } catch (error) {
+    return { status: 409, error: error.message || 'Could not prepare apply billing' };
+  }
+}
+
+/**
+ * Learner chooses to pay in cash: the application stays pending (no course access) until an
+ * admin records the payment against the initial due.
+ */
+router.post('/apply/cash-request', auth, requireRole('Student', 'Lab'), (req, res) => {
+  // An unpaid application with another plan or batch is replaced rather than blocking the learner.
+  const courseId = Number(req.body?.course_id);
+  db.prepare(
+    `UPDATE apply_course_billing_profiles SET status = 'cancelled', updated_at = datetime('now')
+     WHERE user_id = ? AND course_id = ? AND status = 'awaiting_initial_payment'
+       AND (batch_id != ? OR selected_plan != ?)
+       AND id NOT IN (SELECT billing_profile_id FROM apply_course_due_items WHERE paid_amount_paise > 0)`,
+  ).run(req.user.id, courseId, Number(req.body?.batch_id), String(req.body?.selected_plan || '').trim().toLowerCase());
+  const prepared = prepareNewApplyDue(req.user.id, req.body);
+  if (prepared.error) return res.status(prepared.status).json({ error: prepared.error });
+  const { dueRow } = prepared;
+  let meta = {};
+  try {
+    meta = JSON.parse(dueRow.meta_json || '{}');
+  } catch (_) {
+    meta = {};
+  }
+  db.prepare(`UPDATE apply_course_due_items SET meta_json = ?, updated_at = datetime('now') WHERE id = ?`).run(
+    JSON.stringify({ ...meta, cashRequestedAt: new Date().toISOString() }),
+    dueRow.id,
+  );
+  res.status(201).json({ ok: true, dueItemId: Number(dueRow.id), amountInr: dueAmountToCollectNow(dueRow) / 100 });
+});
+
+router.patch('/admin/apply-billing/:profileId(\\d+)/grace', auth, requireRole('Admin'), (req, res) => {
+  try {
+    setProfileGraceDays(Number(req.params.profileId), req.body?.graceDays);
+    res.json({ ok: true });
+  } catch (error) {
+    const message = error?.message || 'Could not update grace period';
+    res.status(message.includes('not found') ? 404 : 400).json({ error: message });
+  }
+});
+
 router.post('/razorpay/create-apply-order', auth, requireRole('Student', 'Lab'), async (req, res) => {
   const clientPkg = getRazorpayClient();
   if (!clientPkg) return res.status(503).json({ error: 'Payments are not configured on the server' });
@@ -669,47 +754,9 @@ router.post('/razorpay/create-apply-order', auth, requireRole('Student', 'Lab'),
       return res.status(409).json({ error: 'This due item is already settled' });
     }
   } else {
-    const courseId = Number(req.body?.course_id);
-    const batchId = Number(req.body?.batch_id);
-    const selectedPlan = String(req.body?.selected_plan || '').trim().toLowerCase();
-    if (!Number.isFinite(courseId) || !Number.isFinite(batchId) || !selectedPlan) {
-      return res.status(400).json({ error: 'course_id, batch_id and selected_plan are required' });
-    }
-
-    const course = loadApplyCourse(courseId);
-    if (!course) return res.status(404).json({ error: 'Course not found' });
-    if (!course.is_published || String(course.course_status || 'Active') !== 'Active') {
-      return res.status(400).json({ error: 'Course is not available' });
-    }
-    if (String(course.enrollment_type || '').toLowerCase() !== 'apply') {
-      return res.status(400).json({ error: 'This course does not use batch applications' });
-    }
-    if (userHasCourseAccess(req.user.id, courseId)) {
-      return res.status(409).json({ error: 'You already have active access to this course' });
-    }
-
-    const batchMeta = batchContainsCourse(batchId, courseId);
-    if (!batchMeta) return res.status(404).json({ error: 'Batch not found for course' });
-    if ((batchMeta.enrollment_open_status || 'closed') !== 'open') {
-      return res.status(409).json({ error: 'Batch is currently closed for applications' });
-    }
-    const batch = loadApplyBatch(batchId) || batchMeta;
-    const allowedPlans = allowedInitialApplyPlans(batch);
-    if (!allowedPlans.includes(selectedPlan)) {
-      return res.status(400).json({ error: 'Selected payment option is not available for this batch timing' });
-    }
-
-    try {
-      const prepared = createOrReuseInitialProfile({
-        userId: req.user.id,
-        course,
-        batch,
-        selectedPlan,
-      });
-      dueRow = loadDueItemWithProfile(prepared.initialDue.id);
-    } catch (error) {
-      return res.status(409).json({ error: error.message || 'Could not prepare apply billing' });
-    }
+    const prepared = prepareNewApplyDue(req.user.id, req.body);
+    if (prepared.error) return res.status(prepared.status).json({ error: prepared.error });
+    dueRow = prepared.dueRow;
   }
 
   const amountPaise = dueAmountToCollectNow(dueRow);

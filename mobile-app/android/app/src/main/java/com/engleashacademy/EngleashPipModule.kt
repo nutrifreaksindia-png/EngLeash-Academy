@@ -11,6 +11,15 @@ class EngleashPipModule(reactContext: ReactApplicationContext) : ReactContextBas
   override fun getName(): String = "EngleashPip"
 
   @ReactMethod
+  fun setAutoEnter(on: Boolean) {
+    autoEnter = on
+  }
+
+  companion object {
+    @Volatile var autoEnter = false
+  }
+
+  @ReactMethod
   fun enterPip() {
     val activity = getReactApplicationContext().getCurrentActivity() ?: return
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return

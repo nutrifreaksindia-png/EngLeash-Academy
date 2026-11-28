@@ -5,7 +5,6 @@ import {
   AppState,
   AppStateStatus,
   BackHandler,
-  FlatList,
   Modal,
   PermissionsAndroid,
   Platform,
@@ -15,7 +14,6 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
@@ -26,8 +24,9 @@ import { LiveClassroomErrorBoundary } from '../components/LiveClassroomErrorBoun
 import { ScreenPageTitle } from '../components/ScreenPageTitle';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
-import { allowLandscapeForMedia, lockAppPortrait, lockLandscapeForLive } from '../utils/appScreenOrientation';
-import { VideoView } from '@livekit/react-native';
+import { lockAppPortrait } from '../utils/appScreenOrientation';
+import { LiveVideoGrid, VideoTile } from '../components/live/LiveVideoGrid';
+import { enterMeetingPip, setMeetingPipAuto, subscribeMeetingPipMode } from '../native/liveMeetingPip';
 import { connectLiveKitRoom, LiveKitClient } from '../live/connectLiveKitRoom';
 
 const BRAND_BLUE = '#1a237e';
@@ -55,6 +54,7 @@ type RoomState = {
   sessionType: string;
   promotedUserIds: number[];
   handRaisedUserIds: number[];
+  hostUserIds?: number[];
   recordingActive?: boolean;
   recordingConfigured?: boolean;
   /** Admin / batch trainers only — last recording error for this session */
@@ -115,8 +115,7 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
     typeof raw.title === 'string' && raw.title.length > 0 ? raw.title : 'Live classroom';
   const { user } = useAuth();
 
-  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
-  const isLandscape = windowWidth > windowHeight;
+  const [inPip, setInPip] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [sessionMeta, setSessionMeta] = useState<SessionMeta | null>(null);
@@ -154,6 +153,7 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
   const livekitInitKeyRef = useRef<string | null>(null);
   const [livekitPresenceTick, setLivekitPresenceTick] = useState(0);
   const joinDispatchedRef = useRef(false);
+  const mediaAvailableRef = useRef({ mic: true, cam: true });
   const joinedRef = useRef(false);
   const exitLiveRef = useRef<() => Promise<void>>(async () => {});
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -182,12 +182,11 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
   }, [liveStage]);
 
   useLayoutEffect(() => {
-    const hideForLive = !!payload && isLandscape;
     navigation.setOptions({
-      headerShown: !hideForLive,
+      headerShown: !payload,
       title: title.length > 28 ? `${title.slice(0, 26)}…` : title,
     });
-  }, [isLandscape, navigation, title, payload]);
+  }, [navigation, title, payload]);
 
   const loadSessionMeta = useCallback(async () => {
     if (!Number.isFinite(liveSessionId) || liveSessionId <= 0) return;
@@ -219,7 +218,7 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
     }
     setLoading(true);
     try {
-      await lockLandscapeForLive();
+      await lockAppPortrait();
       const data = (await api.post(`/live/sessions/${liveSessionId}/join`)) as JoinPayload;
       setLiveStage('preview');
       joinDispatchedRef.current = false;
@@ -305,21 +304,44 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
 
   useFocusEffect(
     useCallback(() => {
-      void allowLandscapeForMedia();
+      void lockAppPortrait();
       const tab = navigation.getParent();
       tab?.setOptions({ tabBarStyle: { display: 'none' } });
       const sub = BackHandler.addEventListener('hardwareBackPress', () => {
         if (!payloadRef.current) return false;
-        void exitLiveRef.current();
+        // Back minimizes a joined class (stays connected); before joining it leaves.
+        if (joinedRef.current && Platform.OS === 'android') enterMeetingPip();
+        else void exitLiveRef.current();
         return true;
       });
       return () => {
         sub.remove();
         tab?.setOptions({ tabBarStyle: restoreTabBarStyle });
-        void lockAppPortrait();
       };
     }, [navigation, restoreTabBarStyle])
   );
+
+  useEffect(() => {
+    const sub = subscribeMeetingPipMode(setInPip);
+    return () => sub.remove();
+  }, []);
+
+  // Pressing the device Home button also minimizes a joined class into Picture-in-Picture.
+  useEffect(() => {
+    setMeetingPipAuto(joined);
+    return () => setMeetingPipAuto(false);
+  }, [joined]);
+
+  // Names for the video tiles.
+  useEffect(() => {
+    if (!joined) return;
+    api
+      .get(`/live/sessions/${liveSessionId}/participants`)
+      .then((rows: any) => {
+        if (Array.isArray(rows)) setRoster(rows as ParticipantRow[]);
+      })
+      .catch(() => {});
+  }, [joined, liveSessionId, remoteUids.length]);
 
   const bootstrapLiveKitPermissions = useCallback(async (joinPayload: JoinPayload) => {
     if (!joinRtcReady(joinPayload)) return;
@@ -345,7 +367,6 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
   }, []);
 
   const confirmJoinSession = useCallback(async () => {
-    await lockLandscapeForLive();
     setLiveStage('active');
   }, []);
 
@@ -479,6 +500,12 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
           },
           onActiveSpeaker: (uid) => setActiveSpeakerUid(uid),
           onJoined: () => setJoined(true),
+          onMediaWarning: (message, available) => {
+            mediaAvailableRef.current = available;
+            if (!available.mic) setMuted(true);
+            if (!available.cam) setCameraOff(true);
+            showFlash(message);
+          },
         });
         livekitClientRef.current = client;
         const remotes = client.getRemoteParticipants();
@@ -489,8 +516,9 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
         );
         setJoined(true);
         try {
-          await client.setMicEnabled(!muted);
-          await client.setCamEnabled(!cameraOff);
+          // Do not re-request a device that was just refused.
+          if (mediaAvailableRef.current.mic) await client.setMicEnabled(!muted);
+          if (mediaAvailableRef.current.cam) await client.setCamEnabled(!cameraOff);
         } catch (_) {
           // ignore
         }
@@ -502,7 +530,7 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
       }
     })();
     return undefined;
-  }, [liveStage, engineReady, joined, payload, cameraOff, muted]);
+  }, [liveStage, engineReady, joined, payload, cameraOff, muted, showFlash]);
 
   useEffect(() => {
     if (!payload) return undefined;
@@ -589,17 +617,6 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
     }
   };
 
-  const videoPages = useMemo(() => {
-    type Slot = { key: string; kind: 'local' } | { key: string; kind: 'remote'; uid: number };
-    const slots: Slot[] =
-      !joined
-        ? [{ key: 'local', kind: 'local' }]
-        : [{ key: 'local', kind: 'local' }, ...remoteUids.map((uid) => ({ key: `r-${uid}`, kind: 'remote' as const, uid }))];
-    const pages: Slot[][] = [];
-    for (let i = 0; i < slots.length; i += 2) pages.push(slots.slice(i, i + 2));
-    return pages;
-  }, [joined, remoteUids]);
-
   const rtcVideoReady = payload ? joinRtcReady(payload) && rtcAvailable : false;
 
   if (!Number.isFinite(liveSessionId) || liveSessionId <= 0) {
@@ -641,8 +658,7 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
         <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 24 + insets.bottom }]}>
           <Text style={styles.preJoinTitle}>Before you join</Text>
           <Text style={styles.preJoinSub}>
-            Next you will see a landscape camera preview. When you join the session, the room opens in landscape only.
-            Camera and microphone are requested before preview.
+            Next you will see a preview screen. Camera and microphone access is requested before you join.
           </Text>
           <Text style={styles.label}>Session</Text>
           <Text style={styles.value}>{sessionMeta.title}</Text>
@@ -697,19 +713,6 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
     );
   }
 
-  if (!isLandscape) {
-    return (
-      <View style={styles.rotateGateRoot}>
-        <StatusBar style="light" />
-        <Ionicons name="phone-landscape-outline" size={56} color="#e2e8f0" />
-        <Text style={styles.rotateGateTitle}>Rotate to landscape</Text>
-        <Text style={styles.rotateGateBody}>
-          This live class uses a wide video layout only. Turn your device sideways to preview or join.
-        </Text>
-      </View>
-    );
-  }
-
   const handRaisedSelf = user?.id != null && roomState?.handRaisedUserIds?.includes(user.id);
   const showStudentHand =
     payload.sessionType === 'group' && (user?.role === 'Student' || user?.role === 'Lab');
@@ -728,6 +731,54 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
     if (livekitClientRef.current) {
       void livekitClientRef.current.setCamEnabled(!next);
     }
+  };
+
+  const endForEveryone = () => {
+    Alert.alert('End session', 'End this class for everyone?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'End session',
+        style: 'destructive',
+        onPress: async () => {
+          sessionEndedAlertRef.current = true;
+          try {
+            await api.post(`/live/sessions/${liveSessionId}/end`);
+            await exitLiveToSessions();
+          } catch (e: any) {
+            sessionEndedAlertRef.current = false;
+            Alert.alert('End session', e?.message || 'Could not end the session');
+          }
+        },
+      },
+    ]);
+  };
+
+  const confirmLeave = (after?: () => void) => {
+    const leave = async () => {
+      await exitLiveToSessions();
+      after?.();
+    };
+    if (!joined) {
+      void leave();
+      return;
+    }
+    Alert.alert('Leave session', 'Leave this class?', [
+      { text: 'Stay', style: 'cancel' },
+      { text: 'Leave', style: 'destructive', onPress: () => void leave() },
+    ]);
+  };
+
+  const goHome = () => confirmLeave(() => navigation.getParent()?.navigate?.('Home'));
+
+  const toggleScreenShare = async () => {
+    const client = livekitClientRef.current;
+    if (!client) return;
+    try {
+      await client.setScreenShareEnabled(!client.isScreenSharing());
+    } catch (e: any) {
+      showFlash(e?.message || 'Screen sharing was not started');
+    }
+    setLivekitPresenceTick((x) => x + 1);
   };
 
   const renderMediaControls = () => (
@@ -751,6 +802,46 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
         >
           <Ionicons name={cameraOff ? 'videocam-off' : 'videocam'} size={26} color="#fff" />
         </TouchableOpacity>
+        {joined && payload?.canEndSession && Platform.OS === 'android' ? (
+          <TouchableOpacity
+            style={[styles.ctrlBtn, styles.ctrlBtnIconOnly, livekitClientRef.current?.isScreenSharing() && styles.ctrlBtnWarn]}
+            onPress={() => void toggleScreenShare()}
+            accessibilityRole="button"
+            accessibilityLabel={livekitClientRef.current?.isScreenSharing() ? 'Stop sharing screen' : 'Share screen'}
+          >
+            <Ionicons name="share-outline" size={26} color="#fff" />
+          </TouchableOpacity>
+        ) : null}
+        {joined && Platform.OS === 'android' ? (
+          <TouchableOpacity
+            style={[styles.ctrlBtn, styles.ctrlBtnIconOnly]}
+            onPress={enterMeetingPip}
+            accessibilityRole="button"
+            accessibilityLabel="Minimize classroom"
+          >
+            <Ionicons name="contract-outline" size={26} color="#fff" />
+          </TouchableOpacity>
+        ) : null}
+        {joined ? (
+          <TouchableOpacity
+            style={[styles.ctrlBtn, styles.ctrlBtnIconOnly, styles.ctrlBtnLeave]}
+            onPress={() => confirmLeave()}
+            accessibilityRole="button"
+            accessibilityLabel="Leave session"
+          >
+            <Ionicons name="exit-outline" size={26} color="#fff" />
+          </TouchableOpacity>
+        ) : null}
+        {joined && payload?.canEndSession ? (
+          <TouchableOpacity
+            style={[styles.ctrlBtn, styles.ctrlBtnIconOnly, styles.ctrlBtnLeave]}
+            onPress={endForEveryone}
+            accessibilityRole="button"
+            accessibilityLabel="End session for everyone"
+          >
+            <Ionicons name="stop-circle-outline" size={26} color="#fff" />
+          </TouchableOpacity>
+        ) : null}
       </View>
       {joined && engineReady ? (
         <View style={[styles.controlsRow, styles.sessionToolsRow]}>
@@ -916,83 +1007,52 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
     </Modal>
   );
 
-  const renderMeetVideoSlot = (slot: { key: string; kind: 'local' } | { key: string; kind: 'remote'; uid: number }) => {
-    if (slot.kind === 'local') {
-      const localTrack =
-        livekitClientRef.current && !cameraOff ? livekitClientRef.current.getLocalVideoTrack() : null;
-      return (
-        <View style={styles.meetCellWrap}>
-          <View style={styles.meetCellAspect}>
-            {localTrack ? (
-              <VideoView style={styles.remoteTextureFill} videoTrack={localTrack} mirror />
-            ) : (
-              <View style={[styles.remoteTextureFill, styles.videoPlaceholder]}>
-                <Text style={styles.videoPlaceholderText}>Camera off</Text>
-              </View>
-            )}
-          </View>
-          {handRaisedSelf ? (
-            <View style={styles.handBadge}>
-              <Text style={styles.handBadgeText}>✋</Text>
-            </View>
-          ) : null}
-          <Text style={styles.meetCellLabel}>You</Text>
-        </View>
-      );
-    }
-    const uid = slot.uid;
-    const speakH = activeSpeakerUid === uid;
-    const remoteTrack = livekitClientRef.current ? livekitClientRef.current.getRemoteVideoTrack(uid) : null;
-    void livekitPresenceTick;
-    return (
-      <View style={styles.meetCellWrap}>
-        <View style={[styles.meetCellAspect, speakH && styles.remoteTileSpeaking]}>
-          {remoteTrack ? (
-            <VideoView style={styles.remoteTextureFill} videoTrack={remoteTrack} />
-          ) : (
-            <View style={[styles.remoteTextureFill, styles.videoPlaceholder]}>
-              <Text style={styles.videoPlaceholderText}>Camera off</Text>
-            </View>
-          )}
-        </View>
-      </View>
-    );
-  };
+  void livekitPresenceTick;
+  const client = livekitClientRef.current;
+  const hostIds = new Set(roomState?.hostUserIds ?? []);
+  const nameFor = (uid: number) => roster.find((r) => r.id === uid)?.name || `User ${uid}`;
+  const tiles: VideoTile[] = [
+    {
+      key: 'local',
+      label: 'You',
+      track: client && !cameraOff ? client.getLocalVideoTrack() : null,
+      mirror: true,
+      handRaised: Boolean(handRaisedSelf),
+    },
+    ...(joined ? remoteUids : []).map((uid) => ({
+      key: `r-${uid}`,
+      label: nameFor(uid),
+      track: client?.getRemoteVideoTrack(uid) ?? null,
+      isHost: hostIds.has(uid),
+      speaking: activeSpeakerUid === uid,
+      handRaised: handsSet.has(uid),
+    })),
+  ];
+  const screenShare = client?.getScreenShareTrack() ?? null;
 
   const videoMain =
-    payload && rtcVideoReady && engineReady ? (
-      <View style={[styles.videoContainer, styles.videoContainerRel, styles.videoContainerLandscape]}>
-        <FlatList
-          data={videoPages}
-          keyExtractor={(_, i) => `vp-${i}`}
-          horizontal
-          pagingEnabled
-          removeClippedSubviews={false}
-          extraData={`${joined}:${remoteUids.join(',')}:${activeSpeakerUid ?? ''}:${livekitPresenceTick}`}
-          showsHorizontalScrollIndicator={false}
-          style={styles.meetPager}
-          renderItem={({ item: page }) => (
-            <View style={[styles.meetPagerPage, { width: windowWidth }]}>
-              {page.map((slot) => (
-                <View key={slot.key} style={styles.meetPagerCell}>
-                  {renderMeetVideoSlot(slot)}
-                </View>
-              ))}
-              {page.length === 1 ? <View style={styles.meetPagerCell} /> : null}
-            </View>
-          )}
-        />
-      </View>
-    ) : payload && rtcVideoReady && !engineReady ? (
-      <View style={[styles.videoContainer, styles.videoContainerLandscape, styles.videoPlaceholder]}>
+    rtcVideoReady && engineReady ? (
+      <LiveVideoGrid tiles={tiles} screenShare={screenShare} />
+    ) : rtcVideoReady && !engineReady ? (
+      <View style={[styles.videoContainer, styles.videoPlaceholder]}>
         <ActivityIndicator size="large" color="#fff" />
         <Text style={styles.videoPlaceholderText}>Starting camera…</Text>
       </View>
     ) : (
-      <View style={[styles.videoContainer, styles.videoContainerLandscape, styles.videoPlaceholder]}>
+      <View style={[styles.videoContainer, styles.videoPlaceholder]}>
         <Text style={styles.videoPlaceholderText}>Video unavailable in this build.</Text>
       </View>
     );
+
+  if (inPip) {
+    // The Picture-in-Picture window is tiny: show only the shared screen or the trainer.
+    const main = tiles.find((t) => t.isHost && t.track) || tiles.find((t) => t.key !== 'local' && t.track) || tiles[0];
+    return (
+      <View style={styles.landscapeRoot}>
+        <LiveVideoGrid tiles={screenShare ? [] : [main]} screenShare={screenShare} />
+      </View>
+    );
+  }
 
   const headerSub =
     liveStage === 'preview'
@@ -1006,10 +1066,10 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
   return (
     <>
         <View style={styles.landscapeRoot}>
-          <StatusBar hidden />
+          <StatusBar style="light" />
           <View style={[styles.landscapeHeader, { paddingTop: insets.top + 6 }]}>
             <TouchableOpacity
-              onPress={() => void exitLiveToSessions()}
+              onPress={() => confirmLeave()}
               style={styles.landscapeBackBtn}
               accessibilityRole="button"
               accessibilityLabel="Back to My Sessions"
@@ -1023,6 +1083,14 @@ function LiveClassroomScreenContent({ route, navigation }: any) {
               </Text>
               <Text style={styles.landscapeHeaderSub}>{headerSub}</Text>
             </View>
+            <TouchableOpacity
+              onPress={goHome}
+              style={styles.landscapeBackBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Home"
+            >
+              <Ionicons name="home-outline" size={22} color="#e2e8f0" />
+            </TouchableOpacity>
             <View style={styles.landscapeHeaderRight}>
               {roomState?.recordingActive ? (
                 <View style={styles.recBadge} accessibilityLabel="Recording in progress">
@@ -1184,6 +1252,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(148, 163, 184, 0.35)',
   },
   flashBannerText: { color: '#f8fafc', fontSize: 14, lineHeight: 20, textAlign: 'center' },
+  ctrlBtnLeave: { backgroundColor: BRAND_RED },
   liveDockWrap: { alignItems: 'center', gap: 8 },
   sessionToolsRow: {
     flexWrap: 'wrap',

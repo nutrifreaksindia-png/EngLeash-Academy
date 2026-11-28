@@ -1278,22 +1278,46 @@ router.get('/:id/members', auth, requireRole('Admin', 'Trainer'), (req, res) => 
   res.json(members);
 });
 
+/**
+ * Admin assignment into an apply-course batch: approve the enrollment so the course shows up.
+ * No billing profile (fee schedule) is created.
+ */
+function grantDirectApplyEnrollments(batchId, studentId, adminId) {
+  const courses = db
+    .prepare(
+      `SELECT c.id FROM courses c
+       WHERE c.enrollment_type = 'apply' AND c.id IN (
+         SELECT course_id FROM batch_courses WHERE batch_id = ?
+         UNION SELECT course_id FROM batches WHERE id = ?
+       )`,
+    )
+    .all(batchId, batchId);
+  for (const { id: courseId } of courses) {
+    db.prepare(
+      `INSERT INTO course_enrollments (user_id, course_id, enrollment_type, status, requested_at, approved_at, approved_by, notes, batch_id)
+       VALUES (?, ?, 'apply', 'approved', datetime('now'), datetime('now'), ?, 'Assigned to batch by admin', ?)
+       ON CONFLICT(user_id, course_id) DO UPDATE SET
+         enrollment_type = 'apply', status = 'approved', approved_at = datetime('now'),
+         approved_by = excluded.approved_by, notes = excluded.notes, batch_id = excluded.batch_id`,
+    ).run(studentId, courseId, adminId, batchId);
+  }
+}
+
 router.post('/:id/members', auth, requireRole('Admin'), (req, res) => {
   const batchId = Number(req.params.id);
   const studentId = Number(req.body.studentId);
   if (!studentId) return res.status(400).json({ error: 'studentId is required' });
-  if (batchHasApplyCourses(batchId)) {
-    return res.status(409).json({
-      error: 'Add learners to apply-course batches through the paid application approval flow, not the batch roster editor.',
-    });
-  }
   const user = db.prepare("SELECT id, role FROM users WHERE id = ? AND role IN ('Student','Lab')").get(studentId);
   if (!user) return res.status(404).json({ error: 'Student/Lab user not found' });
-  db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(batchId, studentId);
+  const applyBatch = batchHasApplyCourses(batchId);
+  db.transaction(() => {
+    db.prepare('INSERT OR IGNORE INTO batch_members (batch_id, student_id) VALUES (?, ?)').run(batchId, studentId);
+    if (applyBatch) grantDirectApplyEnrollments(batchId, studentId, req.user.id);
+  })();
   try {
     syncBatchMemberCourseAccess(batchId, studentId);
-  } catch (_) {
-    /* best-effort */
+  } catch (e) {
+    console.error('syncBatchMemberCourseAccess', batchId, studentId, e);
   }
   res.status(201).json({ ok: true });
 });

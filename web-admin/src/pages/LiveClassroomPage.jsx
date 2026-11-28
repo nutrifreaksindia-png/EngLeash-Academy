@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Track } from 'livekit-client';
+import ScreenShareStage from '../live/ScreenShareStage';
 import {
   attachLiveKitVideo,
   connectLiveKitRoom,
@@ -155,6 +156,7 @@ export default function LiveClassroomPage({ token }) {
   const [activeSpeakerUid, setActiveSpeakerUid] = useState(null);
   const [participantPanelOpen, setParticipantPanelOpen] = useState(false);
   const [roomState, setRoomState] = useState(null);
+  const [screenSharing, setScreenSharing] = useState(false);
   /** Re-render participant panel when remotes change (panel reads clientRef). */
   const [rtcPresenceTick, setRtcPresenceTick] = useState(0);
   const [chatMessages, setChatMessages] = useState([]);
@@ -1078,6 +1080,31 @@ export default function LiveClassroomPage({ token }) {
   }, [id, teardown, token, readyToEnter, sessionRunId]);
 
   const isPublisher = joinMeta?.role === 'publisher';
+  const handRaisedSelf = Boolean(roomState?.handRaisedUserIds?.includes(Number(joinMeta?.uid)));
+
+  const toggleScreenShare = async () => {
+    const lp = clientRef.current?.room?.localParticipant;
+    if (!lp) return;
+    try {
+      await lp.setScreenShareEnabled(!lp.isScreenShareEnabled, { audio: true });
+    } catch (e) {
+      // Dismissing the browser's picker is not an error worth showing.
+      if (e?.name !== 'NotAllowedError') {
+        setHint(e?.message || 'Could not share the screen.');
+        window.setTimeout(() => setHint(''), 4000);
+      }
+    }
+    setScreenSharing(Boolean(lp.isScreenShareEnabled));
+  };
+
+  const toggleHand = async () => {
+    try {
+      await liveApi(`/live/sessions/${id}/${handRaisedSelf ? 'hand/clear' : 'hand'}`, token, { method: 'POST', body: '{}' });
+    } catch (e) {
+      setHint(e?.message || 'Could not update your hand.');
+      window.setTimeout(() => setHint(''), 4000);
+    }
+  };
   const canEndSession = joinMeta?.canEndSession === true;
   const showStage = phase === 'inRoom' || phase === 'leaving';
   const showPreJoin = phase === 'preJoin';
@@ -1407,6 +1434,7 @@ export default function LiveClassroomPage({ token }) {
               aria-labelledby="live-remote-label"
               aria-label="Live video"
             >
+              <ScreenShareStage clientRef={clientRef} />
               <div className={`liveMeetGrid${soloInMeeting ? ' liveMeetGrid--solo' : ''}`}>
                 <div className={`liveMeetCell liveMeetCell--local${soloInMeeting ? ' liveMeetCell--soloFill' : ''}`}>
                   <div className="liveLocalVideoShell">
@@ -1440,7 +1468,8 @@ export default function LiveClassroomPage({ token }) {
                 </div>
                 {!soloInMeeting ? <div ref={galleryRemoteSlotRef} className="liveMeetGridRemotes" /> : null}
               </div>
-              {phase === 'inRoom' && remotePeerCount >= 1 && remoteVideoCount === 0 && participants.length > 1 ? (
+              {phase === 'inRoom' && remotePeerCount >= 1 && remoteVideoCount === 0 && participants.length > 1 &&
+              !clientRef.current?.room?.localParticipant?.isScreenShareEnabled ? (
                 <div className="liveRemoteEmpty liveRemoteEmptyOverlay" aria-live="polite">
                   <p className="liveRemoteEmptyTitle">Waiting for video</p>
                   <p className="liveRemoteEmptySub">Others are in the call but have not turned their camera on yet.</p>
@@ -1655,6 +1684,34 @@ export default function LiveClassroomPage({ token }) {
                     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                   </LiveSvg>
                 </button>
+                {joinMeta?.canEndSession && typeof navigator.mediaDevices?.getDisplayMedia === 'function' ? (
+                  <button
+                    type="button"
+                    className={`liveIconBtn${screenSharing && clientRef.current?.room?.localParticipant?.isScreenShareEnabled ? ' liveIconBtn--recordOn' : ''}`}
+                    onClick={() => void toggleScreenShare()}
+                    aria-label="Share screen"
+                    title="Share screen"
+                    disabled={phase === 'leaving'}
+                  >
+                    <LiveSvg>
+                      <rect x="2" y="3" width="20" height="14" rx="2" />
+                      <path d="M8 21h8M12 17v4M9 10l3-3 3 3M12 7v6" />
+                    </LiveSvg>
+                  </button>
+                ) : null}
+                {!joinMeta?.canEndSession ? (
+                  <button
+                    type="button"
+                    className={`liveIconBtn${handRaisedSelf ? ' liveIconBtn--recordOn' : ''}`}
+                    onClick={() => void toggleHand()}
+                    aria-pressed={handRaisedSelf}
+                    aria-label={handRaisedSelf ? 'Lower hand' : 'Raise hand'}
+                    title={handRaisedSelf ? 'Lower hand' : 'Raise hand'}
+                    disabled={phase === 'leaving'}
+                  >
+                    <span aria-hidden>✋</span>
+                  </button>
+                ) : null}
                 <div className="liveReactionMenuWrap" ref={reactionMenuRef}>
                   <button
                     type="button"
